@@ -13,8 +13,10 @@ from procworks import (
     connect_data,
     create_empty_schema,
     delete_data_element,
+    disconnect_data,
     parallel_insert,
     register_connector,
+    release,
     reset_data_element_source,
     serial_insert,
     update_data_element,
@@ -278,3 +280,109 @@ def test_reset_data_element_source_clears_external_binding():
     assert element.select is None
     assert element.write is None
     assert validate(schema) == []
+
+
+def test_disconnect_data_removes_read_binding():
+    """A read binding can be removed again; the model stays correct (inverse
+    of connect_data)."""
+    schema = create_empty_schema("Disc", schema_id="disc-ok")
+    schema = serial_insert(schema, "Schreiben", after_node_id="start")
+    writer = _activity_ids(schema, "Schreiben")[0]
+    schema = serial_insert(schema, "Lesen", after_node_id=writer)
+    reader = _activity_ids(schema, "Lesen")[0]
+    schema = add_data_element(schema, "x", DataType.INTEGER, element_id="x")
+    schema = connect_data(schema, writer, "x", AccessMode.WRITE)
+    schema = connect_data(schema, reader, "x", AccessMode.READ)
+
+    schema = disconnect_data(schema, reader, "x")
+    assert not any(
+        a.node_id == reader and a.element_id == "x" for a in schema.data_accesses
+    )
+    assert validate(schema) == []
+
+
+def test_disconnect_data_rejects_removing_writer_needed_by_mandatory_read():
+    """Removing the sole writer of a mandatory read leaves that read without a
+    source -> rejected with D1, schema unchanged (validate-before-commit)."""
+    schema = create_empty_schema("Disc", schema_id="disc-d1")
+    schema = serial_insert(schema, "Schreiben", after_node_id="start")
+    writer = _activity_ids(schema, "Schreiben")[0]
+    schema = serial_insert(schema, "Lesen", after_node_id=writer)
+    reader = _activity_ids(schema, "Lesen")[0]
+    schema = add_data_element(schema, "x", DataType.INTEGER, element_id="x")
+    schema = connect_data(schema, writer, "x", AccessMode.WRITE)
+    schema = connect_data(schema, reader, "x", AccessMode.READ, mandatory=True)
+
+    with pytest.raises(CorrectnessError) as exc:
+        disconnect_data(schema, writer, "x")
+    assert any(f.rule == "D1" for f in exc.value.findings)
+    # The original schema object is untouched: the writer access is still there.
+    assert any(
+        a.node_id == writer and a.element_id == "x" for a in schema.data_accesses
+    )
+
+
+def test_disconnect_data_unknown_binding_raises():
+    schema = create_empty_schema("Disc", schema_id="disc-op")
+    schema = serial_insert(schema, "Schreiben", after_node_id="start")
+    act = _activity_ids(schema, "Schreiben")[0]
+    schema = add_data_element(schema, "x", DataType.INTEGER, element_id="x")
+
+    with pytest.raises(CorrectnessError) as exc:
+        disconnect_data(schema, act, "x")
+    assert any(f.rule == "OP" for f in exc.value.findings)
+
+
+def test_disconnect_data_mode_selective_keeps_other_direction():
+    """With a mode given, only that direction is removed; the other access of the
+    same element on the node survives."""
+    schema = create_empty_schema("Disc", schema_id="disc-mode")
+    schema = serial_insert(schema, "Schreiben", after_node_id="start")
+    writer = _activity_ids(schema, "Schreiben")[0]
+    schema = serial_insert(schema, "Beides", after_node_id=writer)
+    both = _activity_ids(schema, "Beides")[0]
+    schema = add_data_element(schema, "x", DataType.INTEGER, element_id="x")
+    schema = connect_data(schema, writer, "x", AccessMode.WRITE)
+    schema = connect_data(schema, both, "x", AccessMode.READ)
+    schema = connect_data(schema, both, "x", AccessMode.WRITE)
+
+    schema = disconnect_data(schema, both, "x", AccessMode.READ)
+    remaining = [
+        a.mode for a in schema.data_accesses if a.node_id == both and a.element_id == "x"
+    ]
+    assert remaining == [AccessMode.WRITE]
+    assert validate(schema) == []
+
+
+def test_disconnect_data_mode_mismatch_leaves_binding():
+    """A mode that does not match any access removes nothing and is reported as
+    an OP precondition, so the existing binding is never touched silently."""
+    schema = create_empty_schema("Disc", schema_id="disc-mm")
+    schema = serial_insert(schema, "Schreiben", after_node_id="start")
+    act = _activity_ids(schema, "Schreiben")[0]
+    schema = add_data_element(schema, "x", DataType.INTEGER, element_id="x")
+    schema = connect_data(schema, act, "x", AccessMode.WRITE)
+
+    with pytest.raises(CorrectnessError) as exc:
+        disconnect_data(schema, act, "x", AccessMode.READ)
+    assert any(f.rule == "OP" for f in exc.value.findings)
+    assert any(
+        a.node_id == act and a.element_id == "x" and a.mode is AccessMode.WRITE
+        for a in schema.data_accesses
+    )
+
+
+def test_disconnect_data_rejected_on_released_schema():
+    """A released schema is immutable: disconnecting a binding is rejected (R0)
+    and the schema is unchanged -- stability of a live process is never at risk."""
+    schema = create_empty_schema("Disc", schema_id="disc-rel")
+    schema = serial_insert(schema, "Schreiben", after_node_id="start")
+    act = _activity_ids(schema, "Schreiben")[0]
+    schema = add_data_element(schema, "x", DataType.INTEGER, element_id="x")
+    schema = connect_data(schema, act, "x", AccessMode.WRITE)
+    schema = release(schema)
+
+    with pytest.raises(CorrectnessError) as exc:
+        disconnect_data(schema, act, "x")
+    assert any(f.rule == "R0" for f in exc.value.findings)
+    assert any(a.element_id == "x" for a in schema.data_accesses)

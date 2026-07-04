@@ -1172,6 +1172,69 @@ def test_delete_data_element_rejected_when_discriminator_via_api() -> None:
     assert resp.status_code == 422
 
 
+def test_delete_data_access_via_api() -> None:
+    sid = client.post("/schemas", json={"name": "UnbindData"}).json()["id"]
+    writer = client.post(
+        f"/schemas/{sid}/serial-insert",
+        json={"label": "Erfassen", "after_node_id": "start"},
+    ).json()
+    writer_id = next(n["id"] for n in writer["nodes"].values() if n["label"] == "Erfassen")
+    reader = client.post(
+        f"/schemas/{sid}/serial-insert",
+        json={"label": "Pruefen", "after_node_id": writer_id},
+    ).json()
+    reader_id = next(n["id"] for n in reader["nodes"].values() if n["label"] == "Pruefen")
+    client.post(
+        f"/schemas/{sid}/data-elements",
+        json={"name": "x", "data_type": "INTEGER", "element_id": "x"},
+    )
+    client.post(
+        f"/schemas/{sid}/data-access",
+        json={"node_id": writer_id, "element_id": "x", "mode": "WRITE"},
+    )
+    client.post(
+        f"/schemas/{sid}/data-access",
+        json={"node_id": reader_id, "element_id": "x", "mode": "READ", "mandatory": True},
+    )
+
+    # Removing the writer behind the mandatory read is rejected (D1), 422.
+    resp = client.delete(f"/schemas/{sid}/data-access/{writer_id}/x")
+    assert resp.status_code == 422
+    assert "D1" in {f["rule"] for f in resp.json()["detail"]["findings"]}
+
+    # Removing the read first is fine; then the write can be removed too.
+    resp = client.delete(f"/schemas/{sid}/data-access/{reader_id}/x")
+    assert resp.status_code == 200
+    resp = client.delete(f"/schemas/{sid}/data-access/{writer_id}/x")
+    assert resp.status_code == 200
+    schema = client.get(f"/schemas/{sid}").json()
+    assert schema["data_accesses"] == []
+
+
+def test_delete_staff_rule_via_api() -> None:
+    sid = client.post("/schemas", json={"name": "UnbindBZR"}).json()["id"]
+    schema = client.post(
+        f"/schemas/{sid}/serial-insert",
+        json={"label": "Bearbeiten", "after_node_id": "start"},
+    ).json()
+    act_id = next(n["id"] for n in schema["nodes"].values() if n["label"] == "Bearbeiten")
+    client.post(f"/schemas/{sid}/roles", json={"name": "Sachbearbeiter", "role_id": "sb"})
+    client.post(
+        f"/schemas/{sid}/agents",
+        json={"name": "Erika", "role_ids": ["sb"], "agent_id": "a1"},
+    )
+    client.post(
+        f"/schemas/{sid}/staff-rule",
+        json={"node_id": act_id, "rule": {"kind": "ROLE", "ref": "sb"}},
+    )
+
+    resp = client.delete(f"/schemas/{sid}/staff-rule/{act_id}")
+    assert resp.status_code == 200
+    assert act_id not in resp.json()["staff_rules"]
+
+    # Removing a rule that no longer exists is rejected (OP), 422.
+    resp = client.delete(f"/schemas/{sid}/staff-rule/{act_id}")
+    assert resp.status_code == 422
 
 
 
@@ -1180,3 +1243,26 @@ def test_delete_data_element_rejected_when_discriminator_via_api() -> None:
 
 
 
+
+
+
+
+def test_delete_service_via_api() -> None:
+    sid = client.post("/schemas", json={"name": "UnbindService"}).json()["id"]
+    schema = client.post(
+        f"/schemas/{sid}/serial-insert",
+        json={"label": "Erfassen", "after_node_id": "start"},
+    ).json()
+    act_id = next(n["id"] for n in schema["nodes"].values() if n["label"] == "Erfassen")
+    client.post(
+        f"/schemas/{sid}/service",
+        json={"node_id": act_id, "name": "Formular", "automatic": False},
+    )
+
+    resp = client.delete(f"/schemas/{sid}/service/{act_id}")
+    assert resp.status_code == 200
+    assert act_id not in resp.json()["service_bindings"]
+
+    # Removing a service that no longer exists is rejected (OP), 422.
+    resp = client.delete(f"/schemas/{sid}/service/{act_id}")
+    assert resp.status_code == 422

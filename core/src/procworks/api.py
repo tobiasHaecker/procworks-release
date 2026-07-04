@@ -1332,6 +1332,26 @@ def post_connect_data(schema_id: str, req: ConnectDataRequest) -> ProcessSchema:
     )
 
 
+@app.delete(
+    "/schemas/{schema_id}/data-access/{node_id}/{element_id}",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def delete_data_access(
+    schema_id: str, node_id: str, element_id: str, mode: AccessMode | None = None
+) -> ProcessSchema:
+    """Remove a data binding of ``element_id`` from ``node_id``.
+
+    Without ``mode`` every access of the element on that node is removed; with
+    ``mode`` only that direction. The core re-checks D1-D4 (e.g. removing the
+    sole writer behind a mandatory read elsewhere is rejected with HTTP 422).
+    """
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.disconnect_data(schema, node_id, element_id, mode)
+    )
+
+
 @app.post(
     "/schemas/{schema_id}/nodes/{node_id}/form",
     response_model=ProcessSchema,
@@ -1749,6 +1769,22 @@ def post_assign_service(schema_id: str, req: AssignServiceRequest) -> ProcessSch
     )
 
 
+@app.delete(
+    "/schemas/{schema_id}/service/{node_id}",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def delete_service(schema_id: str, node_id: str) -> ProcessSchema:
+    """Remove the executing service (and its automation config) from ``node_id``.
+
+    Validated like every other change (No-Bypass); a step without a service is
+    well-formed in the draft (B1 is enforced at release). Returns HTTP 422 should
+    the removal ever leave the model incorrect, otherwise the updated schema.
+    """
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(lambda: ops.unassign_service(schema, node_id))
+
+
 @app.post(
     "/schemas/{schema_id}/automation", response_model=ProcessSchema, dependencies=[_model]
 )
@@ -1774,6 +1810,21 @@ def post_set_automation(schema_id: str, req: SetAutomationRequest) -> ProcessSch
 def post_assign_staff_rule(schema_id: str, req: AssignStaffRuleRequest) -> ProcessSchema:
     schema = _get_or_404(schema_id)
     return _commit_or_422(lambda: ops.assign_staff_rule(schema, req.node_id, req.rule))
+
+
+@app.delete(
+    "/schemas/{schema_id}/staff-rule/{node_id}",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def delete_staff_rule(schema_id: str, node_id: str) -> ProcessSchema:
+    """Remove the staff-assignment rule (BZR) from ``node_id``.
+
+    Validated like every other change (No-Bypass); returns HTTP 422 should the
+    removal ever leave the model incorrect, otherwise the updated schema.
+    """
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(lambda: ops.clear_staff_rule(schema, node_id))
 
 
 @app.post(

@@ -11,6 +11,7 @@ from procworks import (
     add_role,
     assign_service,
     assign_staff_rule,
+    clear_staff_rule,
     create_empty_schema,
     parallel_insert,
     release,
@@ -248,3 +249,45 @@ def test_update_agent_rejects_role_removal_breaking_staff_rule():
     with pytest.raises(CorrectnessError) as exc:
         update_agent(schema, "a1", role_ids=[])
     assert any(f.rule == "Z2" for f in exc.value.findings)
+
+
+def test_clear_staff_rule_removes_rule():
+    """A staff rule can be removed again; the draft stays correct (inverse of
+    assign_staff_rule -- B2 'every interactive step has a worker' is only
+    enforced at release, so a rule-less draft node is well-formed)."""
+    schema = create_empty_schema("Clear", schema_id="clear-ok")
+    schema = serial_insert(schema, "Bearbeiten", after_node_id="start")
+    act = _activity_ids(schema, "Bearbeiten")[0]
+    schema = add_role(schema, "Sachbearbeiter", role_id="sb")
+    schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
+    schema = assign_staff_rule(schema, act, _role_rule("sb"))
+
+    schema = clear_staff_rule(schema, act)
+    assert act not in schema.staff_rules
+    assert validate(schema) == []
+
+
+def test_clear_staff_rule_without_rule_raises():
+    schema = create_empty_schema("Clear", schema_id="clear-op")
+    schema = serial_insert(schema, "Bearbeiten", after_node_id="start")
+    act = _activity_ids(schema, "Bearbeiten")[0]
+    with pytest.raises(CorrectnessError) as exc:
+        clear_staff_rule(schema, act)
+    assert any(f.rule == "OP" for f in exc.value.findings)
+
+
+def test_clear_staff_rule_rejected_on_released_schema():
+    """A released schema is immutable: clearing a BZR is rejected (R0) and the
+    rule stays -- a live process keeps its worker assignment."""
+    schema = create_empty_schema("Clear", schema_id="clear-rel")
+    schema = serial_insert(schema, "Bearbeiten", after_node_id="start")
+    act = _activity_ids(schema, "Bearbeiten")[0]
+    schema = add_role(schema, "Sachbearbeiter", role_id="sb")
+    schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
+    schema = assign_staff_rule(schema, act, _role_rule("sb"))
+    schema = release(schema)
+
+    with pytest.raises(CorrectnessError) as exc:
+        clear_staff_rule(schema, act)
+    assert any(f.rule == "R0" for f in exc.value.findings)
+    assert act in schema.staff_rules

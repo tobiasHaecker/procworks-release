@@ -22,7 +22,9 @@ from procworks import (
     add_data_element,
     assign_service,
     create_empty_schema,
+    release,
     serial_insert,
+    unassign_service,
     validate,
 )
 from procworks.validator import CorrectnessError
@@ -163,3 +165,35 @@ def test_free_form_binding_without_template_stays_valid() -> None:
     schema = assign_service(schema, act, "Freie Bindung", automatic=True)
     assert schema.service_bindings[act].template_id is None
     assert validate(schema) == []
+
+
+def test_unassign_service_removes_binding() -> None:
+    """A service can be removed again; the draft stays correct (inverse of
+    assign_service -- B1 'every step has a service' is only enforced at
+    release, so a service-less draft node is well-formed)."""
+    schema, act = _schema_with_activity()
+    schema = assign_service(schema, act, "Freie Bindung")
+    assert act in schema.service_bindings
+
+    schema = unassign_service(schema, act)
+    assert act not in schema.service_bindings
+    assert validate(schema) == []
+
+
+def test_unassign_service_without_binding_raises() -> None:
+    schema, act = _schema_with_activity()
+    with pytest.raises(CorrectnessError) as exc:
+        unassign_service(schema, act)
+    assert any(f.rule == "OP" for f in exc.value.findings)
+
+
+def test_unassign_service_rejected_on_released_schema() -> None:
+    """A released schema is immutable: removing a service is rejected (R0) and
+    the binding stays -- a live process keeps its executor."""
+    schema, act = _schema_with_activity()
+    schema = assign_service(schema, act, "Freie Bindung")
+    schema = release(schema)
+    with pytest.raises(CorrectnessError) as exc:
+        unassign_service(schema, act)
+    assert any(f.rule == "R0" for f in exc.value.findings)
+    assert act in schema.service_bindings

@@ -14,6 +14,7 @@ from procworks import (
     create_empty_schema,
     delete_form,
     delete_node,
+    disconnect_data,
     export_bpmn,
     import_bpmn,
     new_revision,
@@ -244,3 +245,25 @@ def test_bpmn_round_trip_preserves_form():
     assert form.title == "Erfassung"
     assert form.fields[0].widget is WidgetKind.DROPDOWN
     assert form.fields[0].options == ["A", "B"]
+
+
+def test_disconnect_data_removes_backing_mask_field():
+    """Removing a data binding also drops the input-mask field it backed, so
+    mask and data flow stay consistent (U3). A mask left empty is removed."""
+    schema, node = _linear_with_element("disc-mask")
+    schema = set_form(
+        schema,
+        node,
+        title="Antrag",
+        fields=[FormFieldSpec(element_id="name", widget=WidgetKind.TEXT)],
+    )
+    assert node in schema.forms
+
+    schema = disconnect_data(schema, node, "name")
+
+    assert not any(
+        a.node_id == node and a.element_id == "name" for a in schema.data_accesses
+    )
+    # The only field vanished, so the whole mask is gone.
+    assert node not in schema.forms
+    assert validate(schema) == []

@@ -59,6 +59,12 @@ const state = {
   // exclusive; cleared on a manual nav click. Not persisted.
   dataFocusNode: null,
   staffFocusNode: null,
+  // Modellieren-Seite: ein in der Bindungs-Palette angeklicktes Datenelement,
+  // dessen Herkunft (Schreib- -> Lese-Knoten) im Kontrollfluss als gestrichelte
+  // Linien hervorgehoben wird. Rein visuell, nicht persistiert.
+  dataElemFocus: null,
+  // Aktiver Tab der rechten Bindungs-Palette ("data" | "res"). Nicht persistiert.
+  paletteTab: "data",
   // Resource view: clicking an org unit (in the org chart or the Abteilungen
   // tree) highlights that unit plus the agents that belong to it -- including
   // the unit's supervisor -- in the Agenten table. orgFocusUnit is the selected
@@ -281,6 +287,53 @@ function openModal(title, bodyNode, onConfirm, confirmLabel) {
 // Graph-Layout (Longest-Path-Layering, blockstrukturierter DAG)
 // --------------------------------------------------------------------------
 
+// Chip-Metrik der Knoten-Badges. Wird von renderNodeBadges (Zeichnen) UND von
+// layoutSchema (Platz reservieren) verwendet, damit der reservierte vertikale
+// Platz exakt zur gezeichneten Badge-Hoehe passt.
+const CHIP_H = 16, CHIP_GAP = 3, CHIP_TOP = 5, CHIP_BOTTOM = 4, CHIP_PADX = 7, CHIP_CH = 6;
+
+// Reine Chip-Modelle eines Knotens: je Datenbindung ein benannter Chip plus –
+// falls vorhanden – ein Bearbeiter-Chip. Ab dem dritten Datenelement wird zu
+// einem Sammel-Chip verdichtet. Von Zeichnung und Layout gemeinsam genutzt,
+// damit beide dieselbe Anzahl/Reihenfolge sehen (kein Auseinanderdriften).
+function nodeChipModels(schema, node) {
+  if (node.type !== NODE_TYPE.ACTIVITY && node.type !== NODE_TYPE.SUBPROCESS) return [];
+  const accesses = (schema.data_accesses || []).filter((a) => a.node_id === node.id);
+  const rule = (schema.staff_rules || {})[node.id];
+  const sym = (mode) => (mode === "WRITE" ? "✎" : mode === "READ_WRITE" ? "⇄" : "◉");
+  const chips = [];
+  if (accesses.length) {
+    const named = accesses.slice(0, accesses.length <= 3 ? 3 : 2);
+    named.forEach((a) => {
+      const e = schema.data_elements[a.element_id];
+      const name = e ? e.name : a.element_id;
+      chips.push({
+        kind: "data",
+        label: sym(a.mode) + " " + truncate(name, 16),
+        title: name + " (" + a.mode + (a.mandatory ? ", Pflicht" : ", optional") + ")",
+      });
+    });
+    const rest = accesses.length - named.length;
+    if (rest > 0) {
+      const detail = accesses.slice(named.length).map((a) => {
+        const e = schema.data_elements[a.element_id];
+        return (e ? e.name : a.element_id) + " (" + a.mode + ")";
+      }).join(", ");
+      chips.push({ kind: "data", label: "+" + rest + " Daten", title: "Weitere Datenbindungen: " + detail });
+    }
+  }
+  if (rule) chips.push({ kind: "staff", label: "Bearbeiter", title: describeRule(rule) });
+  return chips;
+}
+
+// Vertikaler Platz, den der untereinander gestapelte Badge-Block eines Knotens
+// unter seinem Rechteck einnimmt (0 ohne Chips). layoutSchema addiert dies auf
+// die Knotenhoehe, damit Badges nie in den naechsten Knoten ragen.
+function nodeBadgeStackHeight(schema, node) {
+  const n = nodeChipModels(schema, node).length;
+  return n ? CHIP_TOP + n * CHIP_H + (n - 1) * CHIP_GAP + CHIP_BOTTOM : 0;
+}
+
 function layoutSchema(schema) {
   const ids = Object.keys(schema.nodes);
   const inc = {}, out = {};
@@ -304,15 +357,24 @@ function layoutSchema(schema) {
   ids.forEach((id) => { (cols[depth[id]] = cols[depth[id]] || []).push(id); });
   const colKeys = Object.keys(cols).map(Number).sort((a, b) => a - b);
   const NW = 144, NH = 56, HGAP = 74, VGAP = 26, PAD = 32;
-  const maxRows = Math.max(1, ...colKeys.map((c) => cols[c].length));
-  const height = PAD * 2 + maxRows * NH + (maxRows - 1) * VGAP;
+  // Effektive Hoehe je Knoten = Rechteck + darunter gestapelter Badge-Block.
+  // Dadurch wird eine Spalte bei Bedarf auseinandergezogen, sodass die
+  // Datenbindungs-/Bearbeiter-Chips nie den naechsten Knoten ueberlagern.
+  const effH = {};
+  ids.forEach((id) => { effH[id] = NH + nodeBadgeStackHeight(schema, schema.nodes[id]); });
+  const colTotal = {};
+  colKeys.forEach((c) => {
+    const list = cols[c];
+    colTotal[c] = list.reduce((s, id) => s + effH[id], 0) + VGAP * Math.max(0, list.length - 1);
+  });
+  const height = PAD * 2 + Math.max(NH, ...colKeys.map((c) => colTotal[c]));
   const pos = {};
   colKeys.forEach((c, ci) => {
     const list = cols[c];
-    const colHeight = list.length * NH + (list.length - 1) * VGAP;
-    const top = PAD + (height - PAD * 2 - colHeight) / 2;
-    list.forEach((id, ri) => {
-      pos[id] = { x: PAD + ci * (NW + HGAP), y: top + ri * (NH + VGAP), w: NW, h: NH };
+    let y = PAD + (height - PAD * 2 - colTotal[c]) / 2;
+    list.forEach((id) => {
+      pos[id] = { x: PAD + ci * (NW + HGAP), y, w: NW, h: NH };
+      y += effH[id] + VGAP;
     });
   });
   const width = PAD * 2 + colKeys.length * NW + (colKeys.length - 1) * HGAP;
@@ -335,13 +397,59 @@ function nodeCaption(node) {
     XOR_SPLIT: "XOR \u25B6", XOR_JOIN: "\u25B6 XOR", SUBPROCESS: "Teilprozess" }[node.type] || node.type;
 }
 
+// Berechnet die Datenherkunft-Linien (Schreib- -> Lese-Knoten) fuer die
+// gestrichelte Ueberlagerung im Kontrollfluss. ``focus`` steuert den Umfang:
+//  * ``dataElemFocus`` gesetzt -> alle Lesestellen genau dieses Datenelements
+//    werden mit ihren Schreibquellen verbunden (Palette-Klick).
+//  * sonst ``selectedNode`` gesetzt -> es werden nur die vom gewaehlten Knoten
+//    *gelesenen* Groessen zu ihren Schreibquellen aufgeloest.
+// Rueckgabe: Liste eindeutiger {from, to, label}. Rein lesend; veraendert nie
+// Modell oder Backend (die Korrektheit von D1 stellt der Kern sicher).
+function computeProvenance(schema, focus) {
+  focus = focus || {};
+  const accesses = schema.data_accesses || [];
+  const isRead = (m) => m === "READ" || m === "READ_WRITE";
+  const isWrite = (m) => m === "WRITE" || m === "READ_WRITE";
+  // Zu erklaerende (Element, Lese-Knoten)-Paare bestimmen.
+  let reads = [];
+  if (focus.dataElemFocus) {
+    reads = accesses
+      .filter((a) => a.element_id === focus.dataElemFocus && isRead(a.mode))
+      .map((a) => ({ element_id: a.element_id, node_id: a.node_id }));
+  } else if (focus.selectedNode) {
+    reads = accesses
+      .filter((a) => a.node_id === focus.selectedNode && isRead(a.mode))
+      .map((a) => ({ element_id: a.element_id, node_id: a.node_id }));
+  }
+  const seen = new Set();
+  const lines = [];
+  reads.forEach((r) => {
+    const elem = schema.data_elements[r.element_id];
+    const label = elem ? elem.name : r.element_id;
+    accesses
+      .filter((w) => w.element_id === r.element_id && isWrite(w.mode) && w.node_id !== r.node_id)
+      .forEach((w) => {
+        const key = `${w.node_id}->${r.node_id}:${r.element_id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        lines.push({ from: w.node_id, to: r.node_id, label: truncate(label, 14) });
+      });
+  });
+  return lines;
+}
+
 function renderGraph(schema, opts) {
   opts = opts || {};
   const L = layoutSchema(schema);
   const root = svg("svg", { class: "graph", width: L.width, height: L.height, viewBox: `0 0 ${L.width} ${L.height}` });
   const defs = svg("defs", null,
     svg("marker", { id: "arrow", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" },
-      svg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#6b7794" })));
+      svg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#6b7794" })),
+    // Eigener (bernsteinfarbener) Pfeilkopf fuer die gestrichelten
+    // Datenherkunft-Linien (Schreib- -> Lese-Knoten), damit sie sich klar vom
+    // Kontrollfluss abheben.
+    svg("marker", { id: "arrow-prov", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" },
+      svg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#e0a03a" })));
   root.appendChild(defs);
 
   // Kanten
@@ -369,6 +477,25 @@ function renderGraph(schema, opts) {
     }
   });
 
+  // Datenherkunft (gestrichelt): fuer jede gelesene Groesse ein Bogen vom
+  // Schreib- zum Lese-Knoten. Rein visuell; ``opts.provenance`` wird von der
+  // Modellieren-Sicht aus ``computeProvenance`` gefuellt. Ein leicht nach oben
+  // versetzter Bogen vermeidet Deckung mit den Kontrollflusskanten.
+  (opts.provenance || []).forEach((pv) => {
+    const a = L.pos[pv.from], b = L.pos[pv.to];
+    if (!a || !b) return;
+    const x1 = a.x + a.w / 2, y1 = a.y, x2 = b.x + b.w / 2, y2 = b.y;
+    const lift = 34 + Math.min(60, Math.abs(x2 - x1) * 0.12);
+    const my = Math.min(y1, y2) - lift;
+    root.appendChild(svg("path", {
+      class: "gprov", "marker-end": "url(#arrow-prov)",
+      d: `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}` }));
+    if (pv.label) {
+      root.appendChild(svg("text", { class: "gprov-txt", x: (x1 + x2) / 2, y: my + 4, "text-anchor": "middle" },
+        document.createTextNode(pv.label)));
+    }
+  });
+
   // Knoten
   Object.entries(L.pos).forEach(([id, p]) => {
     const node = schema.nodes[id];
@@ -392,55 +519,37 @@ function renderGraph(schema, opts) {
   return wrap;
 }
 
-// Draw small "chips" straddling the bottom edge of an activity node that show
-// whether it has data bindings and/or a worker (BZR) assignment. In the
-// modelling control-flow view the chips are clickable and jump to the data /
-// resource view with that node's bindings highlighted (opts.onOpenData /
-// opts.onOpenStaff); elsewhere (e.g. the live process map) they are static
-// indicators. Purely visual -- never touches the model or backend.
+// Zeichnet die Knoten-Badges (Datenbindungen + Bearbeiter) als **vertikalen
+// Stapel** UNTER dem Knoten. Jeder Chip ist auf die Knotenbreite gedeckelt und
+// zentriert, sodass er nie seitlich in einen Nachbarknoten ragt; den vertikalen
+// Platz reserviert layoutSchema ueber nodeBadgeStackHeight. In der Modellieren-
+// Sicht sind die Chips klickbar (Sprung in die Daten-/Ressourcensicht), sonst
+// rein informativ. Rein visuell -- veraendert nie Modell oder Backend.
 function renderNodeBadges(root, schema, node, p, opts) {
-  if (node.type !== NODE_TYPE.ACTIVITY && node.type !== NODE_TYPE.SUBPROCESS) return;
-  const accesses = (schema.data_accesses || []).filter((a) => a.node_id === node.id);
-  const rule = (schema.staff_rules || {})[node.id];
-  const chips = [];
-  if (accesses.length) {
-    const detail = accesses.map((a) => {
-      const e = schema.data_elements[a.element_id];
-      return (e ? e.name : a.element_id) + " (" + a.mode + ")";
-    }).join(", ");
-    chips.push({
-      kind: "data",
-      label: "Daten " + accesses.length,
-      title: "Datenbindungen: " + detail + (opts.onOpenData ? "\u2002\u2013 klicken \u00F6ffnet die Datensicht" : ""),
-      onClick: opts.onOpenData ? () => opts.onOpenData(node.id) : null,
-    });
-  }
-  if (rule) {
-    chips.push({
-      kind: "staff",
-      label: "Bearbeiter",
-      title: describeRule(rule) + (opts.onOpenStaff ? "\u2002\u2013 klicken \u00F6ffnet die Bearbeiterzuordnung" : ""),
-      onClick: opts.onOpenStaff ? () => opts.onOpenStaff(node.id) : null,
-    });
-  }
+  const chips = nodeChipModels(schema, node);
   if (!chips.length) return;
-  const PADX = 7, GAP = 6, CH = 6;
-  const widths = chips.map((c) => Math.round(c.label.length * CH) + PADX * 2);
-  const total = widths.reduce((s, w) => s + w, 0) + GAP * (chips.length - 1);
-  let cx = p.x + (p.w - total) / 2;
-  const y = p.y + p.h - 8;
-  chips.forEach((chip, i) => {
-    const w = widths[i];
+  let y = p.y + p.h + CHIP_TOP;
+  chips.forEach((chip) => {
+    const onOpen = chip.kind === "data" ? opts.onOpenData : opts.onOpenStaff;
+    // Chipbreite auf die Knotenbreite deckeln -> ragt nie in Nachbarknoten;
+    // die Beschriftung wird passend zur (ggf. gedeckelten) Breite gekuerzt.
+    const rawW = Math.round(chip.label.length * CHIP_CH) + CHIP_PADX * 2;
+    const w = Math.min(rawW, p.w);
+    const cx = p.x + (p.w - w) / 2;
+    const maxChars = Math.max(3, Math.floor((w - CHIP_PADX * 2) / CHIP_CH));
     const g = svg("g", {
-      class: "gchip gchip-" + chip.kind + (chip.onClick ? " gchip-link" : ""),
-      onClick: chip.onClick ? (e) => { e.stopPropagation(); chip.onClick(); } : null,
+      class: "gchip gchip-" + chip.kind + (onOpen ? " gchip-link" : ""),
+      onClick: onOpen ? (e) => { e.stopPropagation(); onOpen(node.id); } : null,
     });
-    g.appendChild(svg("title", null, document.createTextNode(chip.title)));
-    g.appendChild(svg("rect", { class: "gchip-bg", x: cx, y, width: w, height: 16, rx: 8 }));
+    const hint = onOpen
+      ? (chip.kind === "data" ? " \u2013 klicken \u00F6ffnet die Datensicht" : " \u2013 klicken \u00F6ffnet die Bearbeiterzuordnung")
+      : "";
+    g.appendChild(svg("title", null, document.createTextNode(chip.title + hint)));
+    g.appendChild(svg("rect", { class: "gchip-bg", x: cx, y, width: w, height: CHIP_H, rx: 8 }));
     g.appendChild(svg("text", { class: "gchip-txt", x: cx + w / 2, y: y + 11, "text-anchor": "middle" },
-      document.createTextNode(chip.label)));
+      document.createTextNode(truncate(chip.label, maxChars))));
     root.appendChild(g);
-    cx += w + GAP;
+    y += CHIP_H + CHIP_GAP;
   });
 }
 
@@ -732,6 +841,11 @@ function viewModel() {
       lifecyclePill(schema),
       validationBadge(),
       el("span", { class: "spacer", style: "flex:1" }),
+      draft
+        ? el("button", { class: "btn small ghost", onClick: setProcessDeadline,
+            title: "Harte Frist für den gesamten Prozess (T2 – kritischer Pfad ≤ Termin)" },
+            schema.deadline_seconds != null ? "Termin: " + formatDuration(schema.deadline_seconds) : "Termin …")
+        : null,
       el("button", { class: "btn small ghost", onClick: exportBpmn }, "BPMN-Export"),
       libraryToggleButton(schema),
       draft
@@ -741,23 +855,35 @@ function viewModel() {
         ? el("button", { class: "btn small", onClick: startTestInstance, title: "Test-Instanz dieses Entwurfs starten und im 4-Quadranten-Cockpit durchspielen" }, "\u2697 Pr\u00FCfinstanz")
         : null));
 
+  // Datenherkunft-Ueberlagerung: ein in der Palette gewaehltes Element hat
+  // Vorrang, sonst die Lesestellen des gewaehlten Knotens.
+  const provenance = draft || state.selectedNode || state.dataElemFocus
+    ? computeProvenance(schema, { selectedNode: state.selectedNode, dataElemFocus: state.dataElemFocus })
+    : [];
+
   const graph = renderGraph(schema, {
     onPlus: draft ? openInsertModal : null,
     selectedId: state.selectedNode,
     onSelectNode: (id) => { state.selectedNode = id; render(); },
     onOpenData: (id) => focusBindingView("data", id),
     onOpenStaff: (id) => focusBindingView("org", id),
+    provenance,
   });
 
+  const focusElem = state.dataElemFocus && schema.data_elements[state.dataElemFocus];
   const hint = el("div", { class: "panel-b muted", style: "font-size:12px" },
-    draft
-      ? "Gef\u00FChrtes Modellieren: Klicke ein \u201E+\u201C an einer Kante, um nach diesem Schritt seriell, parallel (UND) oder bedingt (XOR) einzuf\u00FCgen. Unzul\u00E4ssiges weist der Kern ab."
-      : "Schema ist freigegeben und damit unver\u00E4nderlich. Erzeuge eine Revision \u00FCber die Ausf\u00FChrungs-/Monitoring-Sicht oder starte Instanzen.");
+    focusElem
+      ? el("span", null,
+          "Datenherkunft von \u201E" + focusElem.name + "\u201C: gestrichelte Linien zeigen, wo geschrieben \u2192 wo gelesen wird. ",
+          el("a", { href: "#", onClick: (e) => { e.preventDefault(); state.dataElemFocus = null; render(); } }, "Hervorhebung l\u00F6schen"))
+      : draft
+        ? "Gef\u00FChrtes Modellieren: \u201E+\u201C an einer Kante f\u00FCgt einen Schritt ein. Einen Schritt anklicken, dann rechts unter \u201EBinden\u201C ein Datenelement/eine Ressource mit \u2295 zuweisen. Unzul\u00E4ssiges weist der Kern ab."
+        : "Schema ist freigegeben und damit unver\u00E4nderlich. Erzeuge eine Revision \u00FCber die Ausf\u00FChrungs-/Monitoring-Sicht oder starte Instanzen.");
 
   content.appendChild(header);
-  content.appendChild(el("div", { class: "grid-2" },
+  content.appendChild(el("div", { class: "grid-2 model-top" },
     el("div", { class: "panel" }, el("div", { class: "panel-h" }, el("h2", null, "Kontrollfluss")), el("div", { class: "panel-b" }, graph), hint),
-    el("div", null, nodeInspectorPanel(), findingsPanel(), revisionPanel())));
+    el("div", null, nodeInspectorPanel(), bindingPalette(schema, draft), findingsPanel(), revisionPanel())));
 
   // Nach dem (Neu-)Rendern den ausgewaehlten Knoten in die Mitte der scrollbaren
   // Canvas ruecken, statt nach links auf den Start zurueckzuspringen.
@@ -765,6 +891,505 @@ function viewModel() {
     const pos = layoutSchema(schema).pos[state.selectedNode];
     if (pos) requestAnimationFrame(() => centerCanvasOnNode(graph, pos));
   }
+}
+
+// --------------------------------------------------------------------------
+// Modellieren-Seite: rechte Bindungs-Palette (Datenelemente + Ressourcen).
+// Klick-zu-Binden (Safari-robust) statt Drag&Drop: zuerst links einen Schritt
+// waehlen, dann in der Liste "An Schritt binden" (⊕) klicken. (Native HTML5-
+// Drop-Events auf SVG-Knoten sind in Safari unzuverlaessig; Klicken ist stabil.)
+// --------------------------------------------------------------------------
+
+// Baustein: ein Paletten-Chip (eine Listenzeile) mit Klick (z. B. Herkunft
+// hervorheben) und rechtsbuendigen Aktionen (Binden/Bearbeiten). Rein
+// praesentational -- veraendert nie Modell oder Backend.
+function paletteChip(opts) {
+  const chip = el("div", {
+    class: "pal-chip" + (opts.active ? " active" : ""),
+    title: opts.title || "",
+    onClick: opts.onClick || null,
+  });
+  chip.appendChild(el("span", { class: "pal-chip-label" }, opts.label));
+  if (opts.sub) chip.appendChild(el("span", { class: "pal-chip-sub" }, opts.sub));
+  chip.appendChild(el("span", { class: "spacer", style: "flex:1" }));
+  (opts.actions || []).forEach((a) => chip.appendChild(a));
+  return chip;
+}
+
+// Kleiner Icon-Knopf innerhalb eines Chips (Bearbeiten). ``stopPropagation``
+// verhindert, dass der Klick den Chip selbst (Herkunft-Fokus) ausloest.
+function chipAction(symbol, title, onClick) {
+  return el("button", {
+    class: "pal-chip-act", title,
+    onClick: (e) => { e.stopPropagation(); onClick(); },
+  }, symbol);
+}
+
+// Rechte Bindungs-Palette mit Tabs (Datenelemente | Ressourcen). Zeigt oben den
+// aktuellen Bindungsziel-Schritt und bindet per Klick auf ⊕. Anlegen/Bearbeiten
+// laeuft ueber dieselben Dialoge wie die Daten-/Ressourcensicht.
+function bindingPalette(schema, draft) {
+  const target = bindTarget();
+  const tab = state.paletteTab === "res" ? "res" : "data";
+  const selNode = state.selectedNode ? schema.nodes[state.selectedNode] : null;
+  const subText = !draft ? "nur Ansicht (Schema freigegeben)"
+    : target ? "Ziel: „" + nodeCaption(schema.nodes[target]) + "“"
+      : selNode ? "gewählter Knoten ist kein Aktivitätsschritt"
+        : "zuerst links einen Schritt wählen";
+  const tabBtn = (id, label) => el("button", {
+    class: "pal-tab" + (tab === id ? " active" : ""),
+    onClick: () => { state.paletteTab = id; render(); },
+  }, label);
+  const head = el("div", { class: "panel-h" },
+    el("h2", null, "Binden"),
+    el("span", { class: "sub" }, subText),
+    el("span", { class: "spacer", style: "flex:1" }),
+    el("button", { class: "btn small ghost", title: "Vollansicht öffnen",
+      onClick: () => { state.view = tab === "res" ? "org" : "data"; setActiveNav(); render(); } }, "Vollansicht"));
+  const tabs = el("div", { class: "pal-tabs" }, tabBtn("data", "Datenelemente"), tabBtn("res", "Ressourcen"));
+  const body = el("div", { class: "panel-b pal-body" },
+    tab === "res" ? resourcePaletteTab(schema, draft, target) : dataPaletteTab(schema, draft, target));
+  return el("div", { class: "panel pal-panel" }, head, tabs, body);
+}
+
+// Aktueller Bindungsziel-Knoten: der gewaehlte Schritt, sofern Entwurf UND eine
+// ACTIVITY (nur daran lassen sich Daten-/Bearbeiterbindungen setzen).
+function bindTarget() {
+  if (!isDraft(state.schema) || !state.selectedNode) return null;
+  const n = state.schema.nodes[state.selectedNode];
+  return n && n.type === NODE_TYPE.ACTIVITY ? n.id : null;
+}
+
+// "An Schritt binden"-Knopf (⊕). Deaktiviert, solange kein Aktivitätsschritt
+// gewaehlt ist; ein Klick erklaert dann, was zu tun ist.
+function bindButton(enabled, onBind) {
+  return el("button", {
+    class: "pal-bind" + (enabled ? "" : " disabled"),
+    title: enabled ? "An gewählten Schritt binden" : "Zuerst links einen Schritt (Aktivität) wählen",
+    onClick: (e) => {
+      e.stopPropagation();
+      if (enabled) onBind();
+      else toast("info", "Zuerst links einen Schritt (Aktivität) wählen");
+    },
+  }, "⊕");
+}
+
+// Tab „Datenelemente": Liste mit Typ/Quelle. ⊕ bindet an den gewaehlten Schritt
+// (Richtung/Pflicht im Dialog), ✎ bearbeitet, Klick hebt die Herkunft hervor.
+function dataPaletteTab(schema, draft, target) {
+  const elems = Object.values(schema.data_elements || {});
+  const box = el("div");
+  box.appendChild(el("div", { class: "pal-group-h" },
+    el("span", null, "Datenelemente"),
+    el("button", { class: "btn small", disabled: !draft, onClick: addDataElement }, "+ Datenelement")));
+  if (!elems.length) {
+    box.appendChild(el("div", { class: "muted", style: "font-size:12px" },
+      "Noch keine Datenelemente – mit „+ Datenelement“ eines mit sprechendem Namen anlegen."));
+    return box;
+  }
+  const wrap = el("div", { class: "pal-chips" });
+  elems.forEach((d) => {
+    const actions = [];
+    if (draft) actions.push(bindButton(!!target, () => dropDataElementOnNode(target, { element_id: d.id, name: d.name })));
+    if (draft) actions.push(chipAction("✎", "Datenelement bearbeiten", () => editDataElement(d)));
+    wrap.appendChild(paletteChip({
+      label: d.name,
+      sub: d.data_type + (d.source === "EXTERNAL" ? " · extern" : ""),
+      title: `${d.name} (${d.data_type}) – klicken zeigt die Herkunft im Graph`,
+      active: state.dataElemFocus === d.id,
+      onClick: () => { state.dataElemFocus = state.dataElemFocus === d.id ? null : d.id; render(); },
+      actions,
+    }));
+  });
+  box.appendChild(wrap);
+  return box;
+}
+
+// Tab „Ressourcen": Rollen/Abteilungen mit ⊕ (Bearbeiterzuordnung an den
+// gewaehlten Schritt), Agenten nur zur Ansicht/Bearbeitung. BZR bindet an
+// Rolle/Abteilung, nie an Einzelpersonen.
+function resourcePaletteTab(schema, draft, target) {
+  const org = schema.org_model || { roles: {}, org_units: {}, agents: {} };
+  const orgEditable = draft || !!schema.org_model_id;
+  const box = el("div");
+  const group = (title, addBtn, chipsWrap) => el("div", { class: "pal-group" },
+    el("div", { class: "pal-group-h" }, el("span", null, title), addBtn || null), chipsWrap);
+
+  const roles = Object.values(org.roles || {});
+  const roleChips = el("div", { class: "pal-chips" });
+  if (!roles.length) roleChips.appendChild(el("span", { class: "muted", style: "font-size:12px" }, "keine"));
+  roles.forEach((r) => roleChips.appendChild(paletteChip({
+    label: r.name, sub: "Rolle", title: `Rolle ${r.name}`,
+    actions: draft ? [bindButton(!!target, () => dropResourceOnNode(target, { rkind: "ROLE", ref: r.id, name: r.name }))] : [],
+  })));
+  const addRoleBtn = el("button", { class: "btn small", disabled: !orgEditable, onClick: addRole }, "+ Rolle");
+
+  const units = Object.values(org.org_units || {});
+  const unitChips = el("div", { class: "pal-chips" });
+  if (!units.length) unitChips.appendChild(el("span", { class: "muted", style: "font-size:12px" }, "keine"));
+  units.forEach((u) => {
+    const actions = [];
+    if (draft) actions.push(bindButton(!!target, () => dropResourceOnNode(target, { rkind: "ORG_UNIT", ref: u.id, name: u.name })));
+    if (orgEditable) actions.push(chipAction("✎", "Vorgesetzten der Abteilung setzen", () => editManager(u)));
+    unitChips.appendChild(paletteChip({ label: u.name, sub: "Abteilung", title: `Abteilung ${u.name}`, actions }));
+  });
+  const addUnitBtn = el("button", { class: "btn small", disabled: !orgEditable, onClick: () => addChildOrgUnit(null) }, "+ Abteilung");
+
+  const agents = Object.values(org.agents || {});
+  const agentChips = el("div", { class: "pal-chips" });
+  if (!agents.length) agentChips.appendChild(el("span", { class: "muted", style: "font-size:12px" }, "keine"));
+  agents.forEach((a) => {
+    const roleNames = (a.role_ids || []).map((id) => ((org.roles || {})[id] || {}).name).filter(Boolean).join(", ");
+    agentChips.appendChild(paletteChip({
+      label: a.name, sub: roleNames || "ohne Rolle", title: `Agent ${a.name}${roleNames ? " – " + roleNames : ""}`,
+      actions: orgEditable ? [chipAction("✎", "Agent bearbeiten", () => editAgent(a))] : [],
+    }));
+  });
+  const addAgentBtn = el("button", { class: "btn small", disabled: !orgEditable || !roles.length, onClick: addAgent }, "+ Agent");
+
+  box.appendChild(group("Rollen", addRoleBtn, roleChips));
+  box.appendChild(group("Abteilungen", addUnitBtn, unitChips));
+  box.appendChild(group("Agenten", addAgentBtn, agentChips));
+  return box;
+}
+
+// Bindet ein Datenelement an den gewaehlten Schritt (⊕ in der Palette): fragt
+// Richtung (Lesen/Schreiben) und Bindungsart (Pflicht/optional) ab und legt die
+// Datenbindung ueber den Kern an (POST /data-access; D1-D4 werden dort geprueft,
+// z. B. ein Pflichtlesen ohne vorherige Schreibquelle wird abgewiesen).
+function dropDataElementOnNode(nodeId, payload) {
+  const node = state.schema.nodes[nodeId];
+  const existing = (state.schema.data_accesses || [])
+    .some((a) => a.node_id === nodeId && a.element_id === payload.element_id);
+  const modeSel = el("select", null,
+    el("option", { value: "READ" }, "Lesen (liest den Wert)"),
+    el("option", { value: "WRITE" }, "Schreiben (setzt den Wert)"),
+    el("option", { value: "READ_WRITE" }, "Lesen und Schreiben"));
+  const mandBox = el("input", { type: "checkbox" });
+  mandBox.checked = true;
+  openModal(`„${payload.name}" an „${nodeCaption(node)}" binden`,
+    el("div", { class: "form-grid" },
+      existing ? el("div", { class: "muted", style: "font-size:12px" },
+        "Für diesen Schritt besteht bereits eine Bindung dieses Elements – eine weitere wird ergänzt.") : null,
+      el("label", { class: "field" }, "Richtung", modeSel),
+      el("label", { class: "row", style: "gap:8px;align-items:center" }, mandBox, "Pflichtbindung")),
+    async () => {
+      try {
+        await api.post(`/schemas/${state.schemaId}/data-access`, {
+          node_id: nodeId, element_id: payload.element_id, mode: modeSel.value, mandatory: mandBox.checked,
+        });
+        await refreshSchema(); render(); toast("ok", "Datenbindung gesetzt", [`${payload.name} (${modeSel.value})`]);
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Binden");
+}
+
+// Bindet eine Rolle/Abteilung an den gewaehlten Schritt (⊕ in der Palette):
+// setzt dessen Bearbeiterzuordnung (BZR). Eine bestehende Zuordnung wird ersetzt
+// (der Kern prueft Z1-Z4; eine unerfuellbare Regel wird abgewiesen).
+function dropResourceOnNode(nodeId, payload) {
+  const node = state.schema.nodes[nodeId];
+  const current = (state.schema.staff_rules || {})[nodeId];
+  const recBox = el("input", { type: "checkbox" });
+  const recField = el("label", { class: "row", style: "gap:8px;align-items:center" },
+    recBox, "Abteilung und alle Bereiche darunter");
+  const label = payload.rkind === "ROLE" ? "Rolle" : "Abteilung";
+  openModal(`Bearbeiter für „${nodeCaption(node)}"`,
+    el("div", { class: "form-grid" },
+      el("div", { class: "field" }, `${label}: `, el("strong", null, payload.name)),
+      current ? el("div", { class: "muted", style: "font-size:12px" },
+        `Ersetzt die bestehende Zuordnung: ${describeRule(current)}.`) : null,
+      payload.rkind === "ORG_UNIT" ? recField : null),
+    async () => {
+      const rule = { kind: payload.rkind, ref: payload.ref };
+      if (payload.rkind === "ORG_UNIT") rule.recursive = recBox.checked;
+      try {
+        await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId, rule });
+        await refreshSchema(); render(); toast("ok", "Bearbeiter zugeordnet", [describeRule(rule)]);
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Zuordnen");
+}
+
+// Löst eine einzelne Datenbindung eines Schritts (Inspektor „✕"). Läuft über den
+// Kern (DELETE /data-access): ist die Bindung noch nötig – etwa der einzige
+// Schreiber hinter einem Pflichtlesen (D1) – weist der Kern mit 422 ab und die
+// Bindung bleibt bestehen.
+async function removeDataAccess(nodeId, elementId, mode, name) {
+  try {
+    await api.del(`/schemas/${state.schemaId}/data-access/${nodeId}/${elementId}?mode=${encodeURIComponent(mode)}`);
+    await refreshSchema(); render(); toast("ok", "Datenbindung gelöst", [`${name} (${mode})`]);
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+// Entfernt die Bearbeiterzuordnung (BZR) eines Schritts (Inspektor „Entfernen").
+// Läuft über den Kern (DELETE /staff-rule); ein Schritt ohne Bearbeiter ist im
+// Entwurf zulässig (B2 greift erst bei der Freigabe).
+async function removeStaffRule(nodeId) {
+  try {
+    await api.del(`/schemas/${state.schemaId}/staff-rule/${nodeId}`);
+    await refreshSchema(); render(); toast("ok", "Bearbeiterzuordnung entfernt");
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+// --------------------------------------------------------------------------
+// Knoten-Inspektor: weitere Standardaktivitäten am Schritt
+// (Dienst/A1–A3, Frist/T1, Priorität/E8, Wertklasse/E3)
+// --------------------------------------------------------------------------
+
+const VALUE_CLASS_LABELS = {
+  VALUE_ADDING: "Wertschöpfend", BUSINESS_NECESSARY: "Betrieblich nötig",
+  NON_VALUE_ADDING: "Nicht wertschöpfend",
+};
+const IMPACT_LABELS = { LOW: "niedrig", MEDIUM: "mittel", HIGH: "hoch" };
+const AUTOMATION_LABELS = { EXTERNAL_TASK: "External-Task", HTTP_PUSH: "HTTP-Push" };
+
+// Dauer (Sekunden) menschenlesbar in der groebsten glatt teilenden Einheit.
+function formatDuration(sec) {
+  if (sec == null) return "–";
+  if (sec % 86400 === 0) return sec / 86400 + " Tag(e)";
+  if (sec % 3600 === 0) return sec / 3600 + " Std.";
+  if (sec % 60 === 0) return sec / 60 + " Min.";
+  return sec + " Sek.";
+}
+
+// Dauer-Eingabe (Zahl + Einheit). ``read()`` liefert Sekunden bzw. ``null``
+// (leer/ungueltig -> je nach Aufrufer "keine Angabe"/"loeschen").
+function durationControls(currentSec) {
+  const units = [["60", "Minuten"], ["3600", "Stunden"], ["86400", "Tage"]];
+  let val = "", unit = "3600";
+  if (currentSec != null) {
+    if (currentSec % 86400 === 0) { unit = "86400"; val = String(currentSec / 86400); }
+    else if (currentSec % 3600 === 0) { unit = "3600"; val = String(currentSec / 3600); }
+    else { unit = "60"; val = String(Math.round(currentSec / 60)); }
+  }
+  const num = el("input", { type: "number", min: "0", step: "any", value: val, placeholder: "z. B. 4" });
+  const unitSel = el("select", null, ...units.map(([v, l]) => el("option", { value: v }, l)));
+  unitSel.value = unit;
+  const node = el("div", { class: "row", style: "gap:8px" },
+    el("label", { class: "field", style: "flex:1" }, "Dauer", num),
+    el("label", { class: "field", style: "flex:1" }, "Einheit", unitSel));
+  const read = () => { const n = parseFloat(num.value); if (!(n > 0)) return null; return Math.round(n * Number(unitSel.value)); };
+  return { node, read };
+}
+
+// Haengt die Abschnitte Dienst/Frist/Priorität/Wertklasse an den Inspektor-Body.
+// Dienst nur fuer ACTIVITY (ein SUBPROCESS wird durch sein Submodell ausgefuehrt);
+// Frist/Priorität/Wertklasse gelten fuer ACTIVITY und SUBPROCESS.
+function nodePerformSections(body, schema, node) {
+  const isActivity = node.type === NODE_TYPE.ACTIVITY;
+
+  if (isActivity) {
+    const sb = (schema.service_bindings || {})[node.id];
+    body.appendChild(el("div", { class: "hr" }));
+    body.appendChild(el("div", { class: "insp-h" }, "Dienst"));
+    if (sb) {
+      const tmpl = sb.template_id ? (schema.activity_templates || {})[sb.template_id] : null;
+      body.appendChild(el("div", { style: "font-size:12px" },
+        el("strong", null, sb.name), " · ", sb.automatic ? "automatisch" : "interaktiv",
+        tmpl ? ` · Template „${tmpl.name}“` : ""));
+      if (sb.automatic && sb.automation && sb.automation !== "MANUAL_NONE") {
+        body.appendChild(el("div", { class: "muted", style: "font-size:11px" },
+          "Automatik: " + (AUTOMATION_LABELS[sb.automation] || sb.automation)));
+      }
+    } else {
+      body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
+        "Kein Dienst – für die Freigabe braucht jeder Schritt einen ausführbaren Dienst (B1)."));
+    }
+    const row = el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+      el("button", { class: "btn small", onClick: () => assignServiceFor(node.id) }, sb ? "Dienst ändern" : "Dienst zuweisen"));
+    if (sb && sb.automatic) row.appendChild(el("button", { class: "btn small", onClick: () => editAutomation(node, sb) }, "Automatik…"));
+    if (sb) row.appendChild(el("button", { class: "btn small danger", onClick: () => removeService(node.id) }, "Entfernen"));
+    body.appendChild(row);
+  }
+
+  // Frist (T1): maximale erwartete Dauer des Schritts.
+  const tc = (schema.time_constraints || {})[node.id];
+  const hasFrist = tc && tc.max_duration_seconds != null;
+  body.appendChild(el("div", { class: "hr" }));
+  body.appendChild(el("div", { class: "insp-h" }, "Frist (max. Dauer)"));
+  body.appendChild(el("div", { class: hasFrist ? "" : "muted", style: "font-size:12px" },
+    hasFrist ? formatDuration(tc.max_duration_seconds) : "keine – fließt bei gesetztem Prozess-Termin in die Terminprüfung (T2) ein."));
+  body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+    el("button", { class: "btn small", onClick: () => setTimeConstraintFor(node.id, hasFrist ? tc.max_duration_seconds : null) }, hasFrist ? "Frist ändern" : "Frist setzen"),
+    hasFrist ? el("button", { class: "btn small danger", onClick: () => removeTimeConstraint(node.id) }, "Entfernen") : null));
+
+  // Priorität (E8): Auswirkung + Dringlichkeit -> abgeleitete Arbeitslisten-Stufe.
+  const pr = (schema.node_priorities || {})[node.id];
+  body.appendChild(el("div", { class: "hr" }));
+  body.appendChild(el("div", { class: "insp-h" }, "Priorität"));
+  body.appendChild(el("div", { class: pr ? "" : "muted", style: "font-size:12px" },
+    pr ? `Auswirkung ${IMPACT_LABELS[pr.impact] || pr.impact} · Dringlichkeit ${IMPACT_LABELS[pr.urgency] || pr.urgency}` : "normal (Standard)"));
+  body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+    el("button", { class: "btn small", onClick: () => setPriorityFor(node.id, pr) }, pr ? "Priorität ändern" : "Priorität setzen"),
+    pr ? el("button", { class: "btn small danger", onClick: () => removePriority(node.id) }, "Entfernen") : null));
+
+  // Wertklasse (E3): rein beratende Klassifikation (keine Korrektheitswirkung).
+  body.appendChild(el("div", { class: "hr" }));
+  body.appendChild(el("div", { class: "insp-h" }, "Wertklasse"));
+  const vcSel = el("select", null,
+    el("option", { value: "" }, "– keine –"),
+    ...Object.entries(VALUE_CLASS_LABELS).map(([v, l]) => el("option", { value: v }, l)));
+  vcSel.value = node.value_class || "";
+  vcSel.addEventListener("change", () => setValueClass(node.id, vcSel.value || null));
+  body.appendChild(el("label", { class: "field", style: "font-size:12px" }, "Klassifikation", vcSel));
+}
+
+// Dienst zuweisen/aendern. Optional an ein Activity-Repository-Template gebunden
+// (dann wird ``automatic`` aus dem Executor abgeleitet und die Parameter werden
+// typkonform auf Datenelemente abgebildet -> A1-A3). Ohne Template ein freier,
+// benannter Dienst. Der Kern prueft die Bindung (422 bei Verstoss).
+function assignServiceFor(nodeId) {
+  const schema = state.schema;
+  const sb = (schema.service_bindings || {})[nodeId];
+  const templates = Object.values(schema.activity_templates || {});
+  const nameInput = el("input", { type: "text", value: sb ? sb.name : "", placeholder: "z. B. Antrag erfassen" });
+  const autoBox = el("input", { type: "checkbox" });
+  autoBox.checked = sb ? !!sb.automatic : false;
+  const autoField = el("label", { class: "row", style: "gap:8px;align-items:center" },
+    autoBox, "Automatischer Schritt (kein Bearbeiter nötig)");
+  const tmplSel = templates.length
+    ? el("select", null, el("option", { value: "" }, "– ohne Template (freier Dienst) –"),
+        ...templates.map((t) => el("option", { value: t.id }, `${t.name} (${t.executor})`)))
+    : null;
+  if (tmplSel && sb && sb.template_id) tmplSel.value = sb.template_id;
+  const mapHost = el("div");
+  const buildMap = () => {
+    clear(mapHost); mapHost._read = null;
+    if (!tmplSel || !tmplSel.value) { autoBox.disabled = false; return; }
+    const t = templates.find((x) => x.id === tmplSel.value);
+    if (!t) return;
+    // Bei Template-Bindung wird ``automatic`` aus dem Executor abgeleitet (A2).
+    autoBox.checked = t.executor !== "MANUAL"; autoBox.disabled = true;
+    const form = templateMappingForm(t, schema, sb && sb.template_id === t.id ? sb.parameter_mapping : {});
+    mapHost._read = form.read;
+    mapHost.appendChild(el("div", { class: "muted", style: "font-size:12px;margin:6px 0" },
+      "Parameter-Zuordnung: jeden Template-Parameter typkonform auf ein Datenelement abbilden (A3)."));
+    mapHost.appendChild(form.grid);
+  };
+  if (tmplSel) tmplSel.addEventListener("change", buildMap);
+  const body = el("div", { class: "form-grid" },
+    el("label", { class: "field" }, "Name des Dienstes", nameInput),
+    tmplSel ? el("label", { class: "field" }, "Template (Activity Repository)", tmplSel) : null,
+    autoField, mapHost);
+  buildMap();
+  openModal(`Dienst – ${nodeCaption(schema.nodes[nodeId])}`, body, async () => {
+    if (!nameInput.value.trim()) { toast("err", "Name darf nicht leer sein"); return false; }
+    const req = { node_id: nodeId, name: nameInput.value.trim(), automatic: autoBox.checked };
+    if (tmplSel && tmplSel.value) {
+      req.template_id = tmplSel.value;
+      req.parameter_mapping = mapHost._read ? mapHost._read() : {};
+    }
+    try {
+      await api.post(`/schemas/${state.schemaId}/service`, req);
+      await refreshSchema(); render(); toast("ok", "Dienst zugewiesen", [req.name]);
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+  }, "Übernehmen");
+}
+
+// Zuordnungsformular fuer die Template-Parameter (Eingaben + Ergebnisse). Bietet
+// je Parameter nur typgleiche Datenelemente an; der Kern prueft A3 verbindlich.
+function templateMappingForm(template, schema, current) {
+  const params = [
+    ...(template.inputs || []).map((p) => ({ ...p, dir: "Eingabe" })),
+    ...(template.outputs || []).map((p) => ({ ...p, dir: "Ergebnis" })),
+  ];
+  const elems = Object.values(schema.data_elements || {});
+  const grid = el("div", { class: "form-grid" });
+  const rows = [];
+  if (!params.length) grid.appendChild(el("div", { class: "muted", style: "font-size:12px" }, "Dieses Template hat keine Parameter."));
+  params.forEach((p) => {
+    const sel = el("select", null,
+      el("option", { value: "" }, p.mandatory ? "– bitte wählen –" : "– keine –"),
+      ...elems.filter((e) => e.data_type === p.data_type).map((e) => el("option", { value: e.id }, e.name)));
+    if (current && current[p.name]) sel.value = current[p.name];
+    rows.push({ name: p.name, sel });
+    grid.appendChild(el("label", { class: "field" }, `${p.dir}: ${p.name} (${p.data_type})`, sel));
+  });
+  const read = () => { const m = {}; rows.forEach((r) => { if (r.sel.value) m[r.name] = r.sel.value; }); return m; };
+  return { grid, read };
+}
+
+async function removeService(nodeId) {
+  try {
+    await api.del(`/schemas/${state.schemaId}/service/${nodeId}`);
+    await refreshSchema(); render(); toast("ok", "Dienst entfernt");
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+function setTimeConstraintFor(nodeId, current) {
+  const dur = durationControls(current);
+  openModal(`Frist – ${nodeCaption(state.schema.nodes[nodeId])}`,
+    el("div", null,
+      el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Maximale erwartete Bearbeitungsdauer dieses Schritts (fließt in die Terminprüfung T2 ein)."),
+      dur.node),
+    async () => {
+      const sec = dur.read();
+      if (sec == null) { toast("err", "Bitte eine Dauer > 0 angeben"); return false; }
+      try {
+        await api.post(`/schemas/${state.schemaId}/time-constraint`, { node_id: nodeId, constraint: { max_duration_seconds: sec } });
+        await refreshSchema(); render(); toast("ok", "Frist gesetzt");
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Speichern");
+}
+
+async function removeTimeConstraint(nodeId) {
+  try {
+    await api.post(`/schemas/${state.schemaId}/time-constraint`, { node_id: nodeId, constraint: null });
+    await refreshSchema(); render(); toast("ok", "Frist entfernt");
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+function setPriorityFor(nodeId, current) {
+  const mk = (val) => {
+    const s = el("select", null, ...Object.entries(IMPACT_LABELS).map(([v, l]) => el("option", { value: v }, l)));
+    s.value = val || "MEDIUM"; return s;
+  };
+  const impact = mk(current && current.impact), urgency = mk(current && current.urgency);
+  openModal(`Priorität – ${nodeCaption(state.schema.nodes[nodeId])}`,
+    el("div", null,
+      el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Priorität = Auswirkung + Dringlichkeit; die Arbeitslisten-Reihung ergibt sich daraus."),
+      el("div", { class: "form-grid" },
+        el("label", { class: "field" }, "Auswirkung", impact),
+        el("label", { class: "field" }, "Dringlichkeit", urgency))),
+    async () => {
+      try {
+        await api.post(`/schemas/${state.schemaId}/priority`, { node_id: nodeId, priority: { impact: impact.value, urgency: urgency.value } });
+        await refreshSchema(); render(); toast("ok", "Priorität gesetzt");
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Speichern");
+}
+
+async function removePriority(nodeId) {
+  try {
+    await api.post(`/schemas/${state.schemaId}/priority`, { node_id: nodeId, priority: null });
+    await refreshSchema(); render(); toast("ok", "Priorität entfernt");
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+async function setValueClass(nodeId, value) {
+  try {
+    await api.post(`/schemas/${state.schemaId}/value-class`, { node_id: nodeId, value_class: value });
+    await refreshSchema(); render(); toast("ok", value ? "Wertklasse gesetzt" : "Wertklasse entfernt");
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+// Prozessweiter Termin (T2): der Kern prueft, dass der kritische Pfad
+// hineinpasst. Leer lassen entfernt den Termin.
+function setProcessDeadline() {
+  const dur = durationControls(state.schema.deadline_seconds != null ? state.schema.deadline_seconds : null);
+  openModal("Prozess-Termin (Deadline)",
+    el("div", null,
+      el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Harte Frist für den gesamten Prozess; der Kern prüft, dass der kritische Pfad hineinpasst (T2). Leer lassen entfernt den Termin."),
+      dur.node),
+    async () => {
+      const sec = dur.read();
+      try {
+        await api.post(`/schemas/${state.schemaId}/deadline`, { deadline_seconds: sec });
+        await refreshSchema(); render(); toast("ok", sec != null ? "Termin gesetzt" : "Termin entfernt");
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Speichern");
 }
 
 function centerCanvasOnNode(wrap, pos) {
@@ -810,6 +1435,45 @@ function nodeInspectorPanel() {
       el("button", { class: "btn small primary", onClick: () => renameNode(node.id, input.value) }, "Umbenennen"),
       el("button", { class: "btn small danger", onClick: () => deleteNode(node.id) }, "Entfernen")));
     if (node.type === NODE_TYPE.ACTIVITY) {
+      // --- Datenbindungen dieses Schritts (D1-D4) direkt am Schritt ---
+      const accesses = (schema.data_accesses || []).filter((a) => a.node_id === node.id);
+      body.appendChild(el("div", { class: "hr" }));
+      body.appendChild(el("div", { class: "insp-h" }, "Daten"));
+      if (accesses.length) {
+        const list = el("div", { class: "insp-binds" });
+        accesses.forEach((a) => {
+          const e = schema.data_elements[a.element_id];
+          list.appendChild(el("div", { class: "insp-bind" },
+            el("span", { class: "insp-bind-name" }, e ? e.name : a.element_id),
+            el("span", { class: "insp-bind-mode mode-" + a.mode }, a.mode),
+            a.mandatory ? null : el("span", { class: "muted", style: "font-size:11px" }, "optional"),
+            el("span", { class: "spacer", style: "flex:1" }),
+            el("button", { class: "insp-bind-del", title: "Bindung lösen",
+              onClick: () => removeDataAccess(node.id, a.element_id, a.mode, e ? e.name : a.element_id) }, "✕")));
+        });
+        body.appendChild(list);
+      } else {
+        body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
+          "Noch keine Datenbindung – Element aus der Palette auf den Schritt ziehen oder unten binden."));
+      }
+      body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+        el("button", { class: "btn small", disabled: !Object.keys(schema.data_elements || {}).length, onClick: () => addDataAccess(node.id) }, "+ Daten binden")));
+
+      // --- Bearbeiterzuordnung (Z1-Z4) direkt am Schritt ---
+      const rule = (schema.staff_rules || {})[node.id];
+      const org = schema.org_model || { roles: {}, org_units: {} };
+      const haveRes = (Object.keys(org.roles || {}).length + Object.keys(org.org_units || {}).length) > 0;
+      body.appendChild(el("div", { class: "hr" }));
+      body.appendChild(el("div", { class: "insp-h" }, "Bearbeiter (BZR)"));
+      body.appendChild(el("div", { class: rule ? "" : "muted", style: "font-size:12px" },
+        rule ? describeRule(rule) : "Keine Zuordnung – Rolle/Abteilung aus der Palette auf den Schritt ziehen oder unten zuordnen."));
+      body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+        el("button", { class: "btn small", disabled: !haveRes, onClick: () => addStaffRule(node.id) }, rule ? "Zuordnung ändern" : "Bearbeiter zuordnen"),
+        rule ? el("button", { class: "btn small danger", onClick: () => removeStaffRule(node.id) }, "Entfernen") : null));
+
+      // Weitere Standardaktivitäten am Schritt: Dienst, Frist, Priorität, Wertklasse.
+      nodePerformSections(body, schema, node);
+
       const form = schema.forms && schema.forms[node.id];
       body.appendChild(el("div", { class: "hr" }));
       body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:6px" },
@@ -839,6 +1503,8 @@ function nodeInspectorPanel() {
           : "Noch kein Submodell gebunden."));
       body.appendChild(el("button", { class: "btn small", onClick: () => openSubprocessBinding(node, "rebind") },
         "Zuordnung / Daten\u00FCbergabe \u00E4ndern"));
+      // Frist, Priorit\u00E4t und Wertklasse gelten auch f\u00FCr Subprozesse.
+      nodePerformSections(body, schema, node);
     }
   } else if (SPLIT_TYPES.has(node.type)) {
     body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
@@ -1472,17 +2138,25 @@ function addDataElement() {
   }, "Anlegen");
 }
 
-function addDataAccess() {
+// Datenbindung anlegen. ``fixedNodeId`` (optional) fixiert den Schritt – so kann
+// der Knoten-Inspektor der Modellieren-Seite direkt „an diesem Schritt binden",
+// ohne den Schritt erneut auswaehlen zu lassen.
+function addDataAccess(fixedNodeId) {
   const schema = state.schema;
-  const nodeSel = el("select", null, ...activitiesOf(schema).map((n) => el("option", { value: n.id }, nodeCaption(n))));
+  const nodeId = typeof fixedNodeId === "string" ? fixedNodeId : null;
+  const nodeSel = nodeId
+    ? null
+    : el("select", null, ...activitiesOf(schema).map((n) => el("option", { value: n.id }, nodeCaption(n))));
   const elemSel = el("select", null, ...Object.values(schema.data_elements).map((d) => el("option", { value: d.id }, d.name)));
   const modeSel = el("select", null, ...["READ", "WRITE", "READ_WRITE"].map((m) => el("option", { value: m }, m)));
   openModal("Datenbindung", el("div", { class: "form-grid" },
-    el("label", { class: "field" }, "Schritt", nodeSel),
+    nodeId
+      ? el("div", { class: "field" }, "Schritt: ", el("strong", null, nodeCaption(schema.nodes[nodeId])))
+      : el("label", { class: "field" }, "Schritt", nodeSel),
     el("label", { class: "field" }, "Element", elemSel),
     el("label", { class: "field" }, "Modus", modeSel)), async () => {
     try {
-      await api.post(`/schemas/${state.schemaId}/data-access`, { node_id: nodeSel.value, element_id: elemSel.value, mode: modeSel.value });
+      await api.post(`/schemas/${state.schemaId}/data-access`, { node_id: nodeId || nodeSel.value, element_id: elemSel.value, mode: modeSel.value });
       await refreshSchema(); render(); toast("ok", "Datenbindung gesetzt");
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Binden");
@@ -1953,10 +2627,15 @@ function showLoginCredentials(res) {
 }
 
 
-function addStaffRule() {
+// Bearbeiterregel (BZR) zuweisen. ``fixedNodeId`` (optional) fixiert den Schritt
+// fuer den „Bearbeiter zuordnen"-Knopf des Inspektors.
+function addStaffRule(fixedNodeId) {
   const schema = state.schema;
   const org = schema.org_model;
-  const nodeSel = el("select", null, ...activitiesOf(schema).map((n) => el("option", { value: n.id }, nodeCaption(n))));
+  const nodeId = typeof fixedNodeId === "string" ? fixedNodeId : null;
+  const nodeSel = nodeId
+    ? null
+    : el("select", null, ...activitiesOf(schema).map((n) => el("option", { value: n.id }, nodeCaption(n))));
   const refSel = el("select");
   const kindSel = el("select", null, el("option", { value: "ROLE" }, "Rolle"), el("option", { value: "ORG_UNIT" }, "OrgEinheit"));
   const recBox = el("input", { type: "checkbox" });
@@ -1969,7 +2648,9 @@ function addStaffRule() {
   }
   kindSel.addEventListener("change", syncKind); syncKind();
   openModal("Bearbeiterregel", el("div", { class: "form-grid" },
-    el("label", { class: "field" }, "Schritt", nodeSel),
+    nodeId
+      ? el("div", { class: "field" }, "Schritt: ", el("strong", null, nodeCaption(schema.nodes[nodeId])))
+      : el("label", { class: "field" }, "Schritt", nodeSel),
     el("label", { class: "field" }, "Art", kindSel),
     el("label", { class: "field" }, "Referenz", refSel),
     recField), async () => {
@@ -1977,7 +2658,7 @@ function addStaffRule() {
     const rule = { kind: kindSel.value, ref: refSel.value };
     if (kindSel.value === "ORG_UNIT") rule.recursive = recBox.checked;
     try {
-      await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeSel.value, rule });
+      await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId || nodeSel.value, rule });
       await refreshSchema(); render(); toast("ok", "Zuordnung gesetzt");
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Zuordnen");

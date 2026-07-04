@@ -720,6 +720,64 @@ def connect_data(
     return raise_if_invalid(candidate)
 
 
+def disconnect_data(
+    schema: ProcessSchema,
+    node_id: str,
+    element_id: str,
+    mode: AccessMode | None = None,
+) -> ProcessSchema:
+    """Remove a read/write binding (data access) of an element from a node.
+
+    Inverse of :func:`connect_data`. ``mode`` (optional) narrows the removal to
+    accesses of exactly that direction; without it every access of the element
+    on this node is removed. An input-mask field that backed a removed access is
+    dropped too so mask and data flow stay consistent (U3); a mask left without
+    any field is removed.
+
+    requires: schema editable; at least one matching access exists.
+    ensures:  the matching access(es) are gone and the data-flow rules D1-D4
+              still hold. Removing the sole writer of a mandatory read elsewhere
+              is rejected with a D1 finding and leaves the schema unchanged.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+
+    def matches(a: DataAccess) -> bool:
+        return (
+            a.node_id == node_id
+            and a.element_id == element_id
+            and (mode is None or a.mode == mode)
+        )
+
+    if not any(matches(a) for a in candidate.data_accesses):
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message=(
+                        f"no data access for element '{element_id}' on node '{node_id}'"
+                    ),
+                )
+            ]
+        )
+    candidate.data_accesses = [a for a in candidate.data_accesses if not matches(a)]
+
+    # Keep any input mask consistent: drop the fields that mapped to a removed
+    # access (same node + element, and matching direction when a mode was given).
+    form = candidate.forms.get(node_id)
+    if form is not None:
+        form.fields = [
+            f
+            for f in form.fields
+            if not (f.element_id == element_id and (mode is None or f.mode == mode))
+        ]
+        if not form.fields:
+            del candidate.forms[node_id]
+    return raise_if_invalid(candidate)
+
+
 @dataclass
 class FormFieldSpec:
     """Input intent for one field of an input mask (form designer).
@@ -1389,6 +1447,36 @@ def assign_service(
     return raise_if_invalid(candidate)
 
 
+def unassign_service(schema: ProcessSchema, node_id: str) -> ProcessSchema:
+    """Remove the executing service (and any automation config) from a node.
+
+    Inverse of :func:`assign_service`. A step without a service is well-formed in
+    the draft -- the "every step has an executable service" requirement B1 is
+    only enforced at release -- so the removal is validated like every other
+    change (No-Bypass) and rolled back should it ever violate a rule. Because the
+    automation fields (E11) live on the same :class:`ServiceBinding`, they are
+    removed together with it, keeping the integration rules I1-I4 satisfied.
+
+    requires: schema editable; the node carries a service binding.
+    ensures:  the binding is removed and the full rule set still holds.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    if node_id not in candidate.service_bindings:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message=f"node '{node_id}' has no service binding",
+                )
+            ]
+        )
+    del candidate.service_bindings[node_id]
+    return raise_if_invalid(candidate)
+
+
 def assign_staff_rule(
     schema: ProcessSchema, node_id: str, rule: StaffRule
 ) -> ProcessSchema:
@@ -1414,6 +1502,35 @@ def assign_staff_rule(
             ]
         )
     candidate.staff_rules[node_id] = rule
+    return raise_if_invalid(candidate)
+
+
+def clear_staff_rule(schema: ProcessSchema, node_id: str) -> ProcessSchema:
+    """Remove the staff-assignment rule (BZR) from an ACTIVITY node.
+
+    Inverse of :func:`assign_staff_rule`. A node without a rule is well-formed in
+    the draft (the "every interactive step has a worker" requirement B2 is only
+    enforced at release), so the removal is validated like any other change and
+    rolled back should it ever violate a rule -- No-Bypass, same path as every
+    other mutation.
+
+    requires: schema editable; the node carries a staff rule.
+    ensures:  the rule is removed and the full rule set still holds.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    if node_id not in candidate.staff_rules:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message=f"node '{node_id}' has no staff rule",
+                )
+            ]
+        )
+    del candidate.staff_rules[node_id]
     return raise_if_invalid(candidate)
 
 

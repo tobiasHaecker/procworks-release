@@ -382,3 +382,61 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .id-row .id-value { font-weight: 600; }
 .pill.pill-amber { background: rgba(217, 119, 6, .16); color: #b45309; }
 
+/* ---- Modellieren: Datenherkunft-Ueberlagerung (gestrichelt) ---- */
+.gprov {
+  stroke: var(--amber); stroke-width: 1.6px; fill: none;
+  stroke-dasharray: 5 4; opacity: .9; pointer-events: none;
+}
+.gprov-txt { font-size: 9px; fill: var(--amber); pointer-events: none; }
+
+/* ---- Modellieren: Inspektor-Bindungen (Daten / BZR am Schritt) ---- */
+.insp-h { font-size: 12px; font-weight: 700; color: var(--txt-dim); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+.insp-binds { display: flex; flex-direction: column; gap: 4px; }
+.insp-bind { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.insp-bind-name { font-weight: 600; }
+.insp-bind-mode { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 6px; letter-spacing: .3px; }
+.insp-bind-mode.mode-READ { background: var(--accent-soft); color: #cfe0ff; }
+.insp-bind-mode.mode-WRITE { background: var(--amber-soft); color: var(--amber); }
+.insp-bind-mode.mode-READ_WRITE { background: var(--green-soft); color: var(--green); }
+.insp-bind-del {
+  border: 0; background: transparent; color: var(--txt-dim); cursor: pointer;
+  font-size: 12px; padding: 0 2px; line-height: 1;
+}
+.insp-bind-del:hover { color: var(--red); }
+
+/* ---- Modellieren: rechte Bindungs-Palette (Tabs + klickbare Listenzeilen) ---- */
+.pal-panel { margin-top: 14px; }
+.pal-tabs { display: flex; gap: 6px; padding: 10px 14px 0; }
+.pal-tab {
+  border: 1px solid var(--line); border-bottom: 0;
+  background: var(--bg-elev2); color: var(--txt-dim); cursor: pointer;
+  padding: 6px 12px; border-radius: 8px 8px 0 0; font-size: 13px; font-weight: 600;
+}
+.pal-tab.active { background: var(--bg-elev); color: var(--txt); border-color: var(--accent); }
+.pal-body { display: flex; flex-direction: column; gap: 14px; max-height: 46vh; overflow: auto; }
+.pal-group + .pal-group { margin-top: 4px; }
+.pal-group-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 700; color: var(--txt-dim); margin-bottom: 8px; }
+.pal-chips { display: flex; flex-direction: column; gap: 6px; }
+.pal-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg-elev2); font-size: 13px;
+}
+.pal-chip[onclick], .pal-chip { cursor: default; }
+.pal-chip.active { border-color: var(--amber); background: var(--amber-soft); }
+.pal-chip-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal-chip-sub { font-size: 11px; color: var(--txt-dim); white-space: nowrap; }
+.pal-chip-act {
+  border: 0; background: transparent; color: var(--txt-dim); cursor: pointer;
+  font-size: 13px; padding: 0 4px; line-height: 1;
+}
+.pal-chip-act:hover { color: var(--txt); }
+/* "An Schritt binden" (⊕) */
+.pal-bind {
+  border: 1px solid var(--accent); background: var(--accent-soft); color: #cfe0ff;
+  cursor: pointer; font-size: 14px; line-height: 1; border-radius: 8px;
+  padding: 2px 7px; font-weight: 700;
+}
+.pal-bind:hover { filter: brightness(1.25); }
+.pal-bind.disabled { border-color: var(--line); background: transparent; color: var(--txt-dim); cursor: not-allowed; }
+

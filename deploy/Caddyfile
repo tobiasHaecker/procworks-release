@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Reverse proxy + TLS + static web serving for ProcWorks (roadmap step 16).
+#
+# Caddy serves the SPA static assets from /srv and reverse-proxies the API under
+# the same origin at /api/*, so the browser talks to a single host over HTTPS.
+# Caddy obtains and renews certificates automatically (Let's Encrypt) when a
+# public domain + email are configured.
+#
+# Configuration via environment variables (see deploy/docker-compose.full.yml):
+#   SITE_ADDRESS  - the site address Caddy listens on.
+#                   * ":80"            -> plain HTTP (local/demo, default)
+#                   * "example.com"    -> automatic HTTPS via Let's Encrypt
+#   API_UPSTREAM  - host:port of the API service (default "api:8000").
+#   ACME_EMAIL    - contact email for the ACME/Let's Encrypt account.
+
+{
+	# A contact email is only used for ACME/Let's Encrypt in HTTPS mode. Provide a
+	# harmless placeholder default so the config still parses when ACME_EMAIL is
+	# empty/unset (e.g. local ":80" HTTP testing). A real address overrides it.
+	email {$ACME_EMAIL:admin@example.invalid}
+}
+
+{$SITE_ADDRESS::80} {
+	encode gzip
+
+	# API: strip the /api prefix and forward to the stateless API server.
+	handle_path /api/* {
+		reverse_proxy {$API_UPSTREAM:api:8000}
+	}
+
+	# Everything else: serve the SPA static assets.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		# Conservative security headers for the static app.
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

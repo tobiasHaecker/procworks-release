@@ -107,7 +107,7 @@ Die Linux-Container von ProcWorks benötigen WSL2 (Windows-Subsystem für Linux)
 
    ```powershell
    cd C:\
-   git clone https://github.com/tobiasHaecker/procworks.git ProcWorks
+   git clone https://github.com/tobiasHaecker/procworks-release.git ProcWorks
    cd C:\ProcWorks
    ```
 
@@ -372,7 +372,7 @@ New-NetFirewallRule -DisplayName "ProcWorks HTTPS" -Direction Inbound -Protocol 
 
 ## Weiterführend
 
-- Auth-/Login-Konzept im Detail: [`docs/Auth-Konzept.md`](Auth-Konzept.md)
+- Auth-/Login-Konzept im Detail: [`docs/Auth-Konzept.md`](https://github.com/tobiasHaecker/procworks/blob/main/docs/Auth-Konzept.md)
   (Abschnitt 11: Passwort-Login).
 - Konfigurationsvariablen und Betriebshinweise: [`core/README.md`](../core/README.md),
   [`SECURITY.md`](../SECURITY.md).

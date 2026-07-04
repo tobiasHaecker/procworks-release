@@ -1,0 +1,71 @@
+# Full local/self-hosted stack for ProcWorks (roadmap step 16):
+# PostgreSQL + stateless API + Caddy (reverse proxy / TLS / static web).
+#
+# Start (from the repository root):
+#   docker compose -f deploy/docker-compose.full.yml up --build
+# Then open http://localhost (the web container serves the SPA and proxies /api).
+#
+# For a public HTTPS deployment, set SITE_ADDRESS to your domain and ACME_EMAIL
+# to a contact address; Caddy then provisions Let's Encrypt certificates.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: process
+      POSTGRES_PASSWORD: process
+      POSTGRES_DB: procworks
+    volumes:
+      - procworks_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U process -d procworks"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ../core
+    restart: unless-stopped
+    environment:
+      # Durable schema, instance and audit-event persistence.
+      DATABASE_URL: postgresql+psycopg://process:process@postgres:5432/procworks
+      # Production default: require username/password login (the open dev mode
+      # grants every role without authentication). On first start a default
+      # 'admin' account is created and its one-off password is written to the
+      # API container log (`docker compose logs api`) -- log in and change it.
+      # Pin a known admin instead by setting PROCWORKS_ADMIN_LOGIN +
+      # PROCWORKS_ADMIN_PASSWORD.
+      PROCWORKS_AUTH: password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8000"
+
+  web:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    environment:
+      # ":80" = plain HTTP for local use. Set to your domain for automatic HTTPS.
+      SITE_ADDRESS: ":80"
+      API_UPSTREAM: "api:8000"
+      # ACME_EMAIL is only needed for HTTPS. Leave it unset for local ":80" HTTP
+      # (the Caddyfile supplies a placeholder default); set it for production.
+      # ACME_EMAIL: "you@example.com"
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  procworks_pgdata:
+  caddy_data:
+  caddy_config:

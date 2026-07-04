@@ -1,0 +1,18 @@
+apiVersion: v2
+name: procworks
+description: |
+  Helm chart for the block-structured ProcWorks engine (correctness-by-construction):
+  the stateless API server plus the web GUI / reverse proxy. PostgreSQL is
+  provided externally and referenced via a DATABASE_URL secret.
+type: application
+version: 0.3.0
+appVersion: "0.3.0"
+keywords:
+  - bpm
+  - process-engine
+  - adept
+home: https://github.com/your-org/procworks
+sources:
+  - https://github.com/your-org/procworks
+maintainers:
+  - name: Tobias Haecker

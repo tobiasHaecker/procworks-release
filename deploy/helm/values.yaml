@@ -1,0 +1,82 @@
+# Default values for the procworks chart.
+# Override per environment with `-f my-values.yaml` or `--set`.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  registry: ghcr.io
+  repository: your-org/procworks
+  # Image tags default to the chart appVersion unless overridden here.
+  apiTag: ""
+  webTag: ""
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# API server (stateless; horizontally scalable). Reads/writes PostgreSQL.
+# ---------------------------------------------------------------------------
+api:
+  replicaCount: 2
+  port: 8000
+  # Authentication mode for the API boundary. Production default is "password"
+  # (username/password login with coarse RBAC); use "open" only for throwaway
+  # demos -- it grants every role without authentication. On a fresh store a
+  # default 'admin' account is auto-created and its one-off password is written
+  # to the API pod log; log in and change it on first use.
+  authMode: password
+  # Optional: reference a Secret with `login` and `password` keys to pin a known
+  # initial admin instead of the auto-generated one. Leave empty to use the
+  # logged auto-generated password.
+  adminSecret: ""
+  # DATABASE_URL is read from a Kubernetes Secret (never hard-code credentials).
+  # When `database.createSecret` is true the chart creates it from
+  # `database.url`; otherwise set `database.existingSecret` to your own secret.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # Liveness/readiness use the public /health endpoint.
+
+# ---------------------------------------------------------------------------
+# Web GUI + reverse proxy (Caddy). Serves the SPA and proxies /api to the API.
+# ---------------------------------------------------------------------------
+web:
+  replicaCount: 2
+  port: 80
+  # host:port of the API service is wired automatically from the chart name.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# External PostgreSQL (the chart does not bundle a database).
+# ---------------------------------------------------------------------------
+database:
+  createSecret: true
+  # Used only when createSecret is true.
+  url: "postgresql+psycopg://process:process@postgres:5432/procworks"
+  # Used when createSecret is false: reference an existing secret with a
+  # DATABASE_URL key.
+  existingSecret: ""
+  secretKey: DATABASE_URL
+
+# ---------------------------------------------------------------------------
+# Ingress / TLS. With Caddy already terminating TLS you may instead expose the
+# web Service via LoadBalancer; the Ingress is provided for cluster-standard
+# setups (e.g. ingress-nginx + cert-manager).
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: process.example.com
+  tls:
+    enabled: false
+    secretName: procworks-tls

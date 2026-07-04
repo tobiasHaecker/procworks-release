@@ -1,0 +1,22 @@
+Process tool deployed as release "{{ .Release.Name }}".
+
+Components:
+  - API  : {{ include "procworks.api.fullname" . }} ({{ .Values.api.replicaCount }} replica(s))
+  - Web  : {{ include "procworks.web.fullname" . }} ({{ .Values.web.replicaCount }} replica(s))
+
+{{- if .Values.ingress.enabled }}
+Reach the app at: http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+No Ingress is enabled. Port-forward the web service to try it locally:
+
+  kubectl port-forward svc/{{ include "procworks.web.fullname" . }} 8080:{{ .Values.web.port }}
+
+Then open http://localhost:8080 (the web container proxies /api to the API).
+{{- end }}
+
+{{- if .Values.database.createSecret }}
+
+NOTE: The DATABASE_URL secret was created from values (demo credentials).
+For production, set `database.createSecret=false` and reference your own secret
+via `database.existingSecret`.
+{{- end }}

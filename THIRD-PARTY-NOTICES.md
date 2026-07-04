@@ -75,7 +75,7 @@ follow each project's own published metadata at the time of writing.
   semantics, migration criteria) are referenced and re-implemented from scratch
   in original Python — **no ADEPT source code** is used, copied or
   derived. Academic sources are cited in
-  [docs/Architektur-Konzept-Prozessmodellierung.md](https://github.com/tobiasHaecker/procworks/blob/main/docs/Architektur-Konzept-Prozessmodellierung.md),
+  [docs/Architektur-Konzept-Prozessmodellierung.md](https://procworks.de/docs/architektur-konzept.html),
   §15. "ADEPT" is referenced only nominatively/descriptively
   to credit the underlying research; ProcWorks claims no affiliation with or
   endorsement by their owners.

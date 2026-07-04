@@ -3582,9 +3582,23 @@ function listPanel(title, headers, rows, onAdd, addLabel) {
 // View: Hilfe (kontextsensitive In-App-Hilfe + Glossar der Regel-Codes)
 // --------------------------------------------------------------------------
 
-// Documentation lives in the repository; link to the GitHub blobs so the help
-// works even when served as a static client without local file access.
-const DOCS_BASE = "https://github.com/tobiasHaecker/procworks/blob/main/docs/";
+// Public documentation targets. The source repository is private, so links must
+// not point at it: concept docs are published on the website (procworks.de),
+// customer guides live in the public release repo (procworks-release). docUrl()
+// resolves a doc filename to the right public URL for the help view.
+const SITE_DOCS = "https://procworks.de/docs/";
+const RELEASE_DOCS = "https://github.com/tobiasHaecker/procworks-release/blob/main/docs/";
+const DISCLAIMER_URL = "https://github.com/tobiasHaecker/procworks-release/blob/main/DISCLAIMER.md";
+const DOC_URLS = {
+  "Modellierer-Anleitung.md": SITE_DOCS + "modellierer-anleitung.html",
+  "Architektur-Konzept-Prozessmodellierung.md": SITE_DOCS + "architektur-konzept.html",
+  "README.md": SITE_DOCS,
+  "Mitarbeiter-Anleitung.md": RELEASE_DOCS + "Mitarbeiter-Anleitung.md",
+  "Windows-Server-Setup.md": RELEASE_DOCS + "Windows-Server-Setup.md",
+  "Integrations-Leitfaden.md": RELEASE_DOCS + "Integrations-Leitfaden.md",
+};
+// Resolve a documentation filename to its public URL (falls back to the website).
+function docUrl(doc) { return DOC_URLS[doc] || (SITE_DOCS + doc); }
 
 // Short purpose of each navigation view (mirrors VIEW_META plus a one-liner of
 // what the user actually does there).
@@ -3693,7 +3707,7 @@ function viewHelp() {
     el("div", { class: "panel-b" },
       table(["Rolle", "Ziel", "Anleitung"], HELP_QUICKSTART.map(([role, goal, doc]) => [
         role, goal,
-        el("a", { href: DOCS_BASE + doc, target: "_blank", rel: "noopener" }, doc),
+        el("a", { href: docUrl(doc), target: "_blank", rel: "noopener" }, doc),
       ])))));
 
   // Glossary of rule codes, grouped by family.
@@ -3715,9 +3729,9 @@ function viewHelp() {
     el("div", { class: "panel-h" }, el("h2", null, "Weiterf\u00FChrend")),
     el("div", { class: "panel-b" },
       el("ul", { style: "margin:4px 0;padding-left:18px;line-height:1.7" },
-        el("li", null, el("a", { href: DOCS_BASE + "README.md", target: "_blank", rel: "noopener" }, "Dokumentations-\u00DCbersicht (nach Rolle)")),
-        el("li", null, el("a", { href: DOCS_BASE + "Architektur-Konzept-Prozessmodellierung.md", target: "_blank", rel: "noopener" }, "Architektur-Konzept (Korrektheitskriterien, \u00A73)")),
-        el("li", null, el("a", { href: "https://github.com/tobiasHaecker/procworks/blob/main/DISCLAIMER.md", target: "_blank", rel: "noopener" }, "Haftungsausschluss"))))));
+        el("li", null, el("a", { href: docUrl("README.md"), target: "_blank", rel: "noopener" }, "Dokumentations-\u00DCbersicht (nach Rolle)")),
+        el("li", null, el("a", { href: docUrl("Architektur-Konzept-Prozessmodellierung.md"), target: "_blank", rel: "noopener" }, "Architektur-Konzept (Korrektheitskriterien, \u00A73)")),
+        el("li", null, el("a", { href: DISCLAIMER_URL, target: "_blank", rel: "noopener" }, "Haftungsausschluss"))))));
 }
 
 // --------------------------------------------------------------------------
@@ -3860,7 +3874,7 @@ function showLoginOverlay() {
       "ohne jede Haftung bereitgestellt – für keinerlei Schäden an Systemen, ",
       "Daten oder Prozessen. ",
       el("a", {
-        href: "https://github.com/tobiasHaecker/procworks/blob/main/DISCLAIMER.md",
+        href: DISCLAIMER_URL,
         target: "_blank", rel: "noopener",
       }, "Haftungsausschluss")));
   showOverlay(card);

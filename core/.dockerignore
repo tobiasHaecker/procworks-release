@@ -1,0 +1,12 @@
+# Keep the build context small and reproducible.
+**/__pycache__/
+**/*.pyc
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.db
+*.sqlite
+.env
+.venv/
+tests/
+deploy/

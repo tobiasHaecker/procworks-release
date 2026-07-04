@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: BUSL-1.1 -->
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ProcWorks &middot; Client</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">CbC</div>
+      <div>
+        <b>ProcWorks</b>
+        <small>Correctness by Construction</small>
+      </div>
+    </div>
+    <nav class="nav" id="nav">
+      <button data-view="model" class="active"><span class="ico">&#9635;</span> Modellieren</button>
+      <button data-view="data"><span class="ico">&#9783;</span> Datensicht</button>
+      <button data-view="org"><span class="ico">&#9823;</span> Ressourcensicht</button>
+      <button data-view="run"><span class="ico">&#9654;</span> Ausf&uuml;hrung</button>
+      <button data-view="tasks"><span class="ico">&#9776;</span> Meine Aufgaben</button>
+      <button data-view="testrun"><span class="ico">&#9879;</span> Pr&uuml;finstanz</button>
+      <button data-view="monitor"><span class="ico">&#9788;</span> Monitoring</button>
+      <button data-view="integration"><span class="ico">&#8644;</span> Integration</button>
+      <button data-view="help"><span class="ico">&#9432;</span> Hilfe</button>
+    </nav>
+    <div class="side-foot">
+      <div>Status: <span id="conn-pill" class="pill pill-gray">getrennt</span></div>
+      <label class="api-field">API
+        <input id="api-base" type="text" spellcheck="false" />
+      </label>
+      <label class="api-field" id="token-field">Token
+        <input id="auth-token" type="password" spellcheck="false" autocomplete="off"
+               placeholder="Bearer-Token (optional)" />
+      </label>
+      <div id="auth-user" class="muted">Modus: offen (kein Login)</div>
+      <button id="logout-btn" class="btn ghost small" style="display:none">Abmelden</button>
+      <div class="muted">Die GUI ist ein reiner Web-Client &ndash; alle Korrektheits&shy;entscheidungen trifft der Kern.</div>
+      <div class="muted disclaimer-foot">Nutzung auf eigenes Risiko &middot; ohne Gew&auml;hr, keine Haftung &middot;
+        <a href="https://github.com/tobiasHaecker/procworks/blob/main/DISCLAIMER.md" target="_blank" rel="noopener">Haftungsausschluss</a></div>
+      <div id="app-version" class="muted app-version">ProcWorks</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="view-title">Modellieren</h1>
+      <span class="sub" id="view-sub"></span>
+      <span class="spacer"></span>
+      <span id="user-pill" class="pill pill-gray">offen</span>
+      <div id="schema-picker" class="picker"></div>
+    </header>
+    <section class="content" id="content"></section>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root" class="toast-root"></div>
+<div id="auth-overlay" class="auth-overlay" style="display:none"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

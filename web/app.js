@@ -4360,7 +4360,8 @@ const RELEASE_DOCS = "https://github.com/tobiasHaecker/procworks-release/blob/ma
 const DISCLAIMER_URL = "https://github.com/tobiasHaecker/procworks-release/blob/main/DISCLAIMER.md";
 const DOC_URLS = {
   "Modellierer-Anleitung.md": SITE_DOCS + "modellierer-anleitung.html",
-  "Architektur-Konzept-Prozessmodellierung.md": SITE_DOCS + "architektur-konzept.html",
+  // Architektur-Konzept ist bewusst nicht öffentlich (interne IP) und daher
+  // hier nicht verlinkt.
   "README.md": SITE_DOCS,
   "Mitarbeiter-Anleitung.md": RELEASE_DOCS + "Mitarbeiter-Anleitung.md",
   "Windows-Server-Setup.md": RELEASE_DOCS + "Windows-Server-Setup.md",
@@ -4499,7 +4500,6 @@ function viewHelp() {
     el("div", { class: "panel-b" },
       el("ul", { style: "margin:4px 0;padding-left:18px;line-height:1.7" },
         el("li", null, el("a", { href: docUrl("README.md"), target: "_blank", rel: "noopener" }, "Dokumentations-\u00DCbersicht (nach Rolle)")),
-        el("li", null, el("a", { href: docUrl("Architektur-Konzept-Prozessmodellierung.md"), target: "_blank", rel: "noopener" }, "Architektur-Konzept (Korrektheitskriterien, \u00A73)")),
         el("li", null, el("a", { href: DISCLAIMER_URL, target: "_blank", rel: "noopener" }, "Haftungsausschluss"))))));
 }
 

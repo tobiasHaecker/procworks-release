@@ -3125,6 +3125,94 @@ async function viewMonitor() {
         el("div", { style: "display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;" },
           el("button", { class: "btn primary", onClick: () => confirmReset(true) }, "Beispieldaten laden"),
           el("button", { class: "btn danger", onClick: () => confirmReset(false) }, "Auf Null zur\u00FCcksetzen")))));
+
+    // Sicherungen (Administrator, nur Ansicht): zeigt den Zustand der
+    // automatischen Datensicherung (GET /admin/backups) und erlaubt, sofort
+    // eine Sicherung anzustossen (POST /admin/backups/run-now). Die Oberflaeche
+    // fuehrt selbst KEIN pg_dump aus -- sie setzt nur einen Ausloese-Marker.
+    const backupsBody = el("div", { class: "panel-b" });
+    content.appendChild(el("div", { class: "panel" },
+      el("div", { class: "panel-h" },
+        el("h2", null, "Sicherungen"),
+        el("span", { class: "sub" }, "Datensicherung \u00B7 nur Ansicht")),
+      backupsBody));
+    loadBackupsPanel(backupsBody);
+  }
+}
+
+// Groessenangabe menschenlesbar (Bytes -> KB/MB/GB ...).
+function fmtBytes(n) {
+  if (n == null) return "\u2013";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0, x = n;
+  while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
+  return x.toFixed(i ? 1 : 0) + " " + units[i];
+}
+
+// Fuellt den Sicherungen-Bereich asynchron (der Monitoring-Render bleibt sync).
+async function loadBackupsPanel(body) {
+  clear(body);
+  body.appendChild(el("p", { class: "muted" }, "Wird geladen \u2026"));
+  try {
+    const status = await api.get("/admin/backups");
+    clear(body);
+    body.appendChild(renderBackupsBody(status, body));
+  } catch (err) {
+    clear(body);
+    const d = describeError(err);
+    body.appendChild(el("p", { class: "muted" }, d.title));
+  }
+}
+
+// Baut den Inhalt des Sicherungen-Panels aus dem Statusobjekt.
+function renderBackupsBody(status, body) {
+  const frag = document.createDocumentFragment();
+
+  if (!status || !status.available) {
+    frag.appendChild(el("p", { class: "muted" },
+      "F\u00FCr diese Installation ist keine Sicherungs\u00FCbersicht eingerichtet. " +
+      "Im geb\u00FCndelten Stack sichert der Dienst automatisch t\u00E4glich; Details im Betriebs-Backup-Leitfaden."));
+    return frag;
+  }
+
+  const info = el("div", { class: "muted", style: "margin-bottom:10px;" });
+  info.appendChild(el("div", null, "Letzte erfolgreiche Sicherung: " +
+    (status.last_success ? fmtTimestamp(status.last_success) : "\u2013 (noch keine)")));
+  if (status.last_verify_success) {
+    info.appendChild(el("div", null, "Letzter erfolgreicher Selbsttest: " + fmtTimestamp(status.last_verify_success)));
+  }
+  frag.appendChild(info);
+
+  const backups = status.backups || [];
+  if (backups.length) {
+    const rows = backups.map((b) => [
+      b.file,
+      b.created_at ? fmtTimestamp(b.created_at) : "\u2013",
+      b.app_version || "\u2013",
+      fmtBytes(b.size_bytes),
+      b.encrypted ? "ja" : "nein",
+    ]);
+    frag.appendChild(table(["Datei", "Zeitpunkt", "Version", "Gr\u00F6\u00DFe", "Verschl\u00FCsselt"], rows));
+  } else {
+    frag.appendChild(el("p", { class: "muted" }, "Noch keine Sicherungen vorhanden."));
+  }
+
+  frag.appendChild(el("div", { style: "display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;" },
+    el("button", { class: "btn", onClick: () => triggerBackupNow(body) }, "Jetzt sichern"),
+    el("button", { class: "btn small", onClick: () => loadBackupsPanel(body) }, "Aktualisieren")));
+  return frag;
+}
+
+// Fordert eine Sofort-Sicherung an (Marker); der Dienst fuehrt sie kurz darauf aus.
+async function triggerBackupNow(body) {
+  try {
+    await api.post("/admin/backups/run-now");
+    toast("ok", "Sicherung angefordert",
+      ["Der Sicherungsdienst f\u00FChrt sie in K\u00FCrze aus. \u201EAktualisieren\u201C zeigt sie danach an."]);
+    setTimeout(() => loadBackupsPanel(body), 5000);
+  } catch (err) {
+    const d = describeError(err);
+    toast("err", d.title, d.lines);
   }
 }
 

@@ -1,0 +1,23 @@
+{{- /*
+Persistent volume claim for the backup dumps. Skipped when the operator points
+backup.storage.existingClaim at an existing PVC. Kept on a SEPARATE volume from
+the database data so losing one volume does not take out both (concept §8).
+*/ -}}
+{{- if and .Values.backup.enabled (not .Values.backup.storage.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "procworks.backup.pvcName" . }}
+  labels:
+    {{- include "procworks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.backup.storage.size | quote }}
+  {{- if .Values.backup.storage.storageClass }}
+  storageClassName: {{ .Values.backup.storage.storageClass | quote }}
+  {{- end }}
+{{- end }}

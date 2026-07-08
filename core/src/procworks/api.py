@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from procworks import __version__, adhoc, assignment, demo, metrics, migration
+from procworks import __version__, adhoc, assignment, backups, demo, metrics, migration
 from procworks import bpmn as bpmn_io
 from procworks import execution as exe
 from procworks import operations as ops
@@ -1152,6 +1152,49 @@ def post_admin_reset(
         users=_user_count(),
     )
 
+
+class RunNowResponse(BaseModel):
+    """Result of asking the backup scheduler to run now."""
+
+    requested: bool = Field(description="True when the .run-now marker was written")
+
+
+@app.get("/admin/backups", response_model=backups.BackupsStatus, dependencies=[_admin])
+def get_admin_backups() -> backups.BackupsStatus:
+    """List known datensicherungen and their status (admin only, read-only).
+
+    Reads only the metadata index the backup scheduler publishes into the shared
+    control directory -- never the dump volume itself (the API has no access to
+    the dumps, per the concept's security rule). Reports ``available = false``
+    when no control directory is configured or nothing has been published yet,
+    so the GUI can show a clear "not configured" state instead of an error.
+    """
+    return backups.load_status(backups.control_dir())
+
+
+@app.post("/admin/backups/run-now", response_model=RunNowResponse, dependencies=[_admin])
+def post_admin_backup_run_now() -> RunNowResponse:
+    """Ask the scheduler to take a backup now (admin only).
+
+    The API never runs ``pg_dump`` itself; it only drops a ``.run-now`` marker in
+    the shared control directory, which the scheduler polls (file-based handoff,
+    no coupling, no database dump rights in the API). Returns HTTP 503 when the
+    backup control surface is not wired for this deployment, and HTTP 500 if the
+    marker cannot be written (e.g. a read-only control volume).
+    """
+    directory = backups.control_dir()
+    if directory is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Backup control directory is not configured for this deployment.",
+        )
+    try:
+        backups.request_run_now(directory)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Could not write the backup trigger: {exc}"
+        ) from exc
+    return RunNowResponse(requested=True)
 
 
 @app.get("/schemas", dependencies=[_read])

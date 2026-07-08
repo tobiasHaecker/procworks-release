@@ -327,19 +327,40 @@ docker compose -f deploy/docker-compose.full.yml up --build -d
 
 Migrationen werden beim Start automatisch angewendet.
 
-### Datensicherung (PostgreSQL)
+### Datensicherung (automatisch)
+
+Der mitgelieferte Stack enthält einen **`backup`-Dienst**, der **ohne weitere
+Einrichtung** täglich (02:00 UTC) eine konsistente Sicherung der Datenbank
+erstellt, sie mit Prüfsumme und Versionsangaben versieht und alte Sicherungen
+nach dem Großvater-Vater-Sohn-Schema ausdünnt (14 tägliche, 8 wöchentliche,
+6 monatliche). Die Sicherungen liegen im Docker-Volume `procworks_backups`.
+
+Vorhandene Sicherungen ansehen:
 
 ```powershell
-docker compose -f deploy/docker-compose.full.yml exec -T postgres `
-  pg_dump -U process procworks > backup_procworks.sql
+docker compose -f deploy/docker-compose.full.yml exec backup ls -lh /backups
 ```
 
-Wiederherstellen (in eine leere DB):
+Sofort eine Sicherung auslösen (der Zeitplan-Dienst führt sie binnen ~30 s aus):
 
 ```powershell
-Get-Content backup_procworks.sql | docker compose -f deploy/docker-compose.full.yml exec -T postgres `
-  psql -U process -d procworks
+docker compose -f deploy/docker-compose.full.yml exec backup touch /backups/.run-now
 ```
+
+**Wiederherstellen** (ersetzt die Datenbank – API vorher stilllegen):
+
+```powershell
+docker compose -f deploy/docker-compose.full.yml stop api
+docker compose -f deploy/docker-compose.full.yml run --rm `
+  --entrypoint /opt/backup/restore.sh backup --latest --yes
+docker compose -f deploy/docker-compose.full.yml up -d api
+```
+
+> **Dringend empfohlen:** Das Volume `procworks_backups` zusätzlich **außer Haus**
+> kopieren (eine Sicherung auf demselben Server überlebt keinen Totalausfall).
+> Alle Details – Aufbewahrung feinjustieren, Verschlüsselung, Off-Site-Kopie,
+> Selbsttest, Kubernetes – stehen im
+> [Betriebs-Backup-Leitfaden](./Betriebs-Backup-Leitfaden.md).
 
 ---
 

@@ -47,3 +47,21 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- $tag := .Values.image.webTag | default .Chart.AppVersion -}}
 {{- printf "%s/%s-web:%s" .Values.image.registry .Values.image.repository $tag -}}
 {{- end -}}
+
+{{/* Backup component names. */}}
+{{- define "procworks.backup.fullname" -}}
+{{- printf "%s-backup" (include "procworks.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "procworks.backup.configMapName" -}}
+{{- printf "%s-backup-scripts" (include "procworks.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/* Name of the PVC holding the backups (existing claim wins). */}}
+{{- define "procworks.backup.pvcName" -}}
+{{- if .Values.backup.storage.existingClaim -}}
+{{- .Values.backup.storage.existingClaim -}}
+{{- else -}}
+{{- printf "%s-backups" (include "procworks.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}

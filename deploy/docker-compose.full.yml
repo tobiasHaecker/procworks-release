@@ -38,11 +38,17 @@ services:
       # Pin a known admin instead by setting PROCWORKS_ADMIN_LOGIN +
       # PROCWORKS_ADMIN_PASSWORD.
       PROCWORKS_AUTH: password
+      # Read-only backup admin view (GET /admin/backups, POST …/run-now): the API
+      # only reads the metadata index the backup scheduler publishes here and
+      # writes a .run-now trigger. It has NO access to the dump volume (§9).
+      PROCWORKS_BACKUP_CONTROL_DIR: /control
     depends_on:
       postgres:
         condition: service_healthy
     expose:
       - "8000"
+    volumes:
+      - procworks_backup_control:/control
 
   web:
     build:
@@ -65,7 +71,46 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  # Out-of-the-box datensicherung: a small scheduler that produces one
+  # consistent pg_dump per day (concept docs/Backup-und-Restore-Konzept.md).
+  # Built from the postgres image (pg_dump/pg_restore already inside) plus gnupg
+  # for optional encryption at rest; writes to the dedicated procworks_backups
+  # volume. Runs entirely on the operations layer -- the API/core is untouched.
+  backup:
+    build:
+      context: ./backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # libpq connection to the bundled database.
+      PGHOST: postgres
+      PGUSER: process
+      PGPASSWORD: process
+      PGDATABASE: procworks
+      # Schedule + retention (Grandfather-Father-Son). All overridable.
+      BACKUP_CRON: "0 2 * * *"        # daily at 02:00 UTC
+      BACKUP_KEEP_DAILY: "14"
+      BACKUP_KEEP_WEEKLY: "8"
+      BACKUP_KEEP_MONTHLY: "6"
+      # Shared control surface for the read-only admin view (metadata only, no
+      # dumps): the scheduler publishes backups-index.json here and watches for
+      # the API's .run-now trigger.
+      BACKUP_CONTROL_DIR: "/control"
+      # Optional hardening/extension hooks (see the concept, left empty here):
+      #   BACKUP_PASSPHRASE   -> symmetric encryption at rest (needs gpg/age)
+      #   BACKUP_SYNC_CMD     -> off-site copy command (rsync/rclone/aws s3 ...)
+      #   BACKUP_ALERT_WEBHOOK-> POST backup success/failure to an ops endpoint
+    volumes:
+      - procworks_backups:/backups
+      - procworks_backup_control:/control
+      - ./backup:/opt/backup:ro       # mitgelieferte Skripte (relativ zu deploy/)
+    entrypoint: ["/bin/sh", "/opt/backup/run-scheduler.sh"]
+
 volumes:
   procworks_pgdata:
+  procworks_backups:                  # persistente Ablage der Sicherungen
+  procworks_backup_control:           # metadaten-Index + .run-now für die Admin-Sicht
   caddy_data:
   caddy_config:

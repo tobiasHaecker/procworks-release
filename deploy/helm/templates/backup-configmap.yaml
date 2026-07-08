@@ -1,0 +1,17 @@
+{{- /*
+ConfigMap carrying the backup/restore shell scripts, mounted read-only into the
+CronJob and the restore Job at /opt/backup. Built from deploy/helm/files/backup/
+(kept in sync with the canonical deploy/backup/ scripts by a CI guard test).
+No image rebuild is required to update the scripts -- only a chart upgrade.
+*/ -}}
+{{- if .Values.backup.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "procworks.backup.configMapName" . }}
+  labels:
+    {{- include "procworks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+data:
+{{ (.Files.Glob "files/backup/*.sh").AsConfig | indent 2 }}
+{{- end }}

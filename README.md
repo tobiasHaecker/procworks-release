@@ -132,12 +132,21 @@ alle: `demo-procworks`):
 - web/                         # Schlanker No-Build-Web-Client (HTML/CSS/JS)
 - deploy/                      # Caddyfile, docker-compose.full.yml, Helm-Chart
 - docs/Windows-Server-Setup.md # Ausführliche Installations- und Betriebsanleitung
+- docs/Betriebs-Backup-Leitfaden.md # Sichern & Wiederherstellen im Betrieb
+- docs/PITR-Leitfaden.md        # Optional: Point-in-Time-Recovery (fortgeschritten)
 - LICENSE                      # Business Source License 1.1
 - DISCLAIMER.md                # Vollständiger Haftungsausschluss
 ```
 
 Details zum Backend-Kern (API-Endpunkte, lokale Entwicklung, Tests):
 [core/README.md](core/README.md).
+
+## Datensicherung
+
+Der mitgelieferte Stack sichert die Datenbank **automatisch täglich** (eigener
+`backup`-Dienst, keine Einrichtung nötig). Wie Sie Sicherungen ansehen, außer
+Haus kopieren, verschlüsseln und im Ernstfall zurückspielen, steht im
+[Betriebs-Backup-Leitfaden](docs/Betriebs-Backup-Leitfaden.md).
 
 ## Lizenz
 

@@ -1,0 +1,76 @@
+{{- /*
+One-off restore Job (rendered only when backup.restore.enabled=true). Replaces
+the database from a chosen dump in a single transaction. It does NOT scale the
+API down itself -- restore.sh refuses to run while other clients are connected
+(the "no writers" invariant, concept §3.2/§6). Operator flow:
+  kubectl scale deploy/<release>-procworks-api --replicas=0
+  helm upgrade <release> ./deploy/helm --set backup.restore.enabled=true \
+      --set backup.restore.file=procworks-2026-07-01T02-00.dump
+  kubectl scale deploy/<release>-procworks-api --replicas=<n>   # API auto-migrates
+Delete the completed Job (or set backup.restore.enabled=false) afterwards.
+*/ -}}
+{{- if and .Values.backup.enabled .Values.backup.restore.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "procworks.backup.fullname" . }}-restore
+  labels:
+    {{- include "procworks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup-restore
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "procworks.labels" . | nindent 8 }}
+        app.kubernetes.io/component: backup-restore
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: restore
+          image: {{ .Values.backup.image | quote }}
+          imagePullPolicy: {{ .Values.backup.pullPolicy }}
+          command: ["/bin/sh", "/opt/backup/restore.sh"]
+          args:
+            {{- if .Values.backup.restore.file }}
+            - "--file"
+            - {{ .Values.backup.restore.file | quote }}
+            {{- else }}
+            - "--latest"
+            {{- end }}
+            - "--yes"
+            {{- if .Values.backup.restore.force }}
+            - "--force"
+            {{- end }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "procworks.database.secretName" . }}
+                  key: {{ .Values.database.secretKey }}
+            - name: BACKUP_DIR
+              value: /backups
+            {{- if .Values.backup.passphraseSecret }}
+            - name: BACKUP_PASSPHRASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backup.passphraseSecret }}
+                  key: passphrase
+            {{- end }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /opt/backup
+              readOnly: true
+            - name: backups
+              mountPath: /backups
+          resources:
+            {{- toYaml .Values.backup.resources | nindent 12 }}
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "procworks.backup.configMapName" . }}
+            defaultMode: 0555
+        - name: backups
+          persistentVolumeClaim:
+            claimName: {{ include "procworks.backup.pvcName" . }}
+{{- end }}

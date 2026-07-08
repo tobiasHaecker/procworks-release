@@ -3,6 +3,9 @@ Process tool deployed as release "{{ .Release.Name }}".
 Components:
   - API  : {{ include "procworks.api.fullname" . }} ({{ .Values.api.replicaCount }} replica(s))
   - Web  : {{ include "procworks.web.fullname" . }} ({{ .Values.web.replicaCount }} replica(s))
+{{- if .Values.backup.enabled }}
+  - Backup: {{ include "procworks.backup.fullname" . }} (CronJob, schedule "{{ .Values.backup.schedule }}", PVC {{ include "procworks.backup.pvcName" . }})
+{{- end }}
 
 {{- if .Values.ingress.enabled }}
 Reach the app at: http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
@@ -19,4 +22,14 @@ Then open http://localhost:8080 (the web container proxies /api to the API).
 NOTE: The DATABASE_URL secret was created from values (demo credentials).
 For production, set `database.createSecret=false` and reference your own secret
 via `database.existingSecret`.
+{{- end }}
+
+{{- if .Values.backup.enabled }}
+
+Backups run daily ({{ .Values.backup.schedule }}) into PVC "{{ include "procworks.backup.pvcName" . }}".
+  - Trigger one now:   kubectl create job --from=cronjob/{{ include "procworks.backup.fullname" . }} backup-now
+  - List dumps:        kubectl exec deploy/... is not applicable; inspect the PVC or a debug pod on it.
+To restore, scale the API to 0, run the restore Job, then scale it back up (it
+re-applies migrations on start). See the `backup.restore.*` values and
+docs/Backup-und-Restore-Konzept.md §6.4.
 {{- end }}

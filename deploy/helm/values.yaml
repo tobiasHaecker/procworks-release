@@ -56,6 +56,53 @@ web:
       memory: 256Mi
 
 # ---------------------------------------------------------------------------
+# Out-of-the-box datensicherung (concept: docs/Backup-und-Restore-Konzept.md).
+# A CronJob takes one consistent pg_dump per day into a PVC, with GFS retention.
+# The scripts are loaded from a ConfigMap (deploy/helm/files/backup/*.sh) -- no
+# image rebuild needed. The image only has to carry pg_dump/pg_restore/psql.
+# ---------------------------------------------------------------------------
+backup:
+  enabled: true
+  # Image providing pg_dump/pg_restore/psql. Match the server's major version.
+  image: postgres:16-alpine
+  pullPolicy: IfNotPresent
+  schedule: "0 2 * * *"          # CronJob schedule (cluster timezone / UTC)
+  keepDaily: 14                  # Grandfather-Father-Son retention
+  keepWeekly: 8
+  keepMonthly: 6
+  # CronJob safety knobs.
+  startingDeadlineSeconds: 3600  # skip a run missed by more than 1h
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  storage:
+    size: 10Gi
+    storageClass: ""             # "" = cluster default StorageClass
+    existingClaim: ""            # set to reuse an existing PVC instead
+  # Optional symmetric encryption at rest (GnuPG): reference a Secret with a
+  # `passphrase` key. NOTE: the default postgres image has no gpg; set
+  # `backup.image` to one that includes it (build & push deploy/backup/Dockerfile,
+  # = postgres:16-alpine + gnupg) when enabling this.
+  passphraseSecret: ""
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # One-off restore Job. Rendered only when enabled (keep it false in normal
+  # operation). The restore refuses to run while the API is still connected, so
+  # scale the API to 0 first:
+  #   kubectl scale deploy/<release>-procworks-api --replicas=0
+  #   helm upgrade <release> ./deploy/helm --set backup.restore.enabled=true \
+  #       --set backup.restore.file=procworks-2026-07-01T02-00.dump
+  #   kubectl scale deploy/<release>-procworks-api --replicas=2   # auto-migrates
+  restore:
+    enabled: false
+    file: ""                     # dump filename to restore; "" = newest (--latest)
+    force: false                 # override non-empty-DB / connected-clients guards
+
+# ---------------------------------------------------------------------------
 # External PostgreSQL (the chart does not bundle a database).
 # ---------------------------------------------------------------------------
 database:

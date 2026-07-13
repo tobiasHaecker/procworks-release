@@ -12,6 +12,7 @@ This module holds no correctness logic; it only observes what already happened.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -33,10 +34,30 @@ class EventType(StrEnum):
     ADHOC_RENAMED = "ADHOC_RENAMED"
     INSTANCE_MIGRATED = "INSTANCE_MIGRATED"
     INSTANCE_COMPLETED = "INSTANCE_COMPLETED"
+    MAIL_SENT = "MAIL_SENT"          # modelled notification delivered (metadata only)
+    MAIL_FAILED = "MAIL_FAILED"      # notification dead-lettered after retries (metadata)
+    #: A monotone time-ratchet checkpoint of the licensing layer, embedded into
+    #: the hash chain so the effective-time high-water-mark cannot be silently
+    #: rolled back (licensing concept §5A.4). It is *not* a process event and is
+    #: excluded from KPI/mining aggregation via :data:`NON_PROCESS_EVENTS`.
+    TIME_ANCHOR = "TIME_ANCHOR"
+
+
+#: Event types that are recorded for tamper evidence but do not describe process
+#: progress; aggregation (KPIs, process map, per-instance grouping) skips them.
+NON_PROCESS_EVENTS: frozenset[EventType] = frozenset({EventType.TIME_ANCHOR})
 
 
 class AuditEvent(BaseModel):
-    """A single, immutable entry of the event history."""
+    """A single, immutable entry of the event history.
+
+    ``prev_hash``/``entry_hash`` form an append-only hash chain over the whole
+    log: ``entry_hash = H(prev_hash ‖ canonical(event))``. Rewinding or editing
+    any past entry requires re-writing every subsequent hash, turning tampering
+    (e.g. to roll back the licensing time ratchet) into a visible, consistent
+    rewrite rather than a single silent field change. The fields default to the
+    empty string so pre-existing callers/records stay valid (additive).
+    """
 
     seq: int
     timestamp: datetime
@@ -48,6 +69,47 @@ class AuditEvent(BaseModel):
     label: str | None = None
     agent_id: str | None = None
     detail: dict[str, str] = Field(default_factory=dict)
+    prev_hash: str = ""
+    entry_hash: str = ""
+
+
+def chain_hash(
+    prev_hash: str,
+    *,
+    seq: int,
+    timestamp: datetime,
+    event_type: EventType,
+    instance_id: str,
+    schema_id: str,
+    schema_version: int,
+    node_id: str | None,
+    label: str | None,
+    agent_id: str | None,
+    detail: dict[str, str],
+) -> str:
+    """Return the chain hash of one entry given the previous entry's hash.
+
+    Both audit-log backends call this so the chain is computed identically. The
+    canonical form pins the semantic fields (never the hashes themselves) in a
+    fixed order with sorted ``detail`` keys.
+    """
+
+    core = "\x1f".join(
+        [
+            prev_hash,
+            str(seq),
+            timestamp.isoformat(),
+            event_type.value,
+            instance_id,
+            schema_id,
+            str(schema_version),
+            node_id or "",
+            label or "",
+            agent_id or "",
+            "\x1e".join(f"{k}={detail[k]}" for k in sorted(detail)),
+        ]
+    )
+    return hashlib.sha256(core.encode()).hexdigest()
 
 
 class AuditLog(Protocol):
@@ -72,6 +134,10 @@ class AuditLog(Protocol):
 
     def revision(self) -> int: ...
 
+    def head_hash(self) -> str: ...
+
+    def max_event_time(self) -> float: ...
+
     def clear(self) -> None: ...
 
 
@@ -81,6 +147,7 @@ class InMemoryAuditLog:
     def __init__(self) -> None:
         self._events: list[AuditEvent] = []
         self._seq = 0
+        self._head = ""
 
     def append(
         self,
@@ -95,9 +162,12 @@ class InMemoryAuditLog:
         detail: dict[str, str] | None = None,
     ) -> AuditEvent:
         self._seq += 1
-        event = AuditEvent(
+        timestamp = datetime.now(UTC)
+        detail = detail or {}
+        entry_hash = chain_hash(
+            self._head,
             seq=self._seq,
-            timestamp=datetime.now(UTC),
+            timestamp=timestamp,
             event_type=event_type,
             instance_id=instance_id,
             schema_id=schema_id,
@@ -105,8 +175,23 @@ class InMemoryAuditLog:
             node_id=node_id,
             label=label,
             agent_id=agent_id,
-            detail=detail or {},
+            detail=detail,
         )
+        event = AuditEvent(
+            seq=self._seq,
+            timestamp=timestamp,
+            event_type=event_type,
+            instance_id=instance_id,
+            schema_id=schema_id,
+            schema_version=schema_version,
+            node_id=node_id,
+            label=label,
+            agent_id=agent_id,
+            detail=detail,
+            prev_hash=self._head,
+            entry_hash=entry_hash,
+        )
+        self._head = entry_hash
         self._events.append(event)
         return event
 
@@ -126,9 +211,26 @@ class InMemoryAuditLog:
 
         return self._seq
 
+    def head_hash(self) -> str:
+        """Return the newest entry's chain hash ("" when the log is empty)."""
+
+        return self._head
+
+    def max_event_time(self) -> float:
+        """Return the newest recorded timestamp as epoch seconds (0.0 if empty).
+
+        A monotone lower bound on real time for the licensing ratchet: an
+        append-only log never moves this backwards.
+        """
+
+        if not self._events:
+            return 0.0
+        return max(e.timestamp.timestamp() for e in self._events)
+
     def clear(self) -> None:
         self._events.clear()
         self._seq = 0
+        self._head = ""
 
 
 def create_audit_log() -> AuditLog:
@@ -220,6 +322,8 @@ def _by_instance(
 ) -> dict[str, list[AuditEvent]]:
     grouped: dict[str, list[AuditEvent]] = {}
     for event in events:
+        if event.event_type in NON_PROCESS_EVENTS:
+            continue  # tamper-evidence checkpoints are not process progress
         if schema_id is not None and event.schema_id != schema_id:
             continue
         grouped.setdefault(event.instance_id, []).append(event)

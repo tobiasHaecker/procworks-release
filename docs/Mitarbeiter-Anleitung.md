@@ -75,7 +75,18 @@ Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt s
    Daten aus und bestätige. Die Aufgabe verschwindet danach aus der Liste;
    Folgeaufgaben erscheinen automatisch.
 
-6. **Abmelden.**
+6. **Abwesenheit eintragen (Urlaub / Vertretung).**
+   Unten in **„Meine Aufgaben"** findest du den Bereich
+   **„Abwesenheit / Vertretung"**. Trage dort einen Zeitraum ein (**Von** / **Bis**,
+   optional eine Notiz wie „Urlaub") und klicke auf **„Abwesenheit eintragen"**.
+   Solange du abwesend bist, erhält deine hinterlegte **Vertretung** deine
+   Aufgaben **zusätzlich** – du selbst behältst sie ebenfalls, es geht also nichts
+   verloren. Bestehende Einträge kannst du dort auch wieder **entfernen**.
+   - Ist **keine Vertretung** hinterlegt, weist ein Hinweis darauf hin: Deine
+     Aufgaben bleiben dann während der Abwesenheit **dir** zugewiesen (die
+     Vertretung legt der Administrator in der Organisation fest).
+
+7. **Abmelden.**
    Über **„Abmelden"** in der linken Seitenleiste. Beim nächsten Mal meldest du
    dich mit deinem selbst gewählten Passwort an. Das Passwort kannst du jederzeit
    über **„Passwort ändern"** anpassen.

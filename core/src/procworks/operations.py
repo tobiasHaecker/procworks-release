@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from procworks.model import (
     JOIN_TYPES,
@@ -40,12 +41,14 @@ from procworks.model import (
     Form,
     FormField,
     LifecycleState,
+    MailBinding,
     Node,
     NodeType,
     OrderBy,
     OrgModel,
     OrgUnit,
     ProcessSchema,
+    ProcessTemplate,
     QueryFilter,
     Role,
     ServiceBinding,
@@ -53,6 +56,7 @@ from procworks.model import (
     SqlWriteBinding,
     StaffRule,
     SubProcessBinding,
+    TemplateOrigin,
     TemplateParameter,
     TimeConstraint,
     ValueClass,
@@ -436,16 +440,91 @@ def _drop_nodes(candidate: ProcessSchema, to_remove: set[str]) -> None:
     ]
 
 
-def _delete_single_node_branch(
+def _refresh_xor_captions(candidate: ProcessSchema, split_id: str) -> None:
+    """Regenerate the display captions on all edges leaving an XOR split.
+
+    The structured :class:`XorDecision` is the source of truth; each branch's
+    outgoing edge (matched by target -- unique, because a split carries at most
+    one empty branch) gets its derived predicate text refreshed. Called after a
+    branch is emptied or removed so the captions stay in sync with the (possibly
+    reordered) partition. Silently returns if the split has no decision or its
+    discriminator element is gone (both are separately flagged by K7).
+    """
+
+    decision = candidate.xor_decisions.get(split_id)
+    if decision is None:
+        return
+    element = candidate.data_elements.get(decision.discriminator)
+    if element is None:
+        return
+    edge_by_target = {e.target: e for e in candidate.outgoing(split_id)}
+    for index, branch in enumerate(decision.branches):
+        edge = edge_by_target.get(branch.target)
+        if edge is not None:
+            edge.condition = xor_condition_text(element.name, decision, index)
+
+
+def _empty_out_xor_branch(
     candidate: ProcessSchema, node_id: str, split_id: str, join_id: str
 ) -> ProcessSchema:
-    """Remove the branch ``split -> node -> join`` whose sole content is ``node``.
+    """Empty an XOR branch instead of removing it: keep it as ``split -> join``.
 
-    Removing the last node of a branch removes the branch itself (no empty
-    ``split -> join`` edge is left behind). If more than one branch survives,
-    the gateway is kept with that branch gone; if exactly one branch remains,
-    the whole gateway is dissolved and the surviving branch is spliced inline
-    between the split's predecessor and the join's successor.
+    Removing the sole activity of an XOR branch leaves the branch **standing but
+    empty** -- a direct ``split -> join`` edge whose :class:`XorBranch` keeps its
+    partition cell. Because the cell is retained, the XOR partition (K7) stays
+    total and disjoint automatically, and the modeller can express "only in one
+    branch does work occur" (the other branch simply skips to the join).
+
+    An XOR split may carry **at most one** empty branch (it must keep at least
+    one non-empty branch): emptying a branch when another is already empty is
+    rejected -- remove the whole branch block instead. This one-empty cap keeps
+    the ``split -> join`` edge unique (the runtime keys edges by source+target),
+    so an empty branch can never collide with a second one.
+    """
+
+    decision = candidate.xor_decisions.get(split_id)
+    if decision is not None and any(b.target == join_id for b in decision.branches):
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=split_id,
+                    message=(
+                        "an XOR split must keep at least one non-empty branch; "
+                        "remove the whole branch block instead"
+                    ),
+                )
+            ]
+        )
+
+    # Drop the node's own edges (split -> node, node -> join) ...
+    candidate.edges = [
+        e for e in candidate.edges if e.source != node_id and e.target != node_id
+    ]
+    # ... retarget the branch onto the join (keeping its K7 cell) and wire the
+    # empty branch as a direct split -> join edge.
+    if decision is not None:
+        for branch in decision.branches:
+            if branch.target == node_id:
+                branch.target = join_id
+                break
+    candidate.edges.append(ControlEdge(source=split_id, target=join_id))
+    _drop_nodes(candidate, {node_id})
+    _refresh_xor_captions(candidate, split_id)
+    return raise_if_invalid(candidate)
+
+
+def _remove_and_branch(
+    candidate: ProcessSchema, node_id: str, split_id: str, join_id: str
+) -> ProcessSchema:
+    """Remove the AND branch ``split -> node -> join`` whose sole content is ``node``.
+
+    For a parallel (AND) split an empty branch carries no meaning (every branch
+    runs anyway), so removing the last node removes the branch itself. If more
+    than one branch survives, the gateway is kept with that branch gone; if
+    exactly one branch remains, the whole gateway is dissolved and the surviving
+    branch is spliced inline between the split's predecessor and the join's
+    successor.
     """
 
     candidate.edges = [
@@ -454,12 +533,6 @@ def _delete_single_node_branch(
     remaining = candidate.outgoing(split_id)
     if len(remaining) >= 2:
         # The gateway still has at least two branches -> just drop this one.
-        # Keep the structured decision in sync; removing a single branch leaves
-        # a gap in the partition, so K7 (re-checked below) rejects unless the
-        # remaining cells still tile the domain -- exactly the CbC guarantee.
-        decision = candidate.xor_decisions.get(split_id)
-        if decision is not None:
-            decision.branches = [b for b in decision.branches if b.target != node_id]
         _drop_nodes(candidate, {node_id})
         return raise_if_invalid(candidate)
 
@@ -480,6 +553,23 @@ def _delete_single_node_branch(
     return raise_if_invalid(candidate)
 
 
+def _delete_single_node_branch(
+    candidate: ProcessSchema, node_id: str, split_id: str, join_id: str
+) -> ProcessSchema:
+    """Delete the sole content ``node`` of a gateway branch ``split -> node -> join``.
+
+    Dispatches on the gateway kind: for an **XOR** split the branch is kept as an
+    empty ``split -> join`` branch (see :func:`_empty_out_xor_branch`), so the
+    modeller can model "work only in one branch"; for an **AND** split the branch
+    is removed outright (see :func:`_remove_and_branch`), because an empty
+    parallel branch is meaningless.
+    """
+
+    if candidate.nodes[split_id].type is NodeType.XOR_SPLIT:
+        return _empty_out_xor_branch(candidate, node_id, split_id, join_id)
+    return _remove_and_branch(candidate, node_id, split_id, join_id)
+
+
 def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
     """Delete a node from a draft, closing the resulting gap.
 
@@ -493,8 +583,13 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
               closed. Deleting the sole node of a gateway branch removes that
               branch; if only a single branch then remains, the entire gateway
               (split and matching join) is dissolved and the surviving branch
-              is kept inline. Dependent data accesses, staff rules and service/
-              sub-process bindings of every removed node are dropped. The
+              is kept inline. Deleting the sole activity of an **XOR** branch is
+              different: the branch is kept as an **empty** ``split -> join``
+              branch (retaining its K7 cell), so the model can express "work only
+              in one branch"; the empty branch is removed on demand via
+              :func:`remove_empty_branch`. Dependent data accesses, staff rules
+              and service/sub-process bindings of every removed node are dropped.
+              The
               result is validated (validate-before-commit): a deletion that
               would orphan a still-needed data write is rejected (D1) -- this
               keeps Correctness by Construction across deletions.
@@ -565,6 +660,91 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
         if e.source not in to_remove and e.target not in to_remove
     ]
     candidate.edges.append(ControlEdge(source=predecessor_id, target=successor_id))
+    return raise_if_invalid(candidate)
+
+
+def remove_empty_branch(schema: ProcessSchema, split_id: str) -> ProcessSchema:
+    """Manually remove the empty branch of an XOR split.
+
+    An empty branch (a direct ``split -> join`` edge, left behind when the sole
+    activity of a branch was deleted) can be removed on demand. Two outcomes,
+    both validate-before-commit:
+
+    - If exactly one non-empty branch would remain, the whole gateway is
+      dissolved and that branch is spliced inline between the split's
+      predecessor and the join's successor -- the XOR disappears and the model
+      is a plain sequence again.
+    - If two or more branches remain, only the empty branch's cell is dropped and
+      the gateway is kept. The result is fully re-validated: for THRESHOLD the
+      freed range merges seamlessly into the neighbouring branch and for an ENUM
+      values-branch the values fall through to the catch-all, so K7 stays total;
+      dropping a required catch-all is rejected (K7) and the schema is unchanged.
+
+    requires: schema editable (R0); ``split_id`` is an XOR_SPLIT that currently
+              carries exactly one empty branch.
+    ensures:  the empty branch is gone; K1-K3, K7 and the data-flow rules hold.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    node = _require_node(candidate, split_id)
+    if node.type is not NodeType.XOR_SPLIT:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=split_id,
+                    message="only an XOR split can carry an empty branch",
+                )
+            ]
+        )
+    join_id, _ = _matching_block(candidate, split_id)
+    decision = candidate.xor_decisions.get(split_id)
+    empty_branches = (
+        [b for b in decision.branches if b.target == join_id] if decision else []
+    )
+    if not empty_branches:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=split_id,
+                    message="this XOR split has no empty branch to remove",
+                )
+            ]
+        )
+
+    # Drop the empty branch: its direct split -> join edge and its partition cell.
+    candidate.edges = [
+        e
+        for e in candidate.edges
+        if not (e.source == split_id and e.target == join_id)
+    ]
+    if decision is not None:
+        decision.branches = [b for b in decision.branches if b.target != join_id]
+
+    remaining = candidate.outgoing(split_id)
+    if len(remaining) >= 2:
+        # The gateway keeps two or more branches -> K7 re-validates the
+        # remaining partition (THRESHOLD/ENUM stay total; a lost catch-all is
+        # rejected). Captions may shift because a cell was dropped.
+        _refresh_xor_captions(candidate, split_id)
+        return raise_if_invalid(candidate)
+
+    # Only a single branch remains -> dissolve the gateway and keep it inline.
+    predecessor_id = candidate.incoming(split_id)[0].source
+    successor_id = candidate.outgoing(join_id)[0].target
+    head_id = remaining[0].target
+    tail_id = candidate.incoming(join_id)[0].source
+    to_remove = {split_id, join_id}
+    candidate.edges = [
+        e
+        for e in candidate.edges
+        if e.source not in to_remove and e.target not in to_remove
+    ]
+    candidate.edges.append(ControlEdge(source=predecessor_id, target=head_id))
+    candidate.edges.append(ControlEdge(source=tail_id, target=successor_id))
+    _drop_nodes(candidate, to_remove)
     return raise_if_invalid(candidate)
 
 
@@ -1142,11 +1322,14 @@ def add_agent(
     org_unit_id: str | None = None,
     agent_id: str | None = None,
     deputy_id: str | None = None,
+    email: str | None = None,
 ) -> ProcessSchema:
     """Add an agent (actor) and link it to existing roles / an org unit.
 
     ``deputy_id`` (optional) names a stand-in agent; it must reference an
-    existing agent and cannot be the agent itself (checked via Z1).
+    existing agent and cannot be the agent itself (checked via Z1). ``email``
+    (optional) is the agent's personal mailbox for e-mail notifications; a
+    malformed address is rejected (N1).
     """
 
     candidate = schema.model_copy(deep=True)
@@ -1168,7 +1351,12 @@ def add_agent(
             [ValidationFinding(rule="OP", message=f"org unit '{org_unit_id}' does not exist")]
         )
     candidate.org_model.agents[aid] = Agent(
-        id=aid, name=name, role_ids=roles, org_unit_id=org_unit_id, deputy_id=deputy_id
+        id=aid,
+        name=name,
+        role_ids=roles,
+        org_unit_id=org_unit_id,
+        deputy_id=deputy_id,
+        email=email,
     )
     return raise_if_invalid(candidate)
 
@@ -1191,6 +1379,49 @@ def set_org_unit_manager(
             [ValidationFinding(rule="OP", message=f"org unit '{org_unit_id}' does not exist")]
         )
     unit.manager_id = manager_id
+    return raise_if_invalid(candidate)
+
+
+def set_role_mailbox(
+    schema: ProcessSchema, role_id: str, mailbox: str | None
+) -> ProcessSchema:
+    """Set (or clear with ``None``) a role's shared group mailbox (rule group N).
+
+    Addresses are org master data (not process structure), so this is allowed on
+    a RELEASED schema too and takes immediate effect. A malformed address is
+    rejected (N1); removing a mailbox a group notification still needs is
+    rejected (N3), so a released process never loses a required address.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_local_org(candidate)
+    role = candidate.org_model.roles.get(role_id)
+    if role is None:
+        raise CorrectnessError(
+            [ValidationFinding(rule="OP", message=f"role '{role_id}' does not exist")]
+        )
+    role.mailbox = mailbox
+    return raise_if_invalid(candidate)
+
+
+def set_unit_mailbox(
+    schema: ProcessSchema, org_unit_id: str, mailbox: str | None
+) -> ProcessSchema:
+    """Set (or clear with ``None``) an org unit's department mailbox (rule group N).
+
+    Same master-data semantics as :func:`set_role_mailbox`: allowed on a RELEASED
+    schema, well-formedness checked (N1), and a mailbox a group notification
+    still needs cannot be removed (N3).
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_local_org(candidate)
+    unit = candidate.org_model.org_units.get(org_unit_id)
+    if unit is None:
+        raise CorrectnessError(
+            [ValidationFinding(rule="OP", message=f"org unit '{org_unit_id}' does not exist")]
+        )
+    unit.mailbox = mailbox
     return raise_if_invalid(candidate)
 
 
@@ -1317,17 +1548,19 @@ def update_agent(
     name: str | None = None,
     role_ids: list[str] | None = None,
     org_unit_id: str | None | _KeepSentinel = KEEP,
+    email: str | None | _KeepSentinel = KEEP,
 ) -> ProcessSchema:
-    """Update an existing agent's master data (name, roles, org unit).
+    """Update an existing agent's master data (name, roles, org unit, e-mail).
 
     Only the provided fields change: ``name`` / ``role_ids`` left at ``None``
-    keep their current value, and ``org_unit_id`` defaults to the ``KEEP``
-    sentinel (pass ``None`` explicitly to detach the agent from its org unit).
-    The agent id and deputy are untouched -- use ``set_agent_deputy`` for the
-    latter. Editing the actor catalogue is a structural change, so the schema
-    must be in ENTWURF (R0); referenced roles / the org unit must exist and the
-    result is validated (Z1-Z4), e.g. removing a role still required by a staff
-    rule is rejected.
+    keep their current value, and ``org_unit_id`` / ``email`` default to the
+    ``KEEP`` sentinel (pass ``None`` explicitly to detach the org unit or clear
+    the address). The agent id and deputy are untouched -- use
+    ``set_agent_deputy`` for the latter. Editing the actor catalogue is a
+    structural change, so the schema must be in ENTWURF (R0); referenced roles /
+    the org unit must exist and the result is validated (Z1-Z4 and N1/N3), e.g.
+    removing a role still required by a staff rule is rejected, and clearing an
+    e-mail address still needed by a per-agent notification is rejected too.
     """
 
     candidate = schema.model_copy(deep=True)
@@ -1353,6 +1586,8 @@ def update_agent(
                 [ValidationFinding(rule="OP", message=f"org unit '{org_unit_id}' does not exist")]
             )
         agent.org_unit_id = org_unit_id
+    if not isinstance(email, _KeepSentinel):
+        agent.email = email
     return raise_if_invalid(candidate)
 
 
@@ -1588,6 +1823,90 @@ def new_revision(schema: ProcessSchema, *, new_schema_id: str | None = None) -> 
     revision.version = schema.version + 1
     revision.lifecycle_state = LifecycleState.ENTWURF
     return raise_if_invalid(revision)
+
+
+def snapshot_for_template(schema: ProcessSchema, *, snapshot_id: str) -> ProcessSchema:
+    """Return a self-contained, portable copy of ``schema`` for a template.
+
+    The blueprint stored inside a :class:`ProcessTemplate` must not depend on
+    external state: the (already hydrated) organisation master data is embedded
+    and ``org_model_id`` is cleared, and the copy is reset to a clean draft
+    (``ENTWURF``/``version == 1``). Validated before it is returned, so a
+    template can never carry an incorrect blueprint (No-Bypass).
+
+    requires: ``schema`` is hydrated (its ``org_model`` reflects the live org
+              when it references a shared one -- the API boundary hydrates on
+              read); the schema is correct.
+    ensures:  returns a deep copy with ``id == snapshot_id``, no shared-org link
+              and embedded org master data, ``ENTWURF``/``version == 1``.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    candidate.id = snapshot_id
+    candidate.org_model_id = None
+    candidate.lifecycle_state = LifecycleState.ENTWURF
+    candidate.version = 1
+    return raise_if_invalid(candidate)
+
+
+def save_as_template(
+    schema: ProcessSchema,
+    *,
+    name: str,
+    description: str = "",
+    category: str = "",
+    template_id: str | None = None,
+    origin: TemplateOrigin = TemplateOrigin.USER,
+) -> ProcessTemplate:
+    """Capture ``schema`` as a reusable :class:`ProcessTemplate`.
+
+    The template stores a self-contained snapshot of the schema (see
+    :func:`snapshot_for_template`) plus catalogue metadata. Used both by the
+    modeller-facing "save as template" endpoint (``origin`` USER) and by the
+    built-in template library (``origin`` BUILTIN).
+
+    requires: ``schema`` is a correct, hydrated schema.
+    ensures:  returns a template whose embedded blueprint is validated; raises
+              ``CorrectnessError`` otherwise (validate-before-commit).
+    """
+
+    tid = template_id or _new_id("tpl")
+    snapshot = snapshot_for_template(schema, snapshot_id=tid)
+    return ProcessTemplate(
+        id=tid,
+        name=name,
+        description=description,
+        category=category,
+        origin=origin,
+        blueprint=snapshot,
+        created_at=datetime.now(UTC),
+    )
+
+
+def instantiate_template(
+    template: ProcessTemplate,
+    *,
+    schema_id: str | None = None,
+    name: str | None = None,
+) -> ProcessSchema:
+    """Create a fresh, editable draft schema from a template blueprint.
+
+    Deep-copies the template's self-contained schema, assigns a new schema id
+    and (optionally) a new name, forces a clean ``ENTWURF``/``version == 1``
+    draft, and validates before returning (validate-before-commit). The result
+    is an ordinary draft schema the modeller edits and releases like any other.
+
+    requires: the template's blueprint is correct (guaranteed on save).
+    ensures:  returns a new ``ENTWURF`` schema with a fresh id; raises
+              ``CorrectnessError`` if the blueprint no longer validates.
+    """
+
+    candidate = template.blueprint.model_copy(deep=True)
+    candidate.id = schema_id or _new_id("schema")
+    candidate.name = name or template.name
+    candidate.lifecycle_state = LifecycleState.ENTWURF
+    candidate.version = 1
+    return raise_if_invalid(candidate)
 
 
 def insert_subprocess(
@@ -1934,6 +2253,44 @@ def set_node_priority(
         candidate.node_priorities.pop(node_id, None)
     else:
         candidate.node_priorities[node_id] = priority
+    return raise_if_invalid(candidate)
+
+
+def set_mail_binding(
+    schema: ProcessSchema,
+    node_id: str,
+    binding: MailBinding | None,
+) -> ProcessSchema:
+    """Set (or clear with ``None``) the modelled e-mail notification of an
+    activity (rule group N).
+
+    requires: schema editable (R0); node exists and is an ACTIVITY (only an
+              interactive step has an assignee to notify).
+    ensures:  ``mail_bindings[node_id]`` is set or removed; the mail rules
+              N1-N4 are re-checked, so a notification can only be modelled when
+              every possible recipient has an address and every template
+              placeholder resolves (Correctness by Construction extends to the
+              notification). A binding whose recipients are not fully addressable
+              is rejected rather than silently dropping mails at runtime.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    node = _require_node(candidate, node_id)
+    if node.type is not NodeType.ACTIVITY:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message="only ACTIVITY nodes can carry a mail notification",
+                )
+            ]
+        )
+    if binding is None:
+        candidate.mail_bindings.pop(node_id, None)
+    else:
+        candidate.mail_bindings[node_id] = binding
     return raise_if_invalid(candidate)
 
 

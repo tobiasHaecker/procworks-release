@@ -37,6 +37,16 @@ function defaultApiBase() {
 const state = {
   apiBase: localStorage.getItem("apiBase") || defaultApiBase(),
   token: localStorage.getItem("authToken") || "",
+  // Farbschema der GUI ("dark" | "light"). Rein visuell, keine Auswirkung auf
+  // die Kern-/Korrektheitslogik. Persistiert unter localStorage "theme"; wird
+  // ueber das data-theme-Attribut am <html> von styles.css umgesetzt.
+  theme: localStorage.getItem("theme") === "light" ? "light" : "dark",
+  // Eingeklappter (schmaler) Menübereich – gibt dem Seiteninhalt mehr Platz.
+  // Persistiert, damit die Wahl über Reloads erhalten bleibt.
+  sidebarCollapsed: localStorage.getItem("sidebarCollapsed") === "1",
+  // Vollbild des Kontrollflusses in der Modellieren-Sicht (zum Diskutieren).
+  // Bewusst NICHT persistiert – ein transienter Präsentationsmodus.
+  graphMaximized: false,
   principal: null,
   authMode: "open",
   passwordLogin: false,
@@ -59,6 +69,12 @@ const state = {
   // exclusive; cleared on a manual nav click. Not persisted.
   dataFocusNode: null,
   staffFocusNode: null,
+  // Rücksprungpunkt: Wird der Kontrollfluss per Klick (Badge oder "Vollansicht")
+  // in die Daten-/Ressourcensicht verlassen, merkt sich dies { view, selectedNode }
+  // des Ausgangspunkts, damit ein Klick auf die Rücksprung-Leiste exakt dorthin
+  // zurückführt (Ansicht + re-zentrierter Knoten). Bei manueller Navigation
+  // verworfen. Nicht persistiert.
+  returnTo: null,
   // Modellieren-Seite: ein in der Bindungs-Palette angeklicktes Datenelement,
   // dessen Herkunft (Schreib- -> Lese-Knoten) im Kontrollfluss als gestrichelte
   // Linien hervorgehoben wird. Rein visuell, nicht persistiert.
@@ -87,7 +103,84 @@ const state = {
   testStarter: localStorage.getItem("testStarter") || null,
   testAgentA: localStorage.getItem("testAgentA") || null,
   testAgentB: localStorage.getItem("testAgentB") || null,
+  // Licensing (dormant unless the backend is enforced). `license` is the last
+  // /license/status snapshot, `licenseAgents` maps agent_id -> AgentLicenseView.
+  // Both stay null (and the whole license UI stays hidden) while the backend
+  // reports enforced=false, so the default Community mode looks unchanged.
+  license: null,
+  licenseAgents: null,
+  _licenseSig: null,
+  // Set while an online auto-pull poll loop is running (after a checkout), so
+  // a second "kaufen" click does not start a competing loop.
+  _claimPolling: false,
 };
+
+// --------------------------------------------------------------------------
+// Farbschema (Theme)
+// --------------------------------------------------------------------------
+
+/**
+ * Setzt das aktive Farbschema am Dokument um, ohne es zu persistieren.
+ *
+ * Stempelt das Attribut `data-theme` auf das <html>-Element; styles.css waehlt
+ * darueber die passende Variablengruppe (Default = dunkel). Zusaetzlich wird der
+ * aktive Umschalt-Knopf in der Sidebar markiert, falls er bereits im DOM ist
+ * (beim ersten, sehr fruehen Aufruf existiert er ggf. noch nicht -- das ist
+ * unkritisch, wireTheme() gleicht die Markierung nach dem Verdrahten ab).
+ *
+ * @param {"dark"|"light"} theme Zielschema.
+ */
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  document.querySelectorAll(".theme-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.themeChoice === theme);
+  });
+}
+
+/**
+ * Wechselt das Farbschema dauerhaft: aktualisiert Zustand + localStorage und
+ * wendet es sofort an. Aufgerufen von den Sidebar-Knoepfen (wireTheme).
+ *
+ * @param {"dark"|"light"} theme Zielschema.
+ */
+function setTheme(theme) {
+  state.theme = theme === "light" ? "light" : "dark";
+  localStorage.setItem("theme", state.theme);
+  applyTheme(state.theme);
+}
+
+// So frueh wie moeglich anwenden, damit kein Aufblitzen des Default-Schemas
+// entsteht, wenn der Nutzer die helle Variante gewaehlt hat.
+applyTheme(state.theme);
+
+/**
+ * Spiegelt den eingeklappten/ausgeklappten Menü-Zustand ins DOM: setzt das
+ * Attribut `data-sidebar` aufs <html> (die CSS-Regeln reagieren darauf) und
+ * aktualisiert Beschriftung/Tooltip des Umschalt-Knopfes. Reine Darstellung –
+ * kein API-Aufruf. Guard: der Knopf existiert erst, wenn das DOM geladen ist.
+ */
+function applySidebar() {
+  const collapsed = !!state.sidebarCollapsed;
+  document.documentElement.setAttribute("data-sidebar", collapsed ? "collapsed" : "expanded");
+  const btn = byId("sidebar-toggle");
+  if (btn) {
+    btn.textContent = collapsed ? "»" : "«"; // » ausklappen / « einklappen
+    btn.title = collapsed ? "Menü ausklappen" : "Menü einklappen";
+  }
+}
+
+/**
+ * Schaltet den schmalen Menü-Modus um, merkt die Wahl in localStorage und wendet
+ * sie sofort an. Kein Voll-Render nötig – das Layout regelt reines CSS.
+ */
+function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  localStorage.setItem("sidebarCollapsed", state.sidebarCollapsed ? "1" : "0");
+  applySidebar();
+}
+
+// Fruehzeitig anwenden, damit die Sidebar nicht kurz breit aufblitzt.
+applySidebar();
 
 const NODE_TYPE = {
   START: "START", END: "END", ACTIVITY: "ACTIVITY",
@@ -334,7 +427,204 @@ function nodeBadgeStackHeight(schema, node) {
   return n ? CHIP_TOP + n * CHIP_H + (n - 1) * CHIP_GAP + CHIP_BOTTOM : 0;
 }
 
+// Geometrie-Konstanten des Kontrollfluss-Layouts (von beiden Layout-Varianten
+// geteilt): Knotenbreite/-hoehe, horizontaler/vertikaler Abstand, Rand.
+const LAYOUT_NW = 144, LAYOUT_NH = 56, LAYOUT_HGAP = 74, LAYOUT_VGAP = 26, LAYOUT_PAD = 32;
+// Zusatzabstand zwischen zwei Geschwister-Aesten einer Verzweigung, in
+// Lane-Einheiten (0 = Aeste nur um eine Bahn getrennt).
+const LAYOUT_BRANCH_GAP = 0.25;
+
+// Bevorzugtes Layout: horizontale "Spine" mit symmetrischen Aesten
+// (layoutSchemaSpine). Schlaegt die Ableitung aus der Blockstruktur fehl (nicht
+// wohlgeformte Kanten, Zyklus, Ueberlappung), faellt es verlustfrei auf das
+// bisherige, robuste gestapelte Layout (layoutSchemaStacked) zurueck.
+// Stabilitaet vor Optik: eine fehlerhafte Zeichnung darf nie entstehen.
 function layoutSchema(schema) {
+  try {
+    return layoutSchemaSpine(schema);
+  } catch (_e) {
+    return layoutSchemaStacked(schema);
+  }
+}
+
+// Spine-Layout (Nutzeranforderung): Alle Aktivitaeten liegen auf einer
+// gemeinsamen horizontalen Achse; Datenobjekte/Bearbeiter haengen als Badges
+// darunter. Der Hauptfluss verlaeuft moeglichst gerade horizontal von links
+// nach rechts; an Verzweigungen fanen die Aeste symmetrisch nach oben/unten aus
+// und laufen am zugehoerigen Join wieder auf der Achse zusammen. Das Modell ist
+// block-strukturiert (garantiert durch die K-Regeln des Kerns), daher laesst
+// sich die Lane (vertikale Bahn) je Knoten rekursiv aus der Blockstruktur
+// ableiten:
+//  * Spalte  = Laengster-Pfad-Tiefe (Fluss schreitet nach rechts fort).
+//  * Lane 0  = Spine; jeder Knoten mit genau einem Vorgaenger erbt dessen Lane
+//             (der Hauptpfad bleibt gerade).
+//  * Split   = seine Aeste werden symmetrisch um die Split-Lane verteilt, die
+//             Bandbreite je Ast aus dessen gemessener Hoehe.
+//  * Join    = kehrt auf die Split-Lane (Spine) zurueck.
+// Wirft bei nicht wohlgeformter Struktur -> Fallback greift.
+function layoutSchemaSpine(schema) {
+  const nodes = schema.nodes || {};
+  const ids = Object.keys(nodes);
+  if (!ids.length) return { pos: {}, edges: schema.edges || [], width: 560, height: 160 };
+
+  const out = {}, inc = {};
+  ids.forEach((id) => { out[id] = []; inc[id] = []; });
+  (schema.edges || []).forEach((e) => {
+    if (out[e.source] && nodes[e.target]) out[e.source].push(e.target);
+    if (inc[e.target] && nodes[e.source]) inc[e.target].push(e.source);
+  });
+
+  // Spalte = Laengster-Pfad-Tiefe (wie bisher). Ein Zyklus ist in einem
+  // block-strukturierten Prozess ausgeschlossen -> wirft (Fallback).
+  const depth = {}, visiting = {};
+  function d(id) {
+    if (depth[id] !== undefined) return depth[id];
+    if (visiting[id]) throw new Error("cycle");
+    visiting[id] = true;
+    let m = 0;
+    inc[id].forEach((p) => { m = Math.max(m, d(p) + 1); });
+    visiting[id] = false;
+    return (depth[id] = m);
+  }
+  ids.forEach(d);
+
+  // Genau eine Wurzel (START) erwartet; sonst ist der Fluss nicht eindeutig
+  // horizontal auffaedelbar -> Fallback.
+  const roots = ids.filter((id) => inc[id].length === 0);
+  if (roots.length !== 1) throw new Error("not single-rooted");
+
+  // Passender Join eines Splits = gemeinsamer Nachfahre aller Split-Kinder mit
+  // kleinster Tiefe (dort schliesst der Block). Memoisiert.
+  const joinCache = {};
+  function descendants(id) {
+    const seen = new Set(), stack = [id];
+    while (stack.length) {
+      const n = stack.pop();
+      out[n].forEach((s) => { if (!seen.has(s)) { seen.add(s); stack.push(s); } });
+    }
+    return seen;
+  }
+  function matchingJoin(splitId) {
+    if (joinCache[splitId]) return joinCache[splitId];
+    let common = null;
+    out[splitId].forEach((k) => {
+      const ds = descendants(k);
+      ds.add(k); // leerer Ast: das Kind kann selbst schon der Join sein
+      common = common === null ? ds : new Set([...common].filter((x) => ds.has(x)));
+    });
+    if (!common || !common.size) throw new Error("no matching join");
+    let best = null;
+    common.forEach((c) => { if (best === null || depth[c] < depth[best]) best = c; });
+    return (joinCache[splitId] = best);
+  }
+
+  // Einzigen Nachfolger eines Joins liefern (oder die Sequenz-Grenze/das Ende).
+  const onlySucc = (j, stop) => (j === stop ? stop : (out[j].length ? out[j][0] : null));
+
+  // Vertikale Ausdehnung (Lane-Einheiten) der Sequenz [start .. stop): linearer
+  // Knoten = 1; ein verschachtelter Split traegt die Summe seiner Ast-Hoehen.
+  // Entlang der Sequenz zaehlt das Maximum (Segmente liegen horizontal
+  // hintereinander, nicht uebereinander).
+  function measure(start, stop) {
+    let node = start, span = 1, guard = 0;
+    while (node !== stop && node != null) {
+      if (guard++ > ids.length + 2) throw new Error("runaway measure");
+      const succ = out[node];
+      if (succ.length > 1) {
+        const j = matchingJoin(node);
+        let block = LAYOUT_BRANCH_GAP * (succ.length - 1);
+        succ.forEach((c) => { block += measure(c, j); });
+        span = Math.max(span, block);
+        node = onlySucc(j, stop);
+      } else {
+        node = succ.length === 1 ? succ[0] : null;
+      }
+    }
+    return span;
+  }
+
+  // Sequenz [start .. stop) auf Mittellinie ``center`` platzieren; Splits fanen
+  // ihre Aeste symmetrisch um ``center`` aus (Block als Ganzes zentriert).
+  const lane = {}, placed = new Set();
+  function place(start, center, stop) {
+    let node = start, guard = 0;
+    while (node !== stop && node != null) {
+      if (guard++ > ids.length + 2) throw new Error("runaway place");
+      if (placed.has(node)) throw new Error("revisit");
+      placed.add(node);
+      lane[node] = center;
+      const succ = out[node];
+      if (succ.length > 1) {
+        const j = matchingJoin(node);
+        const heights = succ.map((c) => measure(c, j));
+        const total = heights.reduce((a, b) => a + b, 0) + LAYOUT_BRANCH_GAP * (succ.length - 1);
+        let cursor = center - total / 2;
+        succ.forEach((c, i) => {
+          place(c, cursor + heights[i] / 2, j);
+          cursor += heights[i] + LAYOUT_BRANCH_GAP;
+        });
+        if (j === stop) { node = stop; }        // Grenz-Join gehoert dem Aufrufer
+        else { lane[j] = center; placed.add(j); node = onlySucc(j, stop); }
+      } else {
+        node = succ.length === 1 ? succ[0] : null;
+      }
+    }
+  }
+  place(roots[0], 0, null);
+  if (ids.some((id) => lane[id] === undefined)) throw new Error("unplaced nodes");
+
+  // Lane -> Pixel. Einheitliche Bahn-Hoehe = Knotenhoehe + hoechster Badge-
+  // Stapel + Abstand. Dadurch beruehrt ein oberer Knoten (Badges haengen nach
+  // unten) nie den in derselben Spalte darunter liegenden Knoten, egal welche
+  // Lanes benachbart sind.
+  let maxBadge = 0;
+  ids.forEach((id) => { maxBadge = Math.max(maxBadge, nodeBadgeStackHeight(schema, nodes[id])); });
+  const rowPitch = LAYOUT_NH + maxBadge + LAYOUT_VGAP;
+
+  // Vertikalen Ursprung so waehlen, dass der oberste Knoten PAD Abstand hat.
+  let minCenter = Infinity;
+  ids.forEach((id) => { minCenter = Math.min(minCenter, lane[id] * rowPitch); });
+  const originY = LAYOUT_PAD + LAYOUT_NH / 2 - minCenter;
+
+  const pos = {};
+  let maxBottom = 0, maxCol = 0;
+  ids.forEach((id) => {
+    const yc = originY + lane[id] * rowPitch;
+    pos[id] = { x: LAYOUT_PAD + depth[id] * (LAYOUT_NW + LAYOUT_HGAP), y: yc - LAYOUT_NH / 2, w: LAYOUT_NW, h: LAYOUT_NH };
+    maxCol = Math.max(maxCol, depth[id]);
+    maxBottom = Math.max(maxBottom, pos[id].y + LAYOUT_NH + nodeBadgeStackHeight(schema, nodes[id]));
+  });
+
+  // Sicherheitsnetz: ueberlappt trotz allem ein Knotenpaar (inkl. Badge-
+  // Stapel), lieber das robuste gestapelte Layout nehmen.
+  if (layoutHasOverlap(pos, schema)) throw new Error("overlap");
+
+  const width = LAYOUT_PAD * 2 + (maxCol + 1) * LAYOUT_NW + maxCol * LAYOUT_HGAP;
+  const height = maxBottom + LAYOUT_PAD;
+  return { pos, edges: schema.edges || [], width: Math.max(width, 560), height: Math.max(height, 160) };
+}
+
+// Prueft, ob sich zwei Knoten-Kaesten (Rechteck inkl. darunter haengendem
+// Badge-Stapel) ueberlappen. Rein defensiv fuer das Spine-Layout.
+function layoutHasOverlap(pos, schema) {
+  const ids = Object.keys(pos);
+  const box = (id) => {
+    const p = pos[id];
+    return { x1: p.x, y1: p.y, x2: p.x + p.w, y2: p.y + p.h + nodeBadgeStackHeight(schema, schema.nodes[id]) };
+  };
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const a = box(ids[i]), b = box(ids[j]);
+      if (a.x1 < b.x2 && b.x1 < a.x2 && a.y1 < b.y2 && b.y1 < a.y2) return true;
+    }
+  }
+  return false;
+}
+
+// Fallback-Layout: das bisherige spaltenweise gestapelte, je Spalte vertikal
+// zentrierte Layout. Robust fuer beliebige (auch nicht sauber block-
+// strukturierte) Kantenlagen; kommt zum Zug, wenn layoutSchemaSpine wirft.
+function layoutSchemaStacked(schema) {
   const ids = Object.keys(schema.nodes);
   const inc = {}, out = {};
   ids.forEach((id) => { inc[id] = []; out[id] = []; });
@@ -356,7 +646,7 @@ function layoutSchema(schema) {
   const cols = {};
   ids.forEach((id) => { (cols[depth[id]] = cols[depth[id]] || []).push(id); });
   const colKeys = Object.keys(cols).map(Number).sort((a, b) => a - b);
-  const NW = 144, NH = 56, HGAP = 74, VGAP = 26, PAD = 32;
+  const NW = LAYOUT_NW, NH = LAYOUT_NH, HGAP = LAYOUT_HGAP, VGAP = LAYOUT_VGAP, PAD = LAYOUT_PAD;
   // Effektive Hoehe je Knoten = Rechteck + darunter gestapelter Badge-Block.
   // Dadurch wird eine Spalte bei Bedarf auseinandergezogen, sodass die
   // Datenbindungs-/Bearbeiter-Chips nie den naechsten Knoten ueberlagern.
@@ -481,17 +771,62 @@ function renderGraph(schema, opts) {
   // Schreib- zum Lese-Knoten. Rein visuell; ``opts.provenance`` wird von der
   // Modellieren-Sicht aus ``computeProvenance`` gefuellt. Ein leicht nach oben
   // versetzter Bogen vermeidet Deckung mit den Kontrollflusskanten.
-  (opts.provenance || []).forEach((pv) => {
+  //
+  // Zwei Sichtbarkeitsprobleme werden hier bewusst behandelt, damit die
+  // Beschriftung (Name des Datenelements) *immer* lesbar bleibt:
+  //  1. Der Bogen hebt sich um bis zu ~94px ueber die oberste Knotenzeile
+  //     (die schon bei y=PAD sitzt) und ragt damit oberhalb der viewBox
+  //     (y=0) aus dem sichtbaren Bereich. Wir bestimmen den obersten
+  //     erreichten Punkt und erweitern die viewBox bei Bedarf nach oben.
+  //  2. Enden mehrere Boegen am selben Leseknoten (mehrere gelesene Groessen),
+  //     liegen ihre Beschriftungen fast uebereinander. Wir staffeln
+  //     kollidierende Labels vertikal nach oben.
+  const provItems = (opts.provenance || []).map((pv) => {
     const a = L.pos[pv.from], b = L.pos[pv.to];
-    if (!a || !b) return;
+    if (!a || !b) return null;
     const x1 = a.x + a.w / 2, y1 = a.y, x2 = b.x + b.w / 2, y2 = b.y;
     const lift = 34 + Math.min(60, Math.abs(x2 - x1) * 0.12);
     const my = Math.min(y1, y2) - lift;
+    return { x1, y1, x2, y2, my, label: pv.label, lx: (x1 + x2) / 2, ly: my + 4 };
+  }).filter(Boolean);
+
+  // Labels vertikal entzerren: nach Bogenspitze (oben zuerst) sortieren und
+  // jedes Label so weit nach oben schieben, dass es kein bereits platziertes
+  // Label in der Naehe (gleicher horizontaler Bereich) mehr ueberdeckt.
+  const LBL_LINE = 12; // Zeilenhoehe der 9px-Beschriftung inkl. kleinem Rand
+  const placed = [];
+  provItems.slice().sort((p, q) => p.ly - q.ly).forEach((pv) => {
+    if (!pv.label) return;
+    let guard = 0;
+    let hit = true;
+    while (hit && guard++ < 50) {
+      hit = false;
+      for (const q of placed) {
+        if (Math.abs(q.lx - pv.lx) < 64 && Math.abs(q.ly - pv.ly) < LBL_LINE) {
+          pv.ly = q.ly - LBL_LINE; hit = true; break;
+        }
+      }
+    }
+    placed.push(pv);
+  });
+
+  // viewBox nach oben erweitern, falls Bogen oder Label ueber y=0 hinausragen
+  // (Bogenscheitel ~pv.my, Labeloberkante ~pv.ly-9). So wird nichts mehr
+  // abgeschnitten; die Modellsicht waechst nur nach oben, Knoten bleiben fix.
+  let topY = 0;
+  provItems.forEach((pv) => { topY = Math.min(topY, pv.my - 2, pv.ly - 10); });
+  if (topY < 0) {
+    const vbTop = topY - 6;
+    root.setAttribute("viewBox", `0 ${vbTop} ${L.width} ${L.height - vbTop}`);
+    root.setAttribute("height", L.height - vbTop);
+  }
+
+  provItems.forEach((pv) => {
     root.appendChild(svg("path", {
       class: "gprov", "marker-end": "url(#arrow-prov)",
-      d: `M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}` }));
+      d: `M ${pv.x1} ${pv.y1} C ${pv.x1} ${pv.my}, ${pv.x2} ${pv.my}, ${pv.x2} ${pv.y2}` }));
     if (pv.label) {
-      root.appendChild(svg("text", { class: "gprov-txt", x: (x1 + x2) / 2, y: my + 4, "text-anchor": "middle" },
+      root.appendChild(svg("text", { class: "gprov-txt", x: pv.lx, y: pv.ly, "text-anchor": "middle" },
         document.createTextNode(pv.label)));
     }
   });
@@ -553,15 +888,53 @@ function renderNodeBadges(root, schema, node, p, opts) {
   });
 }
 
-// Jump from a control-flow badge into the data / resource view with that node's
-// bindings highlighted (and scrolled into view). The focus is mutually
-// exclusive between the two views.
+// Jump from the control flow into the data / resource view. Called from a node
+// badge (``nodeId`` = that node, whose bindings are highlighted and scrolled
+// into view) or from the "Vollansicht" button (``nodeId`` may be null -> no
+// highlight). In both cases a **return point** is recorded so the user can jump
+// straight back to where they left the control flow (see returnToControlFlow /
+// returnBar). The highlight focus is mutually exclusive between the two views.
 function focusBindingView(view, nodeId) {
+  // Ausgangspunkt merken: aktuelle Ansicht + der Knoten, von dem aus gewechselt
+  // wurde (der Badge-Knoten, sonst der aktuell gewählte Schritt).
+  state.returnTo = { view: state.view, selectedNode: nodeId || state.selectedNode };
   state.dataFocusNode = view === "data" ? nodeId : null;
   state.staffFocusNode = view === "org" ? nodeId : null;
   state.view = view;
   setActiveNav();
   render();
+}
+
+// Ein-Klick-Rücksprung genau dorthin, wo der Kontrollfluss verlassen wurde:
+// stellt die Ausgangsansicht wieder her, wählt den zuvor betrachteten Knoten
+// erneut (die Modellieren-Sicht zentriert ihn nach dem Rendern) und räumt alle
+// badge-getriebenen Hervorhebungen ab. Rein Navigations-UI.
+function returnToControlFlow() {
+  const r = state.returnTo;
+  state.returnTo = null;
+  state.dataFocusNode = null;
+  state.staffFocusNode = null;
+  state.orgFocusUnit = null;
+  state.orgFocusAgents = [];
+  state.view = r ? r.view : "model";
+  if (r && r.selectedNode) state.selectedNode = r.selectedNode;
+  setActiveNav();
+  render();
+}
+
+// Rücksprung-Leiste: erscheint in der Daten-/Ressourcensicht, sobald ein
+// Rücksprungpunkt gesetzt ist (also der Kontrollfluss per Klick verlassen
+// wurde). Ein Klick führt exakt dorthin zurück. Liefert null, wenn es keinen
+// Rücksprungpunkt gibt. Rein visuell -- kein Modell-/Backend-Zugriff.
+function returnBar() {
+  if (!state.returnTo) return null;
+  const nodes = (state.schema && state.schema.nodes) || {};
+  const node = state.returnTo.selectedNode && nodes[state.returnTo.selectedNode];
+  const label = node
+    ? "◀︎ Zurück zum Kontrollfluss – „" + nodeCaption(node) + "“"
+    : "◀︎ Zurück zum Kontrollfluss";
+  return el("div", { class: "return-bar" },
+    el("button", { class: "btn small", onClick: returnToControlFlow, title: "Zurück zu der Stelle im Kontrollfluss, von der aus gewechselt wurde" }, label));
 }
 
 // Smoothly bring the first highlighted (.hl-row) table row of the current view
@@ -669,6 +1042,13 @@ function attachPanZoom(wrap, svgEl) {
     if (!dragging) {
       dragging = true;
       wrap.classList.add("grabbing");
+      // Textselektion seitenweit unterdruecken, solange gezogen wird: sonst
+      // markiert der Zeiger beim Verlassen des Canvas-Fensters die darunter
+      // liegenden Seiteninhalte. Eine bereits (in den ersten Pixeln) begonnene
+      // Selektion wird zusaetzlich geleert.
+      document.documentElement.classList.add("graph-dragging");
+      const sel = window.getSelection && window.getSelection();
+      if (sel && sel.removeAllRanges) sel.removeAllRanges();
       try { wrap.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
     }
     tx += e.clientX - lastX; ty += e.clientY - lastY;
@@ -678,6 +1058,7 @@ function attachPanZoom(wrap, svgEl) {
   function endDrag(e) {
     if (!down) return;
     down = false;
+    document.documentElement.classList.remove("graph-dragging");
     if (dragging) {
       wrap.classList.remove("grabbing");
       try { wrap.releasePointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
@@ -693,9 +1074,15 @@ function attachPanZoom(wrap, svgEl) {
 
   wrap._panzoom = {
     centerOn(pos) {
+      // Die viewBox kann fuer die Datenherkunft-Boegen nach oben erweitert
+      // sein (negativer viewBox-Ursprung); der Knoten liegt dann um |vbY|
+      // tiefer im Pixelraum. Diesen Versatz beim Zentrieren kompensieren,
+      // sonst springt der gewaehlte Knoten aus der Mitte.
+      const vb = svgEl.viewBox && svgEl.viewBox.baseVal;
+      const offY = vb ? vb.y : 0;
       const cx = pos.x + pos.w / 2, cy = pos.y + pos.h / 2;
       tx = wrap.clientWidth / 2 - cx * scale;
-      ty = wrap.clientHeight / 2 - cy * scale;
+      ty = wrap.clientHeight / 2 - (cy - offY) * scale;
       apply();
     },
   };
@@ -786,6 +1173,8 @@ function renderSchemaPicker() {
   }
   picker.appendChild(select);
   picker.appendChild(el("button", { class: "btn small", onClick: newSchema }, "+ Neu"));
+  picker.appendChild(el("button", { class: "btn small ghost", onClick: newFromTemplate,
+    title: "Neues Schema aus einer Vorlage erstellen" }, "Aus Vorlage"));
   picker.appendChild(el("button", { class: "btn small ghost", onClick: importBpmn }, "BPMN-Import"));
 }
 
@@ -821,6 +1210,78 @@ async function importBpmn() {
 }
 
 // --------------------------------------------------------------------------
+// Prozessvorlagen (Templates): eingebaute Bibliothek + eigene Vorlagen
+// --------------------------------------------------------------------------
+
+// Gallery to start a new schema from a template. Fetches the merged list
+// (built-in + user templates), groups it by category and lets the modeller
+// instantiate one -- the server deep-copies the blueprint into a fresh draft.
+async function newFromTemplate() {
+  let templates;
+  try {
+    templates = await api.get("/templates");
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return; }
+  if (!templates.length) {
+    toast("info", "Keine Vorlagen", ["Es sind noch keine Vorlagen vorhanden."]);
+    return;
+  }
+
+  // One card per template; the selected card is remembered for the confirm.
+  const selection = { id: null, name: null };
+  const cards = templates.map((t) => {
+    const badge = t.origin === "BUILTIN"
+      ? el("span", { class: "pill pill-blue" }, "Vorlage")
+      : el("span", { class: "pill pill-green" }, "Eigene");
+    const card = el("button", { class: "tpl-card", "data-id": t.id, onClick: () => {
+      selection.id = t.id; selection.name = t.name;
+      [...card.parentElement.children].forEach((c) => c.classList.toggle("selected", c === card));
+    } },
+      el("div", { class: "tpl-card-h" },
+        el("strong", null, t.name),
+        badge),
+      t.category ? el("div", { class: "tpl-cat" }, t.category) : null,
+      el("div", { class: "tpl-desc" }, t.description || "—"));
+    return card;
+  });
+  const gallery = el("div", { class: "tpl-gallery" }, ...cards);
+
+  openModal("Aus Vorlage erstellen", gallery, async () => {
+    if (!selection.id) { toast("info", "Keine Vorlage gewaehlt", ["Bitte eine Vorlage auswaehlen."]); return false; }
+    try {
+      const schema = await api.post(`/templates/${encodeURIComponent(selection.id)}/instantiate`,
+        { name: selection.name });
+      await loadSchemas();
+      await selectSchema(schema.id);
+      toast("ok", "Aus Vorlage erstellt", [schema.name]);
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+  }, "Erstellen");
+}
+
+// Capture the current schema as a reusable *user* template. The server stores a
+// self-contained, validated blueprint; only correct schemas can be captured.
+async function saveAsTemplate() {
+  const schema = state.schema;
+  if (!schema) return;
+  const nameInput = el("input", { type: "text", value: schema.name + " (Vorlage)" });
+  const catInput = el("input", { type: "text", placeholder: "z. B. Personal, Einkauf, IT" });
+  const descInput = el("textarea", { placeholder: "Kurzbeschreibung der Vorlage" });
+  openModal("Als Vorlage speichern", el("div", { class: "row", style: "flex-direction:column;align-items:stretch" },
+    el("label", { class: "field" }, "Name", nameInput),
+    el("label", { class: "field" }, "Kategorie (optional)", catInput),
+    el("label", { class: "field" }, "Beschreibung (optional)", descInput)), async () => {
+    const name = nameInput.value.trim();
+    if (!name) return false;
+    try {
+      const tpl = await api.post("/templates", {
+        schema_id: schema.id, name,
+        category: catInput.value.trim(), description: descInput.value.trim(),
+      });
+      toast("ok", "Als Vorlage gespeichert", [tpl.name]);
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+  }, "Speichern");
+}
+
+// --------------------------------------------------------------------------
 // View: Modellieren
 // --------------------------------------------------------------------------
 
@@ -847,6 +1308,10 @@ function viewModel() {
             schema.deadline_seconds != null ? "Termin: " + formatDuration(schema.deadline_seconds) : "Termin …")
         : null,
       el("button", { class: "btn small ghost", onClick: exportBpmn }, "BPMN-Export"),
+      hasRole("modeler", "admin")
+        ? el("button", { class: "btn small ghost", onClick: saveAsTemplate,
+            title: "Dieses Schema als wiederverwendbare Vorlage speichern" }, "Als Vorlage")
+        : null,
       libraryToggleButton(schema),
       draft
         ? el("button", { class: "btn small green", onClick: releaseSchema }, "Freigeben")
@@ -880,9 +1345,25 @@ function viewModel() {
         ? "Gef\u00FChrtes Modellieren: \u201E+\u201C an einer Kante f\u00FCgt einen Schritt ein. Einen Schritt anklicken, dann rechts unter \u201EBinden\u201C ein Datenelement/eine Ressource mit \u2295 zuweisen. Unzul\u00E4ssiges weist der Kern ab."
         : "Schema ist freigegeben und damit unver\u00E4nderlich. Erzeuge eine Revision \u00FCber die Ausf\u00FChrungs-/Monitoring-Sicht oder starte Instanzen.");
 
+  // Kontrollfluss-Panel mit Maximieren-Knopf oben rechts. Im Vollbild wird das
+  // Panel per CSS-Klasse ``graph-max`` zu einem bildschirmfuellenden Overlay
+  // (zum gemeinsamen Diskutieren); der Knopf schaltet dann auf "verlassen".
+  const maxBtn = el("button", {
+    class: "btn small ghost graph-max-btn",
+    title: state.graphMaximized ? "Vollbild verlassen (Esc)" : "Kontrollfluss maximieren",
+    onClick: () => { state.graphMaximized = !state.graphMaximized; render(); },
+  }, state.graphMaximized ? "× Verkleinern" : "⛶ Vollbild");
+  const cfPanel = el("div", { class: "panel graph-panel" + (state.graphMaximized ? " graph-max" : "") },
+    el("div", { class: "panel-h" },
+      el("h2", null, "Kontrollfluss"),
+      el("span", { class: "spacer", style: "flex:1" }),
+      maxBtn),
+    el("div", { class: "panel-b graph-body" }, graph),
+    hint);
+
   content.appendChild(header);
   content.appendChild(el("div", { class: "grid-2 model-top" },
-    el("div", { class: "panel" }, el("div", { class: "panel-h" }, el("h2", null, "Kontrollfluss")), el("div", { class: "panel-b" }, graph), hint),
+    cfPanel,
     el("div", null, nodeInspectorPanel(), bindingPalette(schema, draft), findingsPanel(), revisionPanel())));
 
   // Nach dem (Neu-)Rendern den ausgewaehlten Knoten in die Mitte der scrollbaren
@@ -945,7 +1426,7 @@ function bindingPalette(schema, draft) {
     el("span", { class: "sub" }, subText),
     el("span", { class: "spacer", style: "flex:1" }),
     el("button", { class: "btn small ghost", title: "Vollansicht öffnen",
-      onClick: () => { state.view = tab === "res" ? "org" : "data"; setActiveNav(); render(); } }, "Vollansicht"));
+      onClick: () => focusBindingView(tab === "res" ? "org" : "data", null) }, "Vollansicht"));
   const tabs = el("div", { class: "pal-tabs" }, tabBtn("data", "Datenelemente"), tabBtn("res", "Ressourcen"));
   const body = el("div", { class: "panel-b pal-body" },
     tab === "res" ? resourcePaletteTab(schema, draft, target) : dataPaletteTab(schema, draft, target));
@@ -1005,9 +1486,9 @@ function dataPaletteTab(schema, draft, target) {
   return box;
 }
 
-// Tab „Ressourcen": Rollen/Abteilungen mit ⊕ (Bearbeiterzuordnung an den
-// gewaehlten Schritt), Agenten nur zur Ansicht/Bearbeitung. BZR bindet an
-// Rolle/Abteilung, nie an Einzelpersonen.
+// Tab „Ressourcen": Rollen, Abteilungen und Agenten mit ⊕ (Bearbeiterzuordnung
+// an den gewaehlten Schritt). Die BZR kann an eine Rolle/Abteilung oder – fuer
+// die explizite Auswahl – an einen konkreten Agenten binden.
 function resourcePaletteTab(schema, draft, target) {
   const org = schema.org_model || { roles: {}, org_units: {}, agents: {} };
   const orgEditable = draft || !!schema.org_model_id;
@@ -1040,9 +1521,12 @@ function resourcePaletteTab(schema, draft, target) {
   if (!agents.length) agentChips.appendChild(el("span", { class: "muted", style: "font-size:12px" }, "keine"));
   agents.forEach((a) => {
     const roleNames = (a.role_ids || []).map((id) => ((org.roles || {})[id] || {}).name).filter(Boolean).join(", ");
+    const actions = [];
+    if (draft) actions.push(bindButton(!!target, () => dropResourceOnNode(target, { rkind: "AGENT", ref: a.id, name: a.name })));
+    if (orgEditable) actions.push(chipAction("✎", "Agent bearbeiten", () => editAgent(a)));
     agentChips.appendChild(paletteChip({
       label: a.name, sub: roleNames || "ohne Rolle", title: `Agent ${a.name}${roleNames ? " – " + roleNames : ""}`,
-      actions: orgEditable ? [chipAction("✎", "Agent bearbeiten", () => editAgent(a))] : [],
+      actions,
     }));
   });
   const addAgentBtn = el("button", { class: "btn small", disabled: !orgEditable || !roles.length, onClick: addAgent }, "+ Agent");
@@ -1092,7 +1576,7 @@ function dropResourceOnNode(nodeId, payload) {
   const recBox = el("input", { type: "checkbox" });
   const recField = el("label", { class: "row", style: "gap:8px;align-items:center" },
     recBox, "Abteilung und alle Bereiche darunter");
-  const label = payload.rkind === "ROLE" ? "Rolle" : "Abteilung";
+  const label = payload.rkind === "ROLE" ? "Rolle" : payload.rkind === "AGENT" ? "Agent" : "Abteilung";
   openModal(`Bearbeiter für „${nodeCaption(node)}"`,
     el("div", { class: "form-grid" },
       el("div", { class: "field" }, `${label}: `, el("strong", null, payload.name)),
@@ -1208,6 +1692,10 @@ function nodePerformSections(body, schema, node) {
   body.appendChild(el("div", { class: "insp-h" }, "Frist (max. Dauer)"));
   body.appendChild(el("div", { class: hasFrist ? "" : "muted", style: "font-size:12px" },
     hasFrist ? formatDuration(tc.max_duration_seconds) : "keine – fließt bei gesetztem Prozess-Termin in die Terminprüfung (T2) ein."));
+  if (tc && tc.target_lead_seconds != null) {
+    body.appendChild(el("div", { style: "font-size:12px;margin-top:4px" },
+      "Soll-Reaktionszeit ab Aktivierung: " + formatDuration(tc.target_lead_seconds)));
+  }
   body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
     el("button", { class: "btn small", onClick: () => setTimeConstraintFor(node.id, hasFrist ? tc.max_duration_seconds : null) }, hasFrist ? "Frist ändern" : "Frist setzen"),
     hasFrist ? el("button", { class: "btn small danger", onClick: () => removeTimeConstraint(node.id) }, "Entfernen") : null));
@@ -1231,6 +1719,116 @@ function nodePerformSections(body, schema, node) {
   vcSel.value = node.value_class || "";
   vcSel.addEventListener("change", () => setValueClass(node.id, vcSel.value || null));
   body.appendChild(el("label", { class: "field", style: "font-size:12px" }, "Klassifikation", vcSel));
+
+  // E-Mail-Benachrichtigung (Regelgruppe N): opt-in je Aktivität.
+  nodeMailSection(body, schema, node);
+}
+
+const MAIL_MODE_LABELS = {
+  TO_ELIGIBLE_AGENTS: "an die berechtigten Bearbeiter",
+  TO_GROUP_MAILBOX: "an das Gruppenpostfach (Rolle/Abteilung)",
+};
+
+// Abschnitt „E-Mail bei Aufgabeneingang“ im Aktivitäts-Inspektor. Trägt keine
+// Korrektheitslogik: der Kern verlangt eine BZR (N2) und vollständige, wohlgeformte
+// Adressen (N3) und lehnt sonst das Speichern mit 422 ab – der konkrete Befund
+// (welcher Bearbeiter/welche Gruppe keine Adresse hat) erscheint dann im Toast.
+function nodeMailSection(body, schema, node) {
+  if (node.type !== NODE_TYPE.ACTIVITY) return;
+  const binding = (schema.mail_bindings || {})[node.id];
+  const hasRule = !!(schema.staff_rules || {})[node.id];
+  body.appendChild(el("div", { class: "hr" }));
+  body.appendChild(el("div", { class: "insp-h" }, "E-Mail bei Aufgabeneingang"));
+  if (binding) {
+    body.appendChild(el("div", { style: "font-size:12px" },
+      MAIL_MODE_LABELS[binding.mode] || binding.mode,
+      binding.mode === "TO_ELIGIBLE_AGENTS"
+        ? (binding.include_deputies ? " · inkl. Vertreter" : " · ohne Vertreter") : ""));
+    body.appendChild(el("div", { class: "muted", style: "font-size:11px;margin-top:2px" },
+      "Betreff: " + (binding.subject || "–")));
+  } else if (!hasRule) {
+    body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
+      "Erst einen Bearbeiter zuordnen – ohne Zuordnung gibt es keinen Empfänger (N2)."));
+  } else {
+    body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
+      "Aus – bei Aufgabeneingang wird keine Mail gesendet (Standard)."));
+  }
+  const row = el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+    el("button", { class: "btn small", disabled: !hasRule && !binding,
+      onClick: () => editMailBinding(node.id, binding) }, binding ? "Mail ändern" : "Mail senden…"));
+  if (binding) row.appendChild(el("button", { class: "btn small danger",
+    onClick: () => removeMailBinding(node.id) }, "Entfernen"));
+  body.appendChild(row);
+}
+
+// Modal zum Anlegen/Ändern des Mailversands. Der Platzhalter-Picker bietet nur die
+// an diesem Schritt gelesenen Datenelemente an: eine Lesebindung ist durch D2
+// „kein Read ohne vorheriges Set“ bei Aufgabeneingang garantiert gesetzt, sodass
+// N4 (Vorlagen-Integrität) gar nicht erst verletzt werden kann.
+function editMailBinding(nodeId, current) {
+  const schema = state.schema;
+  const modeSel = el("select", null,
+    ...Object.entries(MAIL_MODE_LABELS).map(([v, l]) => el("option", { value: v }, l)));
+  modeSel.value = current ? current.mode : "TO_ELIGIBLE_AGENTS";
+  const depBox = el("input", { type: "checkbox" });
+  depBox.checked = current ? !!current.include_deputies : true;
+  const depWrap = el("label", { class: "row", style: "gap:8px;align-items:center" },
+    depBox, "Vertreter einbeziehen");
+  const subject = el("input", { type: "text", value: current ? current.subject : "",
+    placeholder: "z. B. Neue Aufgabe: {kundenname}" });
+  const bodyArea = el("textarea", { rows: "4",
+    placeholder: "Optionaler Text mit {platzhalter}" }, current ? current.body : "");
+  const readable = (schema.data_accesses || [])
+    .filter((a) => a.node_id === nodeId && a.mode === "READ")
+    .map((a) => schema.data_elements[a.element_id]).filter(Boolean);
+  let lastField = subject;
+  subject.addEventListener("focus", () => { lastField = subject; });
+  bodyArea.addEventListener("focus", () => { lastField = bodyArea; });
+  const insert = (id) => {
+    const f = lastField;
+    const start = f.selectionStart != null ? f.selectionStart : f.value.length;
+    const end = f.selectionEnd != null ? f.selectionEnd : start;
+    f.value = f.value.slice(0, start) + "{" + id + "}" + f.value.slice(end);
+    f.focus();
+  };
+  const picker = readable.length
+    ? el("div", { class: "row", style: "gap:6px;flex-wrap:wrap" },
+        ...readable.map((e) => el("button", { class: "btn small", type: "button",
+          onClick: () => insert(e.id) }, "{" + e.id + "}")))
+    : el("div", { class: "muted", style: "font-size:11px" },
+        "Keine an diesem Schritt garantiert gesetzten Datenelemente – Platzhalter erst nach einer Lesebindung.");
+  const syncDep = () => {
+    depWrap.style.display = modeSel.value === "TO_ELIGIBLE_AGENTS" ? "" : "none";
+  };
+  modeSel.addEventListener("change", syncDep); syncDep();
+  openModal(`E-Mail – ${nodeCaption(schema.nodes[nodeId])}`,
+    el("div", { style: "display:flex;flex-direction:column;gap:10px" },
+      el("div", { class: "muted", style: "font-size:12px" },
+        "Empfänger ergeben sich aus der Bearbeiterzuordnung dieses Schritts. Gesendet wird nur, wenn jede mögliche Adresse vorhanden ist (N3)."),
+      el("label", { class: "field" }, "Empfänger", modeSel),
+      depWrap,
+      el("label", { class: "field" }, "Betreff", subject),
+      el("label", { class: "field" }, "Text (optional)", bodyArea),
+      el("div", { class: "field" },
+        el("span", { class: "muted", style: "font-size:11px" }, "Platzhalter einfügen:"), picker)),
+    async () => {
+      const binding = {
+        mode: modeSel.value, include_deputies: depBox.checked,
+        subject: subject.value, body: bodyArea.value,
+      };
+      try {
+        await api.post(`/schemas/${state.schemaId}/mail-binding`, { node_id: nodeId, binding });
+        await refreshSchema(); render(); toast("ok", "Mailversand gesetzt");
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Speichern");
+}
+
+// Entfernt den Mailversand an einem Schritt (POST … mail-binding mit binding:null).
+async function removeMailBinding(nodeId) {
+  try {
+    await api.post(`/schemas/${state.schemaId}/mail-binding`, { node_id: nodeId, binding: null });
+    await refreshSchema(); render(); toast("ok", "Mailversand entfernt");
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 }
 
 // Dienst zuweisen/aendern. Optional an ein Activity-Repository-Template gebunden
@@ -1316,17 +1914,31 @@ async function removeService(nodeId) {
 }
 
 function setTimeConstraintFor(nodeId, current) {
-  const dur = durationControls(current);
+  // ``current`` ist die getragene Constraint (oder null). Zwei getrennte
+  // Soll-Zeiten (Konzept "Zeitbasierte-Priorisierung", 3.1): die Bearbeitungs-
+  // dauer ab Start (T2/kritischer Pfad) und die optionale Reaktionszeit ab
+  // Aktivierung, die die zeitbasierte Arbeitslisten-Priorisierung steuert.
+  const tc = current || {};
+  const dur = durationControls(tc.max_duration_seconds != null ? tc.max_duration_seconds : null);
+  const lead = durationControls(tc.target_lead_seconds != null ? tc.target_lead_seconds : null);
   openModal(`Frist – ${nodeCaption(state.schema.nodes[nodeId])}`,
     el("div", null,
       el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
         "Maximale erwartete Bearbeitungsdauer dieses Schritts (fließt in die Terminprüfung T2 ein)."),
-      dur.node),
+      dur.node,
+      el("div", { class: "muted", style: "font-size:12px;margin:12px 0 8px" },
+        "Optionale Soll-Reaktionszeit ab Aktivierung: bis wann die Aufgabe angefasst/erledigt sein soll. " +
+        "Steuert die automatische Reihung der Arbeitsliste (überfällige oben). Leer = die Bearbeitungsdauer gilt."),
+      lead.node),
     async () => {
       const sec = dur.read();
       if (sec == null) { toast("err", "Bitte eine Dauer > 0 angeben"); return false; }
+      const leadSec = lead.read();  // null = nicht gesetzt (Fallback-Regel S)
       try {
-        await api.post(`/schemas/${state.schemaId}/time-constraint`, { node_id: nodeId, constraint: { max_duration_seconds: sec } });
+        await api.post(`/schemas/${state.schemaId}/time-constraint`, {
+          node_id: nodeId,
+          constraint: { max_duration_seconds: sec, target_lead_seconds: leadSec },
+        });
         await refreshSchema(); render(); toast("ok", "Frist gesetzt");
       } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
     }, "Speichern");
@@ -1405,6 +2017,21 @@ function centerCanvasOnNode(wrap, pos) {
 
 const SPLIT_TYPES = new Set([NODE_TYPE.AND_SPLIT, NODE_TYPE.XOR_SPLIT]);
 
+// Liefert die Join-Knoten-ID, wenn der XOR-Split ``splitId`` einen leeren Zweig
+// traegt (ein Zweig, der direkt auf den Join zeigt, weil seine Aktivitaet
+// geloescht wurde), sonst null. Ein leerer Zweig behaelt seine K7-Zelle, sodass
+// nur im anderen Zweig Arbeit anfaellt.
+function emptyBranchJoin(schema, splitId) {
+  const node = schema.nodes[splitId];
+  if (!node || node.type !== NODE_TYPE.XOR_SPLIT) return null;
+  for (const e of schema.edges || []) {
+    if (e.source !== splitId) continue;
+    const t = schema.nodes[e.target];
+    if (t && t.type === NODE_TYPE.XOR_JOIN) return e.target;
+  }
+  return null;
+}
+
 function nodeInspectorPanel() {
   const schema = state.schema;
   const draft = isDraft(schema);
@@ -1454,22 +2081,23 @@ function nodeInspectorPanel() {
         body.appendChild(list);
       } else {
         body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
-          "Noch keine Datenbindung – Element aus der Palette auf den Schritt ziehen oder unten binden."));
+          "Noch keine Datenbindung – rechts unter „Binden“ ein Datenelement mit ⊕ an diesen Schritt zuweisen."));
       }
-      body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
-        el("button", { class: "btn small", disabled: !Object.keys(schema.data_elements || {}).length, onClick: () => addDataAccess(node.id) }, "+ Daten binden")));
+      // Zuweisen läuft bewusst über die Binden-Palette (⊕); hier nur die
+      // aktuellen Bindungen dieses Schritts anzeigen und einzeln lösen (✕).
 
       // --- Bearbeiterzuordnung (Z1-Z4) direkt am Schritt ---
       const rule = (schema.staff_rules || {})[node.id];
-      const org = schema.org_model || { roles: {}, org_units: {} };
-      const haveRes = (Object.keys(org.roles || {}).length + Object.keys(org.org_units || {}).length) > 0;
       body.appendChild(el("div", { class: "hr" }));
       body.appendChild(el("div", { class: "insp-h" }, "Bearbeiter (BZR)"));
       body.appendChild(el("div", { class: rule ? "" : "muted", style: "font-size:12px" },
-        rule ? describeRule(rule) : "Keine Zuordnung – Rolle/Abteilung aus der Palette auf den Schritt ziehen oder unten zuordnen."));
-      body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
-        el("button", { class: "btn small", disabled: !haveRes, onClick: () => addStaffRule(node.id) }, rule ? "Zuordnung ändern" : "Bearbeiter zuordnen"),
-        rule ? el("button", { class: "btn small danger", onClick: () => removeStaffRule(node.id) }, "Entfernen") : null));
+        rule ? describeRule(rule) : "Keine Zuordnung – rechts unter „Binden“ eine Rolle/Abteilung mit ⊕ an diesen Schritt zuweisen."));
+      // Zuweisen/Ändern über die Binden-Palette (⊕); hier nur Lösen einer
+      // bestehenden Zuordnung.
+      if (rule) {
+        body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+          el("button", { class: "btn small danger", onClick: () => removeStaffRule(node.id) }, "Entfernen")));
+      }
 
       // Weitere Standardaktivitäten am Schritt: Dienst, Frist, Priorität, Wertklasse.
       nodePerformSections(body, schema, node);
@@ -1507,6 +2135,16 @@ function nodeInspectorPanel() {
       nodePerformSections(body, schema, node);
     }
   } else if (SPLIT_TYPES.has(node.type)) {
+    // Leerer Zweig (nur XOR): entsteht, wenn die letzte Aktivit\u00E4t eines Zweigs
+    // entfernt wurde. Er bleibt als direkter Split\u2013Join-Zweig stehen, damit nur
+    // im anderen Zweig Arbeit anf\u00E4llt; hier l\u00E4sst er sich gezielt aufl\u00F6sen.
+    const emptyJoin = emptyBranchJoin(schema, node.id);
+    if (emptyJoin) {
+      body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Diese Verzweigung hat einen leeren Zweig \u2013 in ihm f\u00E4llt keine Aktivit\u00E4t an. Entfernen des leeren Zweigs l\u00F6st bei nur noch einem verbleibenden Zweig die ganze Verzweigung auf."));
+      body.appendChild(el("button", { class: "btn small", onClick: () => removeEmptyBranch(node.id) }, "Leeren Zweig entfernen"));
+      body.appendChild(el("div", { class: "hr" }));
+    }
     body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
       "Verzweigung: Entfernen l\u00F6scht den gesamten Block (Split, Zweige und passenden Join)."));
     body.appendChild(el("button", { class: "btn small danger", onClick: () => deleteNode(node.id) }, "Verzweigung entfernen"));
@@ -1549,6 +2187,25 @@ function deleteNode(nodeId) {
       toast("ok", "Element entfernt");
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Entfernen");
+}
+
+// Leeren Zweig eines XOR-Splits gezielt entfernen. Bleibt danach nur ein Zweig
+// übrig, löst der Kern die ganze Verzweigung auf (Split/Join verschwinden, der
+// verbleibende Zweig wird inline eingefügt). Der Kern validiert vor dem Commit;
+// ein ungültiges Ergebnis (z. B. verlorener Auffang-Zweig) wird abgelehnt.
+function removeEmptyBranch(splitId) {
+  openModal("Leeren Zweig entfernen",
+    el("div", { class: "muted", style: "font-size:13px" },
+      "Den leeren Zweig dieser Verzweigung entfernen? Verbleibt nur noch ein Zweig, wird die gesamte Verzweigung aufgelöst."),
+    async () => {
+      try {
+        await api.post(`/schemas/${state.schemaId}/nodes/${splitId}/remove-empty-branch`, {});
+        state.selectedNode = null;
+        await refreshSchema();
+        render();
+        toast("ok", "Leerer Zweig entfernt");
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Entfernen");
 }
 
 async function deleteForm(nodeId) {
@@ -2105,6 +2762,7 @@ function viewData() {
 
   const dataFocus = state.dataFocusNode && schema.nodes[state.dataFocusNode];
   const rightCol = el("div", null,
+    returnBar(),
     dataFocus
       ? focusBanner("Hervorgehoben: Bindungen von \u201E" + nodeCaption(dataFocus) + "\u201C",
           () => { state.dataFocusNode = null; render(); })
@@ -2216,11 +2874,14 @@ function viewOrg() {
 
   const orgPanel = sharedOrgBanner(schema, draft);
 
-  const roleRows = Object.values(org.roles || {}).map((r) => [r.name, r.id]);
-  const rolePanel = listPanel("Rollen", ["Name", "ID"], roleRows, orgEditable ? () => addRole() : null, "+ Rolle");
+  const rolePanel = rolesPanel(org, orgEditable);
 
   const unitPanel = orgUnitPanel(org, orgEditable);
+  const licPanel = licensePanel();
   const agentPanel = agentListPanel(org, orgEditable);
+  // Fire-and-forget refresh of the licensing snapshot; re-renders only when the
+  // data actually changed (guarded by a signature), so there is no render loop.
+  refreshLicenseInfo();
 
   // BZR-Zuordnung
   const ruleEntries = Object.entries(schema.staff_rules || {});
@@ -2241,8 +2902,9 @@ function viewOrg() {
   const staffFocus = state.staffFocusNode && schema.nodes[state.staffFocusNode];
   const orgFocusUnit = state.orgFocusUnit && (org.org_units || {})[state.orgFocusUnit];
   content.appendChild(el("div", { class: "grid-2" },
-    el("div", null, orgPanel, rolePanel, unitPanel, agentPanel),
+    el("div", null, orgPanel, licPanel, rolePanel, unitPanel, agentPanel),
     el("div", null,
+      returnBar(),
       staffFocus
         ? focusBanner("Hervorgehoben: Zuordnung von \u201E" + nodeCaption(staffFocus) + "\u201C",
             () => { state.staffFocusNode = null; render(); })
@@ -2254,6 +2916,128 @@ function viewOrg() {
         : null,
       orgChartPanel(org))));
   scrollHighlightIntoView();
+}
+
+// --------------------------------------------------------------------------
+// Licensing / agent metering (agent page). All of this stays hidden while the
+// backend runs in the default "open" mode (enforced=false): the panel and the
+// per-agent badges only render once a licensor key is configured, so the
+// dormant state is visually indistinguishable from before licensing existed.
+// --------------------------------------------------------------------------
+
+// Refresh the licensing snapshot in the background. Re-renders the org view
+// only when the fetched data changed (signature compare) to avoid a loop; on
+// any error (e.g. old backend without the endpoints) it silently gives up.
+function refreshLicenseInfo() {
+  Promise.all([api.get("/license/status"), api.get("/license/agents")])
+    .then(([status, agents]) => {
+      const sig = JSON.stringify([status, agents]);
+      if (sig === state._licenseSig) return;
+      state._licenseSig = sig;
+      state.license = status;
+      state.licenseAgents = {};
+      (agents || []).forEach((a) => { state.licenseAgents[a.agent_id] = a; });
+      if (state.view === "org") render();
+    })
+    .catch(() => {});
+}
+
+// The contingent panel: a used/total quota bar, a staged expiry banner and the
+// "+5 Agenten kaufen" call-to-action. Returns null (no panel) unless licensing
+// is actively enforced.
+function licensePanel() {
+  const lic = state.license;
+  if (!lic || !lic.enforced) return null;
+  const total = lic.total_slots || 0;
+  const used = lic.used_slots || 0;
+  const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
+  const buyBtn = el("button", { class: "btn small primary", onClick: buyAgentPack }, "+5 Agenten kaufen");
+  const head = el("div", { class: "panel-h" }, el("h2", null, "Lizenz"),
+    el("span", { class: "sub" }, `${used}/${total} Agenten belegt`),
+    el("span", { class: "spacer", style: "flex:1" }), buyBtn);
+  const bar = el("div", { class: "lic-bar", title: `${used} von ${total} lizenzierten Agenten-Slots belegt` },
+    el("div", { class: "lic-bar-fill", style: `width:${pct}%` }));
+  const body = el("div", { class: "panel-b" }, bar);
+  // Staged renewal reminder (30/14/7/1 days), computed locally from the ratchet.
+  const days = lic.days_to_next_expiry;
+  if (days != null && days <= 30) {
+    const when = new Date((lic.next_expiry_at || 0) * 1000).toLocaleDateString("de-DE");
+    body.appendChild(el("div", { class: "lic-banner" + (days <= 7 ? " urgent" : "") },
+      `Ein Agenten-Paket läuft in ${days} Tag${days === 1 ? "" : "en"} ab (${when}) – jetzt verlängern.`));
+  }
+  if (lic.packs_active === 0 && used >= total) {
+    body.appendChild(el("div", { class: "sub", style: "margin-top:8px" },
+      "Free-Kontingent ausgeschöpft. Mit einem Paket weitere Agenten freischalten."));
+  }
+  return el("div", { class: "panel" }, head, body);
+}
+
+// Per-agent licensing badge for the Agenten table (only when enforced).
+function agentLicenseBadge(agentId) {
+  const v = (state.licenseAgents || {})[agentId];
+  if (!v) return el("span", { class: "muted" }, "–");
+  if (v.licensed) {
+    const label = v.days_left != null ? `${v.days_left} Tage` : "gültig";
+    return el("span", { class: "pill pill-green", title: "Lizenziert" }, label);
+  }
+  return el("span", { class: "pill pill-red", title: "Nicht lizenziert – Paket kaufen/verlängern" }, "ungedeckt");
+}
+
+// Start a purchase. The checkout itself runs on a separate licensor backend;
+// with none configured the API reports so and we show a friendly note.
+async function buyAgentPack() {
+  try {
+    const res = await api.post("/license/checkout", { slots: 5, months: 12 });
+    if (res.checkout_url) {
+      window.open(res.checkout_url, "_blank", "noopener");
+      if (res.claim_token) {
+        // Online auto-pull configured: keep polling the licensor in the
+        // background and activate the pack automatically once it is issued,
+        // so the operator does not have to copy-&-paste the token.
+        toast("ok", "Kauf gestartet", ["Bitte im neuen Tab abschließen – die Lizenz wird danach automatisch eingespielt."]);
+        pollClaimsUntilActivated();
+      } else {
+        toast("ok", "Kauf gestartet", ["Bitte im neuen Tab abschließen; die Lizenz danach unter „Aktivieren“ einspielen."]);
+      }
+    } else {
+      toast("err", "Kauf nicht verfügbar", [res.message]);
+    }
+  } catch (err) {
+    const d = describeError(err);
+    toast("err", d.title, d.lines);
+  }
+}
+
+// Best-effort online auto-pull: after a checkout with a claim token, poll the
+// backend (which in turn contacts the separate licensor) every few seconds
+// until a pack is activated or no claim is left pending. Never blocks anything;
+// the manual "Aktivieren" copy-&-paste path always remains available as a
+// fallback. Runs at most a bounded number of passes so it cannot loop forever.
+async function pollClaimsUntilActivated() {
+  if (state._claimPolling) return;
+  state._claimPolling = true;
+  const INTERVAL_MS = 6000;
+  const MAX_PASSES = 60; // ~6 min ceiling; matches the short claim TTL
+  try {
+    for (let i = 0; i < MAX_PASSES; i++) {
+      await new Promise((r) => setTimeout(r, INTERVAL_MS));
+      let res;
+      try {
+        res = await api.post("/license/claims/poll", {});
+      } catch (_e) {
+        continue; // transient; try again next pass
+      }
+      if (res && res.activated > 0) {
+        state._licenseSig = null; // force a re-render on the next refresh
+        refreshLicenseInfo();
+        toast("ok", "Lizenz aktiviert", ["Das gekaufte Agenten-Paket wurde automatisch eingespielt."]);
+        return;
+      }
+      if (!res || res.pending === 0) return; // nothing left to wait for
+    }
+  } finally {
+    state._claimPolling = false;
+  }
 }
 
 // Endpoint base for org-entity edits: the shared org registry when the schema
@@ -2353,8 +3137,12 @@ function renderUnitNode(unit, org, draft, childrenOf) {
       ? el("span", { class: "tree-badge tree-badge-link", title: "Vorgesetzten in der Agentenliste hervorheben",
           onClick: () => focusOrgAgent(unit.manager_id, unit.id) }, "\u2605 " + mgr)
       : el("span", { class: "tree-badge muted-badge" }, "kein Vorgesetzter"),
+    unit.mailbox
+      ? el("span", { class: "tree-badge", title: "Abteilungspostfach (Gruppen-Benachrichtigung)" }, "\u2709 " + unit.mailbox)
+      : null,
     el("span", { class: "spacer", style: "flex:1" }),
     el("button", { class: "btn small", onClick: () => editManager(unit) }, "Vorgesetzter"),
+    el("button", { class: "btn small", onClick: () => editUnitMailbox(unit) }, "Postfach"),
     el("button", { class: "btn small", onClick: () => moveOrgUnit(unit) }, "Umh\u00E4ngen"),
     draft ? el("button", { class: "btn small", onClick: () => addChildOrgUnit(unit.id) }, "+ Unter") : null);
   const node = el("div", { class: "tree-node" }, row);
@@ -2369,6 +3157,8 @@ function renderUnitNode(unit, org, draft, childrenOf) {
 
 function agentListPanel(org, draft) {
   const agents = Object.values(org.agents || {});
+  // The licensing badge column only appears while enforcement is active.
+  const showLicense = !!(state.license && state.license.enforced);
   const head = el("div", { class: "panel-h" }, el("h2", null, "Agenten"),
     el("span", { class: "spacer", style: "flex:1" }),
     el("button", { class: "btn small", onClick: addAgent, disabled: !draft }, "+ Agent"));
@@ -2388,9 +3178,18 @@ function agentListPanel(org, draft) {
         actions.appendChild(
           el("button", { class: "btn small", onClick: () => provisionLogin(a) }, "Login"));
       }
-      return [a.name, roles, unit, dep, actions];
+      const email = a.email
+        ? a.email
+        : el("span", { class: "muted" }, "–");
+      const row = [a.name, email, roles, unit, dep];
+      if (showLicense) row.push(agentLicenseBadge(a.id));
+      row.push(actions);
+      return row;
     });
-    body.appendChild(table(["Agent", "Rollen", "Abteilung", "Vertreter", ""], rows,
+    const cols = ["Agent", "E-Mail", "Rollen", "Abteilung", "Vertreter"];
+    if (showLicense) cols.push("Lizenz");
+    cols.push("");
+    body.appendChild(table(cols, rows,
       (i) => (state.orgFocusAgents || []).includes(agents[i].id) ? "hl-row" : ""));
   }
   return el("div", { class: "panel" }, head, body);
@@ -2442,7 +3241,9 @@ function describeRule(rule) {
   if (!rule) return "\u2013";
   if (rule.kind === "ROLE") return `Rolle: ${rule.ref}`;
   if (rule.kind === "ORG_UNIT") return `OrgEinheit: ${rule.ref}${rule.recursive ? " (inkl. Unterbereiche)" : ""}`;
+  if (rule.kind === "AGENT") return `Agent: ${rule.ref}`;
   if (rule.kind === "NODE_PERFORMING_AGENT") return `Bearbeiter von ${rule.ref}`;
+  if (rule.kind === "NODE_PERFORMING_AGENT_SUPERVISOR") return `Vorgesetzte:r des Bearbeiters von ${rule.ref}`;
   if (rule.operands) return `${rule.kind}(${rule.operands.map(describeRule).join(", ")})`;
   return rule.kind;
 }
@@ -2465,9 +3266,69 @@ function addRole() {
   }, "Anlegen");
 }
 
+// Rollen-Panel mit optionalem Gruppenpostfach (Regelgruppe N): die Sammeladresse,
+// an die „an das Gruppenpostfach“-Benachrichtigungen (TO_GROUP_MAILBOX) gehen. Der
+// Kern prüft Syntax (N1) und – solange ein mail-gebundener Schritt sie braucht –
+// Vollständigkeit (N3), lehnt das Entfernen also ggf. mit 422 ab.
+function rolesPanel(org, orgEditable) {
+  const roles = Object.values(org.roles || {});
+  const head = el("div", { class: "panel-h" }, el("h2", null, "Rollen"),
+    el("span", { class: "sub" }, "Gruppenpostfach optional"),
+    el("span", { class: "spacer", style: "flex:1" }),
+    el("button", { class: "btn small", disabled: !orgEditable, onClick: addRole }, "+ Rolle"));
+  const body = el("div", { class: "panel-b" });
+  if (!roles.length) { body.appendChild(emptyState("Noch keine Rolle.")); return el("div", { class: "panel" }, head, body); }
+  const rows = roles.map((r) => {
+    const box = r.mailbox ? r.mailbox : el("span", { class: "muted" }, "–");
+    const btn = el("button", { class: "btn small", disabled: !orgEditable,
+      onClick: () => editRoleMailbox(r) }, "Postfach");
+    return [r.name, box, el("div", { style: "display:flex;justify-content:flex-end" }, btn)];
+  });
+  body.appendChild(table(["Rolle", "Gruppenpostfach", ""], rows));
+  return el("div", { class: "panel" }, head, body);
+}
+
+// Gruppenpostfach einer Rolle setzen/entfernen (PUT …/roles/{id}/mailbox). Der
+// Endpunkt ist unter geteilter wie eingebetteter Organisation gleich benannt.
+function editRoleMailbox(role) {
+  const mailbox = el("input", { type: "email", value: role.mailbox || "",
+    placeholder: "z. B. sachbearbeitung@firma.de" });
+  openModal(`Gruppenpostfach – Rolle ${role.name}`, el("div", null,
+    el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+      "Sammeladresse für „an das Gruppenpostfach“-Benachrichtigungen. Leer lassen entfernt sie."),
+    el("label", { class: "field" }, "E-Mail", mailbox)), async () => {
+    try {
+      await api.put(orgApi(`/roles/${role.id}/mailbox`), { mailbox: mailbox.value.trim() || null });
+      await refreshSchema(); render(); toast("ok", "Gruppenpostfach gespeichert");
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+  }, "Speichern");
+}
+
+// Abteilungspostfach setzen/entfernen. Achtung: der Endpunkt-Pfad unterscheidet
+// sich zwischen geteilter (/org-models/{id}/units/…) und eingebetteter
+// (/schemas/{id}/org-units/…) Organisation, daher hier eigens aufgelöst.
+function editUnitMailbox(unit) {
+  const oid = state.schema && state.schema.org_model_id;
+  const url = oid
+    ? `/org-models/${oid}/units/${unit.id}/mailbox`
+    : `/schemas/${state.schemaId}/org-units/${unit.id}/mailbox`;
+  const mailbox = el("input", { type: "email", value: unit.mailbox || "",
+    placeholder: "z. B. einkauf@firma.de" });
+  openModal(`Abteilungspostfach – ${unit.name}`, el("div", null,
+    el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+      "Sammeladresse der Abteilung für „an das Gruppenpostfach“-Benachrichtigungen. Leer lassen entfernt sie."),
+    el("label", { class: "field" }, "E-Mail", mailbox)), async () => {
+    try {
+      await api.put(url, { mailbox: mailbox.value.trim() || null });
+      await refreshSchema(); render(); toast("ok", "Abteilungspostfach gespeichert");
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+  }, "Speichern");
+}
+
 function addAgent() {
   const org = state.schema.org_model;
   const name = el("input", { type: "text", placeholder: "z. B. Erika Muster" });
+  const email = el("input", { type: "email", placeholder: "z. B. erika@firma.de" });
   const roleSel = el("select", { multiple: "multiple", size: Math.min(5, Math.max(1, Object.keys(org.roles).length)) },
     ...Object.values(org.roles).map((r) => el("option", { value: r.id }, r.name)));
   const unitSel = el("select", null, el("option", { value: "" }, "\u2013 keine \u2013"),
@@ -2476,16 +3337,29 @@ function addAgent() {
     ...Object.values(org.agents || {}).map((a) => el("option", { value: a.id }, a.name)));
   openModal("Agent", el("div", null,
     el("label", { class: "field" }, "Name", name),
+    el("label", { class: "field", style: "margin-top:10px" }, "E-Mail (pers\u00f6nliches Postfach)", email),
     el("label", { class: "field", style: "margin-top:10px" }, "Rollen (Mehrfachauswahl)", roleSel),
     el("label", { class: "field", style: "margin-top:10px" }, "Abteilung", unitSel),
     el("label", { class: "field", style: "margin-top:10px" }, "Vertreter", depSel)), async () => {
     if (!name.value.trim()) return false;
     const roleIds = [...roleSel.selectedOptions].map((o) => o.value);
     const payload = { name: name.value.trim(), role_ids: roleIds };
+    // Leeres Feld -> keine Adresse (nur mitsenden, wenn gesetzt; N1 pr\u00fcft Syntax).
+    if (email.value.trim()) payload.email = email.value.trim();
     if (unitSel.value) payload.org_unit_id = unitSel.value;
     if (depSel.value) payload.deputy_id = depSel.value;
     try { await api.post(orgApi(`/agents`), payload); await refreshSchema(); render(); toast("ok", "Agent angelegt"); }
-    catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    catch (err) {
+      // A 402 means the agent contingent is full: turn the error into a
+      // purchase offer rather than a dead end (only reachable when enforced).
+      if (err && err.status === 402) {
+        const d = describeError(err);
+        toast("err", "Agenten-Kontingent ausgeschöpft", d.lines.length ? d.lines : [d.title]);
+        buyAgentPack();
+        return false;
+      }
+      const d = describeError(err); toast("err", d.title, d.lines); return false;
+    }
   }, "Anlegen");
 }
 
@@ -2552,13 +3426,19 @@ function editAgent(agent) {
   const unitSel = el("select", null, el("option", { value: "" }, "\u2013 keine \u2013"),
     ...Object.values(org.org_units || {}).map((u) => el("option", { value: u.id }, u.name)));
   unitSel.value = agent.org_unit_id || "";
+  const email = el("input", { type: "email", value: agent.email || "",
+    placeholder: "z. B. erika@firma.de" });
   openModal(`Agent bearbeiten: ${agent.name}`, el("div", null,
     el("label", { class: "field" }, "Name", name),
+    el("label", { class: "field", style: "margin-top:10px" }, "E-Mail (pers\u00f6nliches Postfach)", email),
     el("label", { class: "field", style: "margin-top:10px" }, "Rollen (Mehrfachauswahl)", roleSel),
     el("label", { class: "field", style: "margin-top:10px" }, "Abteilung", unitSel)), async () => {
     if (!name.value.trim()) return false;
     const roleIds = [...roleSel.selectedOptions].map((o) => o.value);
-    const payload = { name: name.value.trim(), role_ids: roleIds, org_unit_id: unitSel.value || null };
+    // Immer mitsenden: leeres Feld -> null entfernt eine Adresse. Der Kern lehnt
+    // das Entfernen ab (N3), solange ein mail-gebundener Schritt sie braucht.
+    const payload = { name: name.value.trim(), role_ids: roleIds,
+      org_unit_id: unitSel.value || null, email: email.value.trim() || null };
     try { await api.patch(orgApi(`/agents/${agent.id}`), payload); await refreshSchema(); render(); toast("ok", "Agent gespeichert"); }
     catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Speichern");
@@ -2637,13 +3517,28 @@ function addStaffRule(fixedNodeId) {
     ? null
     : el("select", null, ...activitiesOf(schema).map((n) => el("option", { value: n.id }, nodeCaption(n))));
   const refSel = el("select");
-  const kindSel = el("select", null, el("option", { value: "ROLE" }, "Rolle"), el("option", { value: "ORG_UNIT" }, "OrgEinheit"));
+  const kindSel = el("select", null,
+    el("option", { value: "ROLE" }, "Rolle"),
+    el("option", { value: "ORG_UNIT" }, "OrgEinheit"),
+    el("option", { value: "AGENT" }, "Agent (konkrete Person)"),
+    el("option", { value: "NODE_PERFORMING_AGENT" }, "Bearbeiter eines Schritts"),
+    el("option", { value: "NODE_PERFORMING_AGENT_SUPERVISOR" }, "Vorgesetzte:r des Bearbeiters eines Schritts"));
   const recBox = el("input", { type: "checkbox" });
   const recField = el("label", { class: "field" }, recBox, " Abteilung und alle Bereiche darunter");
+  // Node-bezogene Arten (Bearbeiter/Vorgesetzte:r eines Schritts) referenzieren
+  // einen vorherigen Schritt; der Kern erzwingt den gueltigen Rueckbezug (Z3).
+  const NODE_KINDS = ["NODE_PERFORMING_AGENT", "NODE_PERFORMING_AGENT_SUPERVISOR"];
   function syncKind() {
     clear(refSel);
-    const src = kindSel.value === "ROLE" ? org.roles : org.org_units;
-    Object.values(src || {}).forEach((x) => refSel.appendChild(el("option", { value: x.id }, x.name)));
+    if (NODE_KINDS.includes(kindSel.value)) {
+      activitiesOf(schema)
+        .filter((n) => n.id !== (nodeId || (nodeSel && nodeSel.value)))
+        .forEach((n) => refSel.appendChild(el("option", { value: n.id }, nodeCaption(n))));
+    } else {
+      const src = kindSel.value === "ROLE" ? org.roles
+        : kindSel.value === "AGENT" ? org.agents : org.org_units;
+      Object.values(src || {}).forEach((x) => refSel.appendChild(el("option", { value: x.id }, x.name)));
+    }
     recField.style.display = kindSel.value === "ORG_UNIT" ? "" : "none";
   }
   kindSel.addEventListener("change", syncKind); syncKind();
@@ -3110,34 +4005,72 @@ async function viewMonitor() {
     el("div", { class: "panel-h" }, el("h2", null, "Inzidente (externe Aufgaben)"),
       el("span", { class: "sub" }, "Topic-Fehler \u00B7 Aufl\u00F6sen reiht die Aufgabe erneut ein")),
     incBody));
+}
 
-  // Wartung (Administrator): ganz unten, da selten benoetigt und destruktiv.
-  // Nur Administratoren duerfen zuruecksetzen oder Beispieldaten laden
-  // (POST /admin/reset).
-  if (hasRole("admin")) {
+// --------------------------------------------------------------------------
+// View: Administration (nur Rolle Administrator)
+// --------------------------------------------------------------------------
+
+// Buendelt alle rein administrativen Betriebstaetigkeiten in einer eigenen,
+// nur fuer Administratoren sichtbaren Sicht (die Nav-Sichtbarkeit steuert
+// VIEW_ROLES.admin + applyRoleNav). Bisher lagen diese Panels am unteren Ende
+// des Monitorings; sie sind hier zentral zusammengefasst:
+//   - Datensicherung: Zustand der automatischen Sicherung ansehen und bei
+//     Bedarf sofort eine Sicherung anstossen (GET/POST /admin/backups[/run-now]).
+//   - Wartung: gesamtes System auf Null zuruecksetzen bzw. Beispieldaten laden
+//     (POST /admin/reset) -- destruktiv, daher mit Bestaetigung.
+// Die Sicht ist rein an der Betriebsschicht orientiert und traegt keine
+// Korrektheitslogik -- jede Aktion laeuft ueber die bestehenden Kern-Endpunkte.
+async function viewAdmin() {
+  const content = byId("content");
+  clear(content);
+
+  // Doppelte Absicherung: Non-Admins sehen die Nav-Kachel gar nicht erst
+  // (applyRoleNav), aber falls die Sicht doch aktiv wird (z. B. persistierte
+  // View nach Rollenwechsel), zeigen wir nur einen Hinweis statt Aktionen.
+  if (!hasRole("admin")) {
     content.appendChild(el("div", { class: "panel" },
-      el("div", { class: "panel-h" },
-        el("h2", null, "Wartung (Administrator)"),
-        el("span", { class: "sub" }, "Daten zur\u00FCcksetzen \u00B7 Beispiel laden")),
       el("div", { class: "panel-b" },
-        el("p", { class: "muted" },
-          "Setzt das gesamte System zur\u00FCck. Die Beispieldaten zeigen alle Funktionen anhand zweier Prozesse, einer Organisation und drei laufenden Instanzen. Dieser Vorgang l\u00F6scht alle vorhandenen Daten unwiderruflich."),
-        el("div", { style: "display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;" },
-          el("button", { class: "btn primary", onClick: () => confirmReset(true) }, "Beispieldaten laden"),
-          el("button", { class: "btn danger", onClick: () => confirmReset(false) }, "Auf Null zur\u00FCcksetzen")))));
-
-    // Sicherungen (Administrator, nur Ansicht): zeigt den Zustand der
-    // automatischen Datensicherung (GET /admin/backups) und erlaubt, sofort
-    // eine Sicherung anzustossen (POST /admin/backups/run-now). Die Oberflaeche
-    // fuehrt selbst KEIN pg_dump aus -- sie setzt nur einen Ausloese-Marker.
-    const backupsBody = el("div", { class: "panel-b" });
-    content.appendChild(el("div", { class: "panel" },
-      el("div", { class: "panel-h" },
-        el("h2", null, "Sicherungen"),
-        el("span", { class: "sub" }, "Datensicherung \u00B7 nur Ansicht")),
-      backupsBody));
-    loadBackupsPanel(backupsBody);
+        emptyState("Dieser Bereich ist Administratoren vorbehalten."))));
+    return;
   }
+
+  // Sicherungen (nur Ansicht): zeigt den Zustand der automatischen
+  // Datensicherung und erlaubt, sofort eine Sicherung anzustossen. Die
+  // Oberflaeche fuehrt selbst KEIN pg_dump aus -- sie setzt nur einen
+  // Ausloese-Marker; der Sicherungsdienst fuehrt sie kurz darauf aus.
+  const backupsBody = el("div", { class: "panel-b" });
+  content.appendChild(el("div", { class: "panel" },
+    el("div", { class: "panel-h" },
+      el("h2", null, "Sicherungen"),
+      el("span", { class: "sub" }, "Datensicherung \u00B7 nur Ansicht")),
+    backupsBody));
+  loadBackupsPanel(backupsBody);
+
+  // E-Mail-Ausgang (nur Ansicht): der Zustand der durablen Mail-Outbox der
+  // modellierten Benachrichtigungen (Regelgruppe N) -- was ausstehend, in
+  // Wiederholung, zugestellt oder als Dead-Letter gescheitert ist. Ein manueller
+  // Versand stoesst faellige Eintraege erneut an (POST /admin/mail-outbox/dispatch).
+  const mailBody = el("div", { class: "panel-b" });
+  content.appendChild(el("div", { class: "panel" },
+    el("div", { class: "panel-h" },
+      el("h2", null, "E-Mail-Ausgang"),
+      el("span", { class: "sub" }, "Benachrichtigungen · nur Ansicht")),
+    mailBody));
+  loadMailOutboxPanel(mailBody);
+
+  // Wartung: destruktiv, daher unter den Sicherungen. Nur Administratoren
+  // duerfen zuruecksetzen oder Beispieldaten laden (POST /admin/reset).
+  content.appendChild(el("div", { class: "panel" },
+    el("div", { class: "panel-h" },
+      el("h2", null, "Wartung"),
+      el("span", { class: "sub" }, "Daten zur\u00FCcksetzen \u00B7 Beispiel laden")),
+    el("div", { class: "panel-b" },
+      el("p", { class: "muted" },
+        "Setzt das gesamte System zur\u00FCck. Die Beispieldaten zeigen alle Funktionen anhand zweier Prozesse, einer Organisation und drei laufenden Instanzen. Dieser Vorgang l\u00F6scht alle vorhandenen Daten unwiderruflich."),
+      el("div", { style: "display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;" },
+        el("button", { class: "btn primary", onClick: () => confirmReset(true) }, "Beispieldaten laden"),
+        el("button", { class: "btn danger", onClick: () => confirmReset(false) }, "Auf Null zur\u00FCcksetzen")))));
 }
 
 // Groessenangabe menschenlesbar (Bytes -> KB/MB/GB ...).
@@ -3200,6 +4133,20 @@ function renderBackupsBody(status, body) {
   frag.appendChild(el("div", { style: "display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;" },
     el("button", { class: "btn", onClick: () => triggerBackupNow(body) }, "Jetzt sichern"),
     el("button", { class: "btn small", onClick: () => loadBackupsPanel(body) }, "Aktualisieren")));
+
+  // Wiederherstellung ist bewusst KEINE GUI-Funktion: ein Restore verwirft die
+  // laufende Datenbank und laeuft mit erhoehten Rechten am Dump-Volume, auf das
+  // die API laut Backup-Konzept (Sicherheitsregel: kein Web-/API-Zugriff auf das
+  // Backup-Verzeichnis) bewusst keinen Zugriff hat. Er erfolgt daher als
+  // gefuehrter Ops-Ablauf (restore.sh). Hier nur ein Hinweis mit Verweis.
+  const restoreNote = el("p", { class: "muted", style: "margin-top:14px;" },
+    "ℹ️ Eine Wiederherstellung erfolgt aus Sicherheitsgründen nicht über die " +
+    "Oberfläche, sondern als geführter Betriebsablauf (restore.sh). Anleitung: ");
+  restoreNote.appendChild(el("a",
+    { href: docUrl("Betriebs-Backup-Leitfaden.md"), target: "_blank", rel: "noopener" },
+    "Betriebs-Backup-Leitfaden"));
+  restoreNote.appendChild(document.createTextNode("."));
+  frag.appendChild(restoreNote);
   return frag;
 }
 
@@ -3214,6 +4161,82 @@ async function triggerBackupNow(body) {
     const d = describeError(err);
     toast("err", d.title, d.lines);
   }
+}
+
+// Epoch-Sekunden (Float) menschenlesbar; die Mail-Outbox stempelt so (analog outbox.py).
+function fmtEpoch(sec) {
+  if (!sec) return "–";
+  try { return new Date(sec * 1000).toLocaleString(); } catch (_e) { return "–"; }
+}
+
+const MAIL_STATE_LABELS = {
+  PENDING: "ausstehend", FAILED: "in Wiederholung", SENT: "zugestellt", DEAD: "gescheitert",
+};
+
+// Fuellt den E-Mail-Ausgang-Bereich asynchron (GET /admin/mail-outbox).
+async function loadMailOutboxPanel(body) {
+  clear(body);
+  body.appendChild(el("p", { class: "muted" }, "Wird geladen …"));
+  try {
+    const status = await api.get("/admin/mail-outbox");
+    clear(body);
+    body.appendChild(renderMailOutboxBody(status, body));
+  } catch (err) {
+    clear(body);
+    const d = describeError(err);
+    body.appendChild(el("p", { class: "muted" }, d.title));
+  }
+}
+
+// Baut den Inhalt des E-Mail-Ausgang-Panels aus dem Statusobjekt. Zeigt bewusst
+// nur Metadaten (Empfaengeranzahl, Zustand, Betreff) -- keine Adressliste, keinen
+// Text (Datensparsamkeit, DSGVO-freundlich, Konzept §8).
+function renderMailOutboxBody(status, body) {
+  const frag = document.createDocumentFragment();
+
+  const info = el("div", { class: "muted", style: "margin-bottom:10px;" });
+  if (!status.configured) {
+    info.appendChild(el("div", null,
+      "Kein SMTP-Server konfiguriert – Benachrichtigungen werden modelliert und " +
+      "protokolliert, aber nicht versendet (PROCWORKS_SMTP_HOST/MAIL_FROM setzen)."));
+  }
+  info.appendChild(el("div", null,
+    `Gesamt ${status.total} · ausstehend ${status.pending} · in Wiederholung ` +
+    `${status.failed} · zugestellt ${status.sent} · gescheitert ${status.dead}`));
+  frag.appendChild(info);
+
+  const entries = status.entries || [];
+  if (entries.length) {
+    const rows = entries.map((e) => [
+      MAIL_STATE_LABELS[e.state] || e.state,
+      e.node_label || e.node_id,
+      e.subject || "–",
+      String(e.recipient_count),
+      `${e.attempts}/${e.max_attempts}`,
+      fmtEpoch(e.created_at),
+      e.last_error ? el("span", { class: "pill pill-red", title: e.last_error }, "Fehler") : "–",
+    ]);
+    frag.appendChild(table(
+      ["Zustand", "Schritt", "Betreff", "Empf.", "Versuche", "Angelegt", "Letzter Fehler"], rows));
+  } else {
+    frag.appendChild(el("p", { class: "muted" }, "Noch keine Benachrichtigung in der Warteschlange."));
+  }
+
+  frag.appendChild(el("div", { style: "display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;" },
+    el("button", { class: "btn", onClick: () => dispatchMailOutbox(body) }, "Fällige jetzt senden"),
+    el("button", { class: "btn small", onClick: () => loadMailOutboxPanel(body) }, "Aktualisieren")));
+  return frag;
+}
+
+// Stoesst einen manuellen Versand faelliger Eintraege an (POST …/dispatch) und
+// zeigt das Ergebnis. Nuetzlich nach einer SMTP-Stoerung.
+async function dispatchMailOutbox(body) {
+  try {
+    const status = await api.post("/admin/mail-outbox/dispatch");
+    clear(body);
+    body.appendChild(renderMailOutboxBody(status, body));
+    toast("ok", "Versand angestoßen", [`Zugestellt: ${status.sent} · gescheitert: ${status.dead}`]);
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 }
 
 async function openInstanceFromMonitor(id) {
@@ -3380,13 +4403,91 @@ async function viewTasks() {
     const rows = tasks.map((t) => {
       const elig = (t.eligible_agents || []).map(agentNameOf).join(", ");
       const btn = el("button", { class: "btn small green", onClick: () => completeTask(t, agentId) }, "Erledigen");
-      return [t.label || t.node_id, schemaLabel(t.schema_id, t.schema_version), elig, btn];
+      return [t.label || t.node_id, schemaLabel(t.schema_id, t.schema_version), dueCell(t), elig, btn];
     });
-    body.appendChild(table(["Aufgabe", "Prozess", "Berechtigte", ""], rows));
+    body.appendChild(table(["Aufgabe", "Prozess", "Fällig", "Berechtigte", ""], rows));
   }
   content.appendChild(el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "Offene Aufgaben"), el("span", { class: "sub" }, tasks.length + " Eintr\u00E4ge")),
     body));
+
+  content.appendChild(await absencePanel(agentId));
+}
+
+// Panel \u201EAbwesenheit / Vertretung" in \u201EMeine Aufgaben": eine gut sichtbare
+// Selbstbedienung, um fuer einen Zeitraum abwesend zu sein. Waehrend der
+// Abwesenheit erhaelt der eingetragene Vertreter die Aufgaben PARALLEL zum
+// Agenten (der Agent wird nie entfernt -- ohne Vertretung bleibt die Aufgabe
+// also beim Agenten und die Instanz steht nie still). Die eigentliche Aufloesung
+// passiert im Kern; dieser Client ruft nur die Endpunkte /agents/{id}/absences.
+async function absencePanel(agentId) {
+  const org = state.schema.org_model || { agents: {} };
+  const agent = (org.agents || {})[agentId] || {};
+  const deputyId = agent.deputy_id || null;
+
+  // Vertretungs-Status: ohne Vertreter ein deutlicher Hinweis, dass die
+  // Aufgaben in der Abwesenheit beim Agenten selbst verbleiben.
+  const deputyLine = deputyId
+    ? el("div", { class: "ok-banner" },
+        `\u2713 Vertretung hinterlegt: ${agentNameOf(deputyId)} erh\u00E4lt deine Aufgaben w\u00E4hrend deiner Abwesenheit (parallel zu dir).`)
+    : el("div", { class: "warn-banner" },
+        "\u26A0 Keine Vertretung hinterlegt. W\u00E4hrend deiner Abwesenheit bleiben deine Aufgaben dir zugewiesen \u2013 die Instanz steht nicht still, aber niemand \u00FCbernimmt f\u00FCr dich. Vertretung in der Ressourcensicht setzen.");
+
+  // Eingabezeile: Zeitraum (von/bis, ganze Tage) plus optionale Notiz.
+  const fromInp = el("input", { type: "date" });
+  const toInp = el("input", { type: "date" });
+  const noteInp = el("input", { type: "text", placeholder: "Notiz (optional), z. B. Urlaub" });
+  const addBtn = el("button", { class: "btn small primary", onClick: submit }, "Abwesenheit eintragen");
+
+  async function submit() {
+    if (!fromInp.value || !toInp.value) { toast("err", "Bitte Start- und Enddatum w\u00E4hlen"); return; }
+    if (toInp.value < fromInp.value) { toast("err", "Das Enddatum darf nicht vor dem Startdatum liegen"); return; }
+    try {
+      // Ganze Tage: Beginn 00:00, Ende 23:59:59 UTC (inklusiver Zeitraum).
+      await api.post(`/agents/${agentId}/absences`, {
+        start_at: `${fromInp.value}T00:00:00Z`,
+        end_at: `${toInp.value}T23:59:59Z`,
+        note: noteInp.value || "",
+      });
+      toast("ok", "Abwesenheit eingetragen");
+      render();
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  }
+
+  let absences = [];
+  try { absences = await api.get(`/agents/${agentId}/absences`); }
+  catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+
+  const now = new Date();
+  const fmt = (iso) => (iso || "").slice(0, 10);
+  const listBody = el("div", { class: "panel-b" });
+  if (!absences.length) {
+    listBody.appendChild(el("div", { class: "muted", style: "font-size:13px" }, "Keine Abwesenheiten eingetragen."));
+  } else {
+    const rows = absences.map((a) => {
+      const active = new Date(a.start_at) <= now && now <= new Date(a.end_at);
+      const status = active ? el("span", { class: "pill pill-amber" }, "aktiv") : el("span", { class: "pill pill-gray" }, "geplant");
+      const del = el("button", { class: "btn small danger", onClick: async () => {
+        try { await api.del(`/agents/${agentId}/absences/${a.id}`); toast("ok", "Abwesenheit entfernt"); render(); }
+        catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+      } }, "Entfernen");
+      return [`${fmt(a.start_at)} \u2013 ${fmt(a.end_at)}`, a.note || "\u2013", status, del];
+    });
+    listBody.appendChild(table(["Zeitraum", "Notiz", "Status", ""], rows));
+  }
+
+  return el("div", { class: "panel" },
+    el("div", { class: "panel-h" },
+      el("h2", null, "Abwesenheit / Vertretung"),
+      el("span", { class: "sub" }, "Vertreter erh\u00E4lt Aufgaben w\u00E4hrend der Abwesenheit")),
+    el("div", { class: "panel-b" },
+      deputyLine,
+      el("div", { class: "form-row", style: "display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-top:10px" },
+        el("label", { class: "field" }, "Von", fromInp),
+        el("label", { class: "field" }, "Bis", toInp),
+        el("label", { class: "field", style: "flex:1;min-width:180px" }, "Notiz", noteInp),
+        addBtn)),
+    listBody);
 }
 
 async function completeTask(task, agentId) {
@@ -3675,10 +4776,13 @@ function testAgentPanel(slot, inst, runSchema, agents, instanceTasks) {
       } else {
         mine.forEach((t) => {
           const node = runSchema.nodes[t.node_id];
-          body.appendChild(el("div", { class: "worklist-item" },
+          const badge = criticalityBadge(t);
+          const item = el("div", { class: "worklist-item" },
             el("span", { class: "name" }, t.label || (node ? nodeCaption(node) : t.node_id)),
-            el("span", { class: "tag" }, priorityShort(t.priority)),
-            el("button", { class: "btn small green", onClick: () => completeTestTask(inst, runSchema, t, current) }, "Erledigen")));
+            el("span", { class: "tag" }, priorityShort(t.priority)));
+          if (badge) item.appendChild(badge);
+          item.appendChild(el("button", { class: "btn small green", onClick: () => completeTestTask(inst, runSchema, t, current) }, "Erledigen"));
+          body.appendChild(item);
         });
       }
     }
@@ -3725,6 +4829,53 @@ function agentNameOfIn(schema, id) {
 // Kurzform der abgeleiteten Arbeitslisten-Priorität (E8) für die Aufgabenkachel.
 const PRIORITY_LABELS = { LOW: "niedrig", MEDIUM: "normal", HIGH: "hoch", CRITICAL: "kritisch" };
 function priorityShort(p) { return PRIORITY_LABELS[p] || "bereit"; }
+
+// --- Zeitbasierte, automatische Arbeitslisten-Priorisierung ----------------
+// Rein darstellend: der Server liefert je Aufgabe (OpenTask) das abgeleitete
+// Kritikalitätsband und die Restzeit; hier werden sie nur zu Text/Badge. Keine
+// Korrektheitslogik im Client (siehe Konzept "Zeitbasierte-Priorisierung").
+
+//: Anwenderverständliche Beschriftung je Kritikalitätsband (Konzept 5.1).
+const CRITICALITY_LABELS = {
+  ON_TRACK: "im Plan", WARNING: "wird knapp", AT_RISK: "gefährdet", OVERDUE: "überfällig", NONE: "",
+};
+//: CSS-Klasse (Ampelfarbe) je Band; NONE bleibt ohne Badge.
+const CRITICALITY_CLASS = {
+  ON_TRACK: "crit-ontrack", WARNING: "crit-warning", AT_RISK: "crit-atrisk", OVERDUE: "crit-overdue",
+};
+
+// Ein farbiges Kritikalitäts-Badge für eine Aufgabe, oder null ohne Soll-Zeit.
+function criticalityBadge(t) {
+  const band = (t && t.time_criticality) || "NONE";
+  if (band === "NONE" || !CRITICALITY_LABELS[band]) return null;
+  return el("span", { class: "badge " + (CRITICALITY_CLASS[band] || "") }, CRITICALITY_LABELS[band]);
+}
+
+// Menschliche Dauer (Sekunden -> "12 Min." / "2 Std. 5 Min." / "3 Tg.").
+function humanDuration(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + " Sek.";
+  const min = Math.round(sec / 60);
+  if (min < 60) return min + " Min.";
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h < 24) return m ? (h + " Std. " + m + " Min.") : (h + " Std.");
+  return Math.floor(h / 24) + " Tg.";
+}
+
+// Relative Fälligkeit einer Aufgabe ("in 12 Min." / "überfällig seit 3 Min.").
+// "–" (Gedankenstrich), wenn die Aufgabe keine Soll-Zeit trägt.
+function dueLabel(t) {
+  if (!t || t.remaining_seconds == null) return "–";
+  const s = Math.round(t.remaining_seconds);
+  return s < 0 ? ("überfällig seit " + humanDuration(-s)) : ("in " + humanDuration(s));
+}
+
+// Die "Fällig"-Zelle: relative Restzeit plus farbiges Band-Badge.
+function dueCell(t) {
+  const badge = criticalityBadge(t);
+  const label = el("span", { class: "due-label" }, dueLabel(t));
+  return badge ? el("span", { class: "due-cell" }, label, badge) : label;
+}
 
 // --------------------------------------------------------------------------
 // View: Integration (Integrations-Konzept Abschnitt 11 / Roadmap P5)
@@ -4366,6 +5517,7 @@ const DOC_URLS = {
   "Mitarbeiter-Anleitung.md": RELEASE_DOCS + "Mitarbeiter-Anleitung.md",
   "Windows-Server-Setup.md": RELEASE_DOCS + "Windows-Server-Setup.md",
   "Integrations-Leitfaden.md": RELEASE_DOCS + "Integrations-Leitfaden.md",
+  "Betriebs-Backup-Leitfaden.md": RELEASE_DOCS + "Betriebs-Backup-Leitfaden.md",
 };
 // Resolve a documentation filename to its public URL (falls back to the website).
 function docUrl(doc) { return DOC_URLS[doc] || (SITE_DOCS + doc); }
@@ -4378,8 +5530,9 @@ const HELP_VIEWS = [
   ["\u265F Ressourcensicht", "Organisation (Rollen, Einheiten, Agenten) und Bearbeiterregeln je Schritt (Z/A)."],
   ["\u25B6 Ausf\u00FChrung", "Instanzen starten, Arbeitsliste abarbeiten, XOR-Zweige w\u00E4hlen. Modellierer starten Entw\u00FCrfe als Test-Instanz."],
   ["\u2630 Meine Aufgaben", "Pers\u00F6nliche Arbeitsliste \u2013 Aufgaben mit \u201EErledigen\u201C abschlie\u00DFen."],
-  ["\u2609 Monitoring", "Live-Status aktiver Instanzen, Prozesslandkarte, Inzidente, Wartung (Administrator)."],
+  ["\u2609 Monitoring", "Live-Status aktiver Instanzen, Prozesslandkarte, Inzidente externer Aufgaben."],
   ["\u21C4 Integration", "Connectoren, externe Datenbindung, Automatik (External-Task / HTTP-Push), Webhooks."],
+  ["\u2699 Administration", "Nur f\u00FCr Administratoren: Datensicherung, Wartung (Zur\u00FCcksetzen) und Beispieldaten."],
 ];
 
 // Role-oriented quick starts: each entry points at the matching how-to doc.
@@ -4516,6 +5669,7 @@ const VIEW_META = {
   testrun: { title: "Pr\u00FCfinstanz", sub: "Test-Instanz eines Entwurfs im 4-Quadranten-Cockpit durchspielen", fn: viewTestRun },
   monitor: { title: "Monitoring", sub: "Live-Status aktiver Instanzen", fn: viewMonitor },
   integration: { title: "Integration", sub: "Connectoren, Datenanbindung, Automatik & Webhooks", fn: viewIntegration },
+  admin: { title: "Administration", sub: "Betrieb: Datensicherung, Wartung & Beispieldaten", fn: viewAdmin },
   help: { title: "Hilfe", sub: "Sichten, Schnellstart je Rolle & Glossar der Regel-Codes", fn: viewHelp },
 };
 
@@ -4539,6 +5693,7 @@ const VIEW_ROLES = {
   testrun: ["modeler", "admin"],
   monitor: ["viewer", "operator", "modeler", "admin"],
   integration: ["modeler", "admin"],
+  admin: ["admin"],
   help: ["viewer", "operator", "modeler", "admin"],
 };
 
@@ -4769,6 +5924,9 @@ function render() {
   // Guard against a stale/unknown persisted view (e.g. after a rename) so the
   // dispatch below never dereferences an undefined entry.
   if (!VIEW_META[state.view]) state.view = "model";
+  // Der Kontrollfluss-Vollbildmodus lebt nur in der Modellieren-Sicht; beim
+  // Verlassen zuruecksetzen, damit er nicht als Overlay in anderen Sichten haengt.
+  if (state.view !== "model") state.graphMaximized = false;
   // Remember the active view so a page reload restores it instead of always
   // falling back to "Modellieren".
   localStorage.setItem("view", state.view);
@@ -4830,11 +5988,27 @@ async function pollLiveUpdates() {
   }
 }
 
+// Views whose time-based worklist criticality "walks on" as wall-clock time
+// passes, even without a new runtime event (Zeitbasierte-Priorisierung 7).
+const TIME_TICK_VIEWS = new Set(["tasks", "testrun", "monitor", "run"]);
+const TIME_TICK_MS = 30000;
+
+// Re-render the current time-sensitive view on a slow cadence so the "Fällig"
+// countdown and the criticality bands advance without a triggering event. Kept
+// separate from the (event-driven) revision poll and skipped while the user is
+// busy, so it never disturbs an open form or modal.
+function tickTimeViews() {
+  if (!TIME_TICK_VIEWS.has(state.view) || userIsBusy()) return;
+  if (state.passwordLogin && !state.principal) return;
+  render();
+}
+
 // Start the background poll exactly once (boot may run repeatedly on re-login).
 function startLiveUpdates() {
   if (startLiveUpdates._started) return;
   startLiveUpdates._started = true;
   setInterval(pollLiveUpdates, LIVE_POLL_MS);
+  setInterval(tickTimeViews, TIME_TICK_MS);
 }
 
 function wireNav() {
@@ -4842,12 +6016,23 @@ function wireNav() {
     const btn = e.target.closest("button[data-view]");
     if (!btn) return;
     state.view = btn.dataset.view;
-    // A direct nav click is a fresh intent -- drop any badge-driven highlight.
+    // A direct nav click is a fresh intent -- drop any badge-driven highlight
+    // and the control-flow return point (it would otherwise be stale).
     state.dataFocusNode = null;
     state.staffFocusNode = null;
     state.orgFocusUnit = null;
     state.orgFocusAgents = [];
+    state.returnTo = null;
     render();
+  });
+  const sideToggle = byId("sidebar-toggle");
+  if (sideToggle) sideToggle.addEventListener("click", toggleSidebar);
+  // Vollbild des Kontrollflusses per Escape verlassen (nur wenn aktiv).
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.graphMaximized) {
+      state.graphMaximized = false;
+      render();
+    }
   });
   const apiInput = byId("api-base");
   apiInput.value = state.apiBase;
@@ -4861,6 +6046,18 @@ function wireNav() {
   tokenInput.addEventListener("change", () => { setToken(tokenInput.value); });
   const logoutBtn = byId("logout-btn");
   if (logoutBtn) logoutBtn.addEventListener("click", () => { logout(); });
+  wireTheme();
+}
+
+/**
+ * Verdrahtet die Farbschema-Knoepfe (Dunkel/Hell) der Sidebar und markiert den
+ * aktuell aktiven. Rein clientseitig -- kein API-Aufruf, kein boot().
+ */
+function wireTheme() {
+  document.querySelectorAll(".theme-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setTheme(btn.dataset.themeChoice));
+  });
+  applyTheme(state.theme); // aktiven Knopf markieren, nun da er im DOM ist
 }
 
 async function boot() {

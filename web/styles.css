@@ -1,4 +1,17 @@
 /* SPDX-License-Identifier: BUSL-1.1 */
+
+/* ---------------------------------------------------------------------------
+   Farbschema (Theme)
+   ---------------------------------------------------------------------------
+   Die gesamte GUI ist rein ueber CSS-Variablen eingefaerbt. Das dunkle Schema
+   ist der Default auf :root; die helle Variante ueberschreibt dieselben
+   Variablen unter `:root[data-theme="light"]`. Der Web-Client (app.js) stempelt
+   das gewuenschte Theme als `data-theme`-Attribut auf das <html>-Element und
+   merkt sich die Wahl in localStorage ("theme"). So laesst sich das Aussehen
+   umschalten, ohne dass eine einzige Komponentenregel angefasst werden muss.
+   Neue Regeln MUESSEN Farben ausschliesslich ueber diese Variablen beziehen,
+   sonst bricht die helle Variante.
+   --------------------------------------------------------------------------- */
 :root {
   --bg: #0f1420;
   --bg-elev: #161d2e;
@@ -6,8 +19,11 @@
   --line: #2a3550;
   --txt: #e6ebf5;
   --txt-dim: #9aa6bf;
+  --muted: #9aa6bf;           /* Alias fuer gedaempften Text (tl-*/tree-Badges) */
   --accent: #4f86ff;
   --accent-soft: #21345e;
+  --accent-txt: #cfe0ff;      /* Text/Icon auf accent-soft-Flaechen (Chips, Badges) */
+  --on-accent: #ffffff;       /* Text auf gefuellter accent-Flaeche (Buttons) */
   --green: #2fbf71;
   --green-soft: #163a2a;
   --amber: #f0a93b;
@@ -16,14 +32,54 @@
   --red-soft: #3a1a20;
   --gray: #6b7794;
   --gray-soft: #232c42;
+  --purple: #8a5bff;          /* Sub-Prozess-/Bearbeiter-Akzent */
+  --purple-soft: #2a2350;
+  --purple-txt: #d8c9ff;
+  --topbar-bg: rgba(15, 20, 32, .8);   /* halbtransparente, verschwimmende Topbar */
+  --backdrop: rgba(6, 10, 18, .6);     /* Modal-Abdunklung */
+  --body-glow: #18223a;                /* radialer Schimmer im Seitenhintergrund */
+  --hairline: rgba(255, 255, 255, .02);/* extrem dezente Flaechenaufhellung */
+  --graph-sel-stroke: #ffffff;         /* Auswahlkontur im Kontrollfluss-Graph */
   --radius: 12px;
   --shadow: 0 8px 30px rgba(0, 0, 0, .35);
+}
+
+/* Helle Variante: ueberschreibt nur die Farb-Variablen (nicht das Layout). */
+:root[data-theme="light"] {
+  --bg: #f4f6fb;
+  --bg-elev: #ffffff;
+  --bg-elev2: #eceff6;
+  --line: #d5dbe7;
+  --txt: #1a2233;
+  --txt-dim: #5b6678;
+  --muted: #5b6678;
+  --accent: #2f6bff;
+  --accent-soft: #dbe7ff;
+  --accent-txt: #1a4bc4;
+  --on-accent: #ffffff;
+  --green: #1f9d57;
+  --green-soft: #d6f2e2;
+  --amber: #b5760c;
+  --amber-soft: #fbeccb;
+  --red: #d63a4a;
+  --red-soft: #fbe0e3;
+  --gray: #6b7794;
+  --gray-soft: #e6e9f0;
+  --purple: #7c4dff;
+  --purple-soft: #e7dfff;
+  --purple-txt: #5a34c0;
+  --topbar-bg: rgba(255, 255, 255, .82);
+  --backdrop: rgba(30, 40, 60, .35);
+  --body-glow: #dfe8ff;
+  --hairline: rgba(0, 0, 0, .025);
+  --graph-sel-stroke: #1a2233;
+  --shadow: 0 8px 30px rgba(30, 45, 80, .12);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body {
   font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
-  background: radial-gradient(1200px 600px at 80% -10%, #18223a 0%, transparent 60%), var(--bg);
+  background: radial-gradient(1200px 600px at 80% -10%, var(--body-glow) 0%, transparent 60%), var(--bg);
   color: var(--txt);
   -webkit-font-smoothing: antialiased;
 }
@@ -40,8 +96,16 @@ body {
   background: linear-gradient(135deg, var(--accent), #8a5bff);
   display: grid; place-items: center; font-weight: 800; color: #fff; font-size: 12px;
 }
+.brand-text { flex: 1; min-width: 0; }
 .brand b { font-size: 15px; }
 .brand small { display: block; color: var(--txt-dim); font-weight: 500; font-size: 11px; }
+/* Umschalt-Knopf fuer den schmalen Menue-Modus (oben in der Sidebar). */
+.side-collapse {
+  border: 1px solid var(--line); background: var(--bg-elev2); color: var(--txt-dim);
+  width: 26px; height: 26px; border-radius: 7px; cursor: pointer; font-size: 14px;
+  line-height: 1; display: grid; place-items: center; flex: none; transition: .15s;
+}
+.side-collapse:hover { border-color: var(--accent); color: var(--txt); }
 .nav { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .nav button {
   text-align: left; border: 0; background: transparent; color: var(--txt-dim);
@@ -49,8 +113,20 @@ body {
   display: flex; align-items: center; gap: 10px; transition: .15s;
 }
 .nav button:hover { background: var(--bg-elev2); color: var(--txt); }
-.nav button.active { background: var(--accent-soft); color: #fff; }
+.nav button.active { background: var(--accent-soft); color: var(--txt); }
 .nav .ico { width: 18px; text-align: center; opacity: .9; }
+
+/* ---- Eingeklappter (schmaler) Menue-Modus ----
+   app.js setzt `data-sidebar="collapsed"` aufs <html>. Die Sidebar-Spalte wird
+   schmal, Beschriftungen/Fusszeile werden ausgeblendet; nur Icons bleiben. Der
+   restliche Seiteninhalt gewinnt dadurch Platz. */
+:root[data-sidebar="collapsed"] .app { grid-template-columns: 64px 1fr; }
+:root[data-sidebar="collapsed"] .sidebar { padding: 16px 8px; align-items: center; }
+:root[data-sidebar="collapsed"] .brand { flex-direction: column; gap: 10px; padding: 2px 0 14px; }
+:root[data-sidebar="collapsed"] .brand-text { display: none; }
+:root[data-sidebar="collapsed"] .nav button { justify-content: center; padding: 10px 0; gap: 0; }
+:root[data-sidebar="collapsed"] .nav .lbl { display: none; }
+:root[data-sidebar="collapsed"] .side-foot { display: none; }
 .side-foot { margin-top: auto; color: var(--txt-dim); font-size: 11px; padding: 10px 8px; line-height: 1.5; display: flex; flex-direction: column; gap: 8px; }
 .api-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--txt-dim); }
 .api-field input {
@@ -59,17 +135,28 @@ body {
 }
 .muted { color: var(--txt-dim); }
 
+/* Farbschema-Umschalter (Dunkel/Hell) in der Sidebar-Fusszeile. Der aktive
+   Knopf wird per `.active` (von app.js gesetzt) hervorgehoben. */
+.theme-switch { display: flex; gap: 4px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
+.theme-btn {
+  flex: 1; text-align: center; border: 0; background: transparent; color: var(--txt-dim);
+  padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600;
+  transition: .15s;
+}
+.theme-btn:hover { color: var(--txt); }
+.theme-btn.active { background: var(--accent-soft); color: var(--txt); }
+
 .pill { display: inline-block; padding: 2px 8px; border-radius: 20px; font-weight: 600; font-size: 11px; }
 .pill-green { background: var(--green-soft); color: var(--green); }
 .pill-amber { background: var(--amber-soft); color: var(--amber); }
 .pill-red { background: var(--red-soft); color: var(--red); }
 .pill-gray { background: var(--gray-soft); color: var(--gray); }
-.pill-blue { background: var(--accent-soft); color: #9ec0ff; }
+.pill-blue { background: var(--accent-soft); color: var(--accent-txt); }
 
 .main { overflow: auto; display: flex; flex-direction: column; }
 .topbar {
   position: sticky; top: 0; z-index: 5; backdrop-filter: blur(8px);
-  background: rgba(15, 20, 32, .8); border-bottom: 1px solid var(--line);
+  background: var(--topbar-bg); border-bottom: 1px solid var(--line);
   padding: 14px 26px; display: flex; align-items: center; gap: 14px;
 }
 .topbar h1 { font-size: 18px; margin: 0; font-weight: 650; }
@@ -90,7 +177,7 @@ body {
   display: inline-flex; align-items: center; gap: 8px; transition: .15s;
 }
 .btn:hover { border-color: var(--accent); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn.green { background: var(--green); border-color: var(--green); color: #04210f; }
 .btn.danger { background: var(--red-soft); border-color: var(--red); color: var(--red); }
@@ -160,7 +247,7 @@ th { color: var(--txt-dim); font-weight: 600; font-size: 12px; text-transform: u
 tr:last-child td { border-bottom: 0; }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--bg-elev2); }
-tr.clickable.selected td { background: var(--accent-soft); color: #fff; }
+tr.clickable.selected td { background: var(--accent-soft); color: var(--txt); }
 tr.clickable.selected:hover td { background: var(--accent-soft); }
 
 /* ---- Zeilen-Hervorhebung (Sprung aus dem Kontrollfluss) ---- */
@@ -171,6 +258,14 @@ tr.hl-row td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   margin-bottom: 12px; padding: 8px 12px; border: 1px solid var(--accent);
   border-radius: 10px; background: var(--accent-soft); font-size: 13px;
 }
+/* Rücksprung-Leiste: 1-Klick zurück in den Kontrollfluss, von wo aus in die
+   Daten-/Ressourcensicht gewechselt wurde. Bewusst abgesetzt (bernsteinfarben)
+   von der accent-farbenen Hervorhebungs-Leiste. */
+.return-bar { margin-bottom: 12px; }
+.return-bar .btn {
+  border-color: var(--amber); color: var(--amber); background: var(--amber-soft);
+}
+
 .empty { color: var(--txt-dim); padding: 24px; text-align: center; font-size: 13px; }
 
 /* ---- Graph ---- */
@@ -182,6 +277,25 @@ tr.hl-row td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   cursor: grab; touch-action: none;
 }
 .canvas-wrap.grabbing { cursor: grabbing; }
+/* Waehrend des Kontrollfluss-Pannings seitenweit keine Textselektion und der
+   Greif-Cursor -- auch wenn der Zeiger das Canvas-Fenster verlaesst. app.js
+   setzt/entfernt die Klasse `graph-dragging` am <html> bei Drag-Beginn/-Ende. */
+:root.graph-dragging, :root.graph-dragging * {
+  user-select: none !important; -webkit-user-select: none !important;
+  cursor: grabbing !important;
+}
+
+/* ---- Kontrollfluss-Vollbild (Diskussionsmodus) ----
+   Der Maximieren-Knopf im Panel-Kopf setzt die Klasse `graph-max`; das Panel
+   wird dann zum bildschirmfuellenden Overlay, die Canvas fuellt den Rest.
+   Verlassen per Knopf oder Escape (siehe app.js). */
+.graph-panel.graph-max {
+  position: fixed; inset: 0; z-index: 60; margin: 0; border-radius: 0;
+  display: flex; flex-direction: column; box-shadow: var(--shadow);
+}
+.graph-panel.graph-max .graph-body { flex: 1; min-height: 0; padding: 12px 14px; }
+.graph-panel.graph-max .canvas-wrap { height: 100%; border-radius: 8px; }
+.graph-max-btn { margin: -2px 0; }
 .canvas-hint {
   position: absolute; right: 10px; bottom: 8px; z-index: 2;
   font-size: 11px; color: var(--txt-dim);
@@ -202,25 +316,25 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   fill: var(--accent); cursor: pointer; opacity: .85;
 }
 .gplus:hover { opacity: 1; }
-.gplus-txt { fill: #fff; font-size: 14px; font-weight: 700; pointer-events: none; }
+.gplus-txt { fill: var(--on-accent); font-size: 14px; font-weight: 700; pointer-events: none; }
 .ndefault rect { fill: var(--bg-elev2); stroke: var(--line); }
 .nstart rect, .nend rect { fill: var(--accent-soft); stroke: var(--accent); }
 .ngateway rect { fill: var(--amber-soft); stroke: var(--amber); }
-.nsub rect { fill: #2a2350; stroke: #8a5bff; }
+.nsub rect { fill: var(--purple-soft); stroke: var(--purple); }
 .s-COMPLETED rect { fill: var(--green-soft); stroke: var(--green); }
 .s-RUNNING rect { fill: var(--accent-soft); stroke: var(--accent); }
 .s-ACTIVATED rect { fill: var(--accent-soft); stroke: var(--accent); }
 .s-SKIPPED rect { fill: var(--gray-soft); stroke: var(--gray); opacity: .6; }
-.gnode.selected rect { stroke: #fff; stroke-width: 2.5px; }
+.gnode.selected rect { stroke: var(--graph-sel-stroke); stroke-width: 2.5px; }
 
 /* ---- Kontrollfluss-Chips: Daten-/Bearbeiter-Bindung am Knoten ---- */
 .gchip-bg { stroke-width: 1px; }
 .gchip-txt { font-size: 9px; font-weight: 600; pointer-events: none; }
 .gchip-link { cursor: pointer; }
 .gchip-data .gchip-bg { fill: var(--accent-soft); stroke: var(--accent); }
-.gchip-data .gchip-txt { fill: #cfe0ff; }
-.gchip-staff .gchip-bg { fill: #2a2350; stroke: #8a5bff; }
-.gchip-staff .gchip-txt { fill: #d8c9ff; }
+.gchip-data .gchip-txt { fill: var(--accent-txt); }
+.gchip-staff .gchip-bg { fill: var(--purple-soft); stroke: var(--purple); }
+.gchip-staff .gchip-txt { fill: var(--purple-txt); }
 .gchip-link:hover .gchip-bg { filter: brightness(1.4); }
 
 /* ---- Findings ---- */
@@ -228,8 +342,19 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .finding:last-child { border-bottom: 0; }
 .finding .rule { font-weight: 700; color: var(--red); min-width: 34px; }
 .ok-banner { color: var(--green); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.warn-banner { color: var(--amber); background: var(--amber-soft); font-size: 13px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; }
 
 .tag { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: var(--gray-soft); color: var(--txt-dim); }
+
+/* Zeitbasierte Arbeitslisten-Priorisierung: Kritikalitäts-Badges (Ampel). */
+.due-cell { display: inline-flex; align-items: center; gap: 8px; }
+.due-label { font-size: 12px; color: var(--txt-dim); white-space: nowrap; }
+.badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.badge.crit-ontrack { background: var(--green-soft); color: var(--green); }
+.badge.crit-warning { background: var(--amber-soft); color: var(--amber); }
+.badge.crit-atrisk  { background: var(--amber-soft); color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+.badge.crit-overdue { background: var(--red-soft); color: var(--red); box-shadow: inset 0 0 0 1px var(--red); }
+
 .worklist-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .worklist-item:last-child { border-bottom: 0; }
 .worklist-item .name { flex: 1; font-size: 13px; font-weight: 600; }
@@ -237,10 +362,10 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 /* ---- Org-Baum (Abteilungen) ---- */
 .tree { display: flex; flex-direction: column; gap: 4px; }
 .tree-children { margin-left: 18px; padding-left: 12px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
-.tree-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, .02); }
+.tree-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--hairline); }
 .tree-name { font-size: 13px; font-weight: 600; }
-.tree-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: rgba(86, 156, 255, .15); color: #9cc4ff; white-space: nowrap; }
-.tree-badge.muted-badge { background: rgba(255, 255, 255, .05); color: var(--muted); }
+.tree-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-txt); white-space: nowrap; }
+.tree-badge.muted-badge { background: var(--gray-soft); color: var(--muted); }
 .tree-row-hl { background: var(--accent-soft); border-color: var(--accent); }
 .tree-badge-link { cursor: pointer; }
 .tree-badge-link:hover { filter: brightness(1.3); }
@@ -273,7 +398,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .oc-node:hover { filter: brightness(1.18); border-color: var(--accent); }
 .oc-node.selected { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .oc-name { font-size: 13px; font-weight: 600; color: var(--txt); }
-.oc-mgr { font-size: 11px; color: #9cc4ff; }
+.oc-mgr { font-size: 11px; color: var(--accent); }
 .oc-mgr.oc-muted { color: var(--txt-dim); }
 .oc-count { font-size: 11px; color: var(--txt-dim); }
 
@@ -293,7 +418,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 
 /* ---- Modal ---- */
 .modal-backdrop {
-  position: fixed; inset: 0; background: rgba(6, 10, 18, .6); backdrop-filter: blur(3px);
+  position: fixed; inset: 0; background: var(--backdrop); backdrop-filter: blur(3px);
   display: grid; place-items: center; z-index: 50;
 }
 .modal {
@@ -306,7 +431,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .modal-f { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 10px; }
 .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
 .tabs button { background: transparent; border: 0; color: var(--txt-dim); padding: 8px 12px; cursor: pointer; font-size: 13px; font-weight: 600; border-bottom: 2px solid transparent; }
-.tabs button.active { color: #fff; border-bottom-color: var(--accent); }
+.tabs button.active { color: var(--txt); border-bottom-color: var(--accent); }
 .branch-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
 
 /* ---- Toast ---- */
@@ -360,8 +485,8 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   padding: 12px; font-size: 12px; line-height: 1.5; max-height: 50vh; overflow: auto;
   white-space: pre; margin: 0;
 }
-.ok-hint { color: #6ee7a8; }
-.bad-hint { color: #ff9c9c; }
+.ok-hint { color: var(--green); }
+.bad-hint { color: var(--red); }
 .check-inline { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--txt-dim); white-space: nowrap; }
 .check-row input[type="text"], .check-row select { flex: 1; min-width: 0; }
 
@@ -380,14 +505,19 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .id-row { display: grid; grid-template-columns: 100px 1fr; gap: 8px; font-size: 13px; }
 .id-row .id-label { color: var(--txt-dim); }
 .id-row .id-value { font-weight: 600; }
-.pill.pill-amber { background: rgba(217, 119, 6, .16); color: #b45309; }
+.pill.pill-amber { background: var(--amber-soft); color: var(--amber); }
 
 /* ---- Modellieren: Datenherkunft-Ueberlagerung (gestrichelt) ---- */
 .gprov {
   stroke: var(--amber); stroke-width: 1.6px; fill: none;
   stroke-dasharray: 5 4; opacity: .9; pointer-events: none;
 }
-.gprov-txt { font-size: 9px; fill: var(--amber); pointer-events: none; }
+/* Kontur-Halo in Hintergrundfarbe, damit die Beschriftung auch ueber
+   Kontrollflusskanten/Knoten und bei dicht gestaffelten Boegen lesbar bleibt. */
+.gprov-txt {
+  font-size: 9px; fill: var(--amber); pointer-events: none;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+}
 
 /* ---- Modellieren: Inspektor-Bindungen (Daten / BZR am Schritt) ---- */
 .insp-h { font-size: 12px; font-weight: 700; color: var(--txt-dim); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
@@ -395,7 +525,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .insp-bind { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .insp-bind-name { font-weight: 600; }
 .insp-bind-mode { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 6px; letter-spacing: .3px; }
-.insp-bind-mode.mode-READ { background: var(--accent-soft); color: #cfe0ff; }
+.insp-bind-mode.mode-READ { background: var(--accent-soft); color: var(--accent-txt); }
 .insp-bind-mode.mode-WRITE { background: var(--amber-soft); color: var(--amber); }
 .insp-bind-mode.mode-READ_WRITE { background: var(--green-soft); color: var(--green); }
 .insp-bind-del {
@@ -433,10 +563,46 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .pal-chip-act:hover { color: var(--txt); }
 /* "An Schritt binden" (⊕) */
 .pal-bind {
-  border: 1px solid var(--accent); background: var(--accent-soft); color: #cfe0ff;
+  border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent-txt);
   cursor: pointer; font-size: 14px; line-height: 1; border-radius: 8px;
   padding: 2px 7px; font-weight: 700;
 }
 .pal-bind:hover { filter: brightness(1.25); }
 .pal-bind.disabled { border-color: var(--line); background: transparent; color: var(--txt-dim); cursor: not-allowed; }
+
+/* Licensing (agent page): quota bar + staged renewal banner. Colours strictly
+   via CSS variables so the light theme keeps working (see CLAUDE.md). Hidden by
+   default -- these only render once the backend reports enforced licensing. */
+.lic-bar {
+  height: 10px; border-radius: 999px; background: var(--gray-soft);
+  overflow: hidden; border: 1px solid var(--line);
+}
+.lic-bar-fill {
+  height: 100%; background: var(--accent); border-radius: 999px;
+  transition: width .2s ease;
+}
+.lic-banner {
+  margin-top: 10px; padding: 8px 12px; border-radius: 10px;
+  border: 1px solid var(--amber); background: var(--amber-soft);
+  color: var(--amber); font-size: 13px;
+}
+.lic-banner.urgent { border-color: var(--red); background: var(--red-soft); color: var(--red); }
+
+/* Prozessvorlagen-Galerie (Template-Auswahl beim Anlegen eines Schemas).
+   Rein visuell -- alle Farben über die CSS-Variablen, damit die helle Variante
+   trägt. */
+.tpl-gallery {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px; max-height: 60vh; overflow-y: auto;
+}
+.tpl-card {
+  display: flex; flex-direction: column; gap: 6px; text-align: left;
+  padding: 12px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg-elev2); color: var(--txt);
+}
+.tpl-card:hover { border-color: var(--accent); }
+.tpl-card.selected { border-color: var(--accent); background: var(--accent-soft); }
+.tpl-card-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tpl-cat { font-size: 11px; font-weight: 600; color: var(--txt-dim); }
+.tpl-desc { font-size: 12px; color: var(--txt-dim); line-height: 1.35; }
 

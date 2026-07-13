@@ -53,6 +53,18 @@ follow each project's own published metadata at the time of writing.
 > PostgreSQL/DBAPI driver can be substituted via `DATABASE_URL`. Anyone shipping
 > the LGPL component remains able to replace it, as the LGPL requires.
 
+## Optional licensing verification (`core[license]`)
+
+| Package | License | Notes |
+| --- | --- | --- |
+| cryptography | Apache-2.0 OR BSD-3-Clause | Ed25519 signature **verification** for the licensing layer. Optional and dormant by default. See note below. |
+
+> **cryptography note.** Used **unmodified** and only to *verify* signed license
+> files (the private signing key never lives in this repository or any shipped
+> artefact). It is an **optional** extra: without it — and without a configured
+> licensor public key — the licensing layer is simply disabled, and the product
+> runs unrestricted. Its permissive license imposes no copyleft on ProcWorks.
+
 ## Development / build tools (not shipped at runtime)
 
 | Package | License |

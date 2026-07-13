@@ -2,9 +2,9 @@
 # Integrations-Leitfaden: ProcWorks mit fremden Tools verbinden
 
 > Praktischer Leitfaden für Entwickler:innen, die **fremde Systeme an ProcWorks
-> anbinden**. Er ergänzt das [Integrations-Konzept](https://procworks.de/docs/integrations-konzept.html)
-> (Architektur, Leitplanken, Regeln) um konkrete **Rezepte, Endpunkt-Referenzen und
-> Beispiel-Aufrufe**. Sicherheit/Identitäten: [Auth-Konzept](https://procworks.de/docs/auth-konzept.html).
+> anbinden**. Er liefert konkrete **Rezepte, Endpunkt-Referenzen und
+> Beispiel-Aufrufe**. Zu Sicherheit und Identitäten (Bearer-Token, Rollen) siehe
+> die Windows-Server-Setup-Anleitung und die `core/README.md`.
 >
 > Status: **Umgesetzt** (Roadmap-Phasen P0–P6). Alle hier beschriebenen Endpunkte
 > existieren und sind getestet. Die OpenAPI-Spezifikation der laufenden Instanz steht

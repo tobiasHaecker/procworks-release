@@ -97,6 +97,30 @@ def test_list_ids(store: SqlAlchemySchemaStore) -> None:
     assert set(store.list_ids()) == {"a", "b"}
 
 
+def test_template_store_roundtrip_and_delete(tmp_path: Path) -> None:
+    """The SQLAlchemy template store persists a user template and deletes it."""
+
+    from procworks import save_as_template
+    from procworks.db import SqlAlchemyTemplateStore
+
+    url = f"sqlite:///{tmp_path / 'templates.db'}"
+    tpl_store = SqlAlchemyTemplateStore(url, create_tables=True)
+
+    source = serial_insert(create_empty_schema("Quelle"), "Schritt", "start")
+    template = save_as_template(source, name="Vorlage", category="Test")
+
+    tpl_store.put(template)
+    assert tpl_store.list_ids() == [template.id]
+    loaded = tpl_store.get(template.id)
+    assert loaded is not None and loaded.name == "Vorlage"
+    # The embedded blueprint survives the JSON round-trip intact.
+    assert len(loaded.blueprint.nodes) == len(source.nodes)
+
+    assert tpl_store.delete(template.id) is True
+    assert tpl_store.get(template.id) is None
+    assert tpl_store.delete(template.id) is False  # idempotent
+
+
 def test_create_store_defaults_to_in_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert isinstance(create_store(), InMemorySchemaStore)

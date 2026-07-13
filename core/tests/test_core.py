@@ -20,6 +20,7 @@ from procworks import (
     delete_node,
     parallel_insert,
     release,
+    remove_empty_branch,
     rename_node,
     serial_insert,
     validate,
@@ -283,11 +284,42 @@ def test_delete_branch_dissolves_and_gateway_keeping_other_branch() -> None:
     assert validate(schema) == []
 
 
-def test_delete_branch_dissolves_xor_gateway_keeping_other_branch() -> None:
+def test_delete_last_activity_leaves_empty_xor_branch() -> None:
+    """Deleting the sole activity of an XOR branch keeps it as an empty branch.
+
+    The gateway stays (so "work only in the other branch" is expressible): the
+    XOR split/join remain, the branch becomes a direct split -> join edge that
+    keeps its K7 caption, and the schema is still correct by construction.
+    """
+
     schema = create_empty_schema("XorZweig")
     schema = _xor_after_start(schema, "Ja", "Nein", upper=2)
+    split = next(n for n in schema.nodes.values() if n.type is NodeType.XOR_SPLIT)
+    join = next(n for n in schema.nodes.values() if n.type is NodeType.XOR_JOIN)
     yes = next(n for n in schema.nodes.values() if n.label == "Ja")
     schema = delete_node(schema, yes.id)
+
+    # The gateway survives and the deleted branch is now a direct split -> join.
+    assert NodeType.XOR_SPLIT in {n.type for n in schema.nodes.values()}
+    labels = {n.label for n in schema.nodes.values() if n.type is NodeType.ACTIVITY}
+    assert labels == {"Erfassen", "Nein"}
+    empty_edge = next(
+        e for e in schema.edges if e.source == split.id and e.target == join.id
+    )
+    assert empty_edge.condition == "x < 2"  # the emptied branch keeps its cell
+    assert validate(schema) == []
+
+
+def test_remove_empty_branch_dissolves_xor_gateway_keeping_other_branch() -> None:
+    """Manually removing the empty branch collapses the two-branch XOR."""
+
+    schema = create_empty_schema("XorZweig")
+    schema = _xor_after_start(schema, "Ja", "Nein", upper=2)
+    split = next(n for n in schema.nodes.values() if n.type is NodeType.XOR_SPLIT)
+    yes = next(n for n in schema.nodes.values() if n.label == "Ja")
+    schema = delete_node(schema, yes.id)
+    schema = remove_empty_branch(schema, split.id)
+
     types = {n.type for n in schema.nodes.values()}
     assert NodeType.XOR_SPLIT not in types
     assert NodeType.XOR_JOIN not in types

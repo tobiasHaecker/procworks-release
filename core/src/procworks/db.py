@@ -18,6 +18,7 @@ a database-assigned monotonic ``seq`` and queryable columns for filtering.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -35,15 +36,19 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-from procworks.audit import AuditEvent, EventType
+from procworks.audit import AuditEvent, EventType, chain_hash
 from procworks.auth_password import User
+from procworks.licensing import AgentBinding, License, PendingClaim, TimeAnchor
 from procworks.model import (
+    AbsenceEntry,
     ExternalTask,
     Incident,
+    MailOutboxEntry,
     OrgModel,
     OutboxEntry,
     ProcessInstance,
     ProcessSchema,
+    ProcessTemplate,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -244,6 +249,10 @@ class AuditEventRow(Base):
     label: Mapped[str | None] = mapped_column(String, nullable=True)
     agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
     detail: Mapped[dict[str, str]] = mapped_column(JsonDocument, nullable=False)
+    #: Append-only hash chain (see procworks.audit.AuditEvent). Defaulted to ""
+    #: so rows written before the chain existed remain valid.
+    prev_hash: Mapped[str] = mapped_column(String, nullable=False, default="")
+    entry_hash: Mapped[str] = mapped_column(String, nullable=False, default="")
 
 
 def _event_from_row(row: AuditEventRow) -> AuditEvent:
@@ -258,6 +267,8 @@ def _event_from_row(row: AuditEventRow) -> AuditEvent:
         label=row.label,
         agent_id=row.agent_id,
         detail=dict(row.detail),
+        prev_hash=row.prev_hash or "",
+        entry_hash=row.entry_hash or "",
     )
 
 
@@ -288,8 +299,11 @@ class SqlAlchemyAuditLog:
         detail: dict[str, str] | None = None,
     ) -> AuditEvent:
         with Session(self._engine) as session:
+            timestamp = datetime.now(UTC)
+            detail = detail or {}
+            prev_hash = self._head_hash(session)
             row = AuditEventRow(
-                timestamp=datetime.now(UTC),
+                timestamp=timestamp,
                 event_type=event_type.value,
                 instance_id=instance_id,
                 schema_id=schema_id,
@@ -297,12 +311,34 @@ class SqlAlchemyAuditLog:
                 node_id=node_id,
                 label=label,
                 agent_id=agent_id,
-                detail=detail or {},
+                detail=detail,
+                prev_hash=prev_hash,
             )
             session.add(row)
+            session.flush()  # assign the autoincrement seq before hashing
+            row.entry_hash = chain_hash(
+                prev_hash,
+                seq=row.seq,
+                timestamp=timestamp,
+                event_type=event_type,
+                instance_id=instance_id,
+                schema_id=schema_id,
+                schema_version=schema_version,
+                node_id=node_id,
+                label=label,
+                agent_id=agent_id,
+                detail=detail,
+            )
             session.commit()
             session.refresh(row)
             return _event_from_row(row)
+
+    @staticmethod
+    def _head_hash(session: Session) -> str:
+        row = session.scalars(
+            select(AuditEventRow).order_by(AuditEventRow.seq.desc()).limit(1)
+        ).first()
+        return (row.entry_hash or "") if row is not None else ""
 
     def list_all(self) -> list[AuditEvent]:
         with Session(self._engine) as session:
@@ -328,6 +364,26 @@ class SqlAlchemyAuditLog:
         with Session(self._engine) as session:
             value = session.scalar(select(func.max(AuditEventRow.seq)))
             return int(value or 0)
+
+    def head_hash(self) -> str:
+        """Return the newest entry's chain hash ("" when the log is empty)."""
+
+        with Session(self._engine) as session:
+            return self._head_hash(session)
+
+    def max_event_time(self) -> float:
+        """Return the newest recorded timestamp as epoch seconds (0.0 if empty).
+
+        A monotone lower bound on real time for the licensing ratchet.
+        """
+
+        with Session(self._engine) as session:
+            value = session.scalar(select(func.max(AuditEventRow.timestamp)))
+            if value is None:
+                return 0.0
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=UTC)
+            return value.timestamp()
 
     def clear(self) -> None:
         with Session(self._engine) as session:
@@ -645,6 +701,385 @@ class SqlAlchemyWebhookStore:
             session.execute(delete(WebhookDeliveryRow))
             session.execute(delete(OutboxEntryRow))
             session.execute(delete(WebhookSubscriptionRow))
+            session.commit()
+
+
+class MailOutboxEntryRow(Base):
+    """One row per queued modelled e-mail notification (mail outbox, rule N)."""
+
+    __tablename__ = "mail_outbox"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    dedup_key: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    instance_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    next_attempt_at: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
+
+
+class SqlAlchemyMailOutboxStore:
+    """A durable mail outbox backed by a SQLAlchemy engine.
+
+    Mirrors the webhook outbox: each queued notification is a JSON document plus
+    a few queryable columns (``dedup_key`` for idempotency lookups, ``state`` and
+    ``next_attempt_at`` for the dispatcher). The dispatcher stays backend-agnostic.
+    """
+
+    def __init__(self, url: str, *, create_tables: bool = False) -> None:
+        self._engine = create_engine(url, future=True)
+        if create_tables:
+            Base.metadata.create_all(self._engine)
+
+    def put_entry(self, entry: MailOutboxEntry) -> MailOutboxEntry:
+        payload = entry.model_dump(mode="json")
+        with Session(self._engine) as session:
+            row = session.get(MailOutboxEntryRow, entry.id)
+            if row is None:
+                row = MailOutboxEntryRow(id=entry.id)
+                session.add(row)
+            row.dedup_key = entry.dedup_key
+            row.instance_id = entry.instance_id
+            row.state = entry.state.value
+            row.next_attempt_at = entry.next_attempt_at
+            row.document = payload
+            session.commit()
+        return entry
+
+    def get_entry(self, entry_id: str) -> MailOutboxEntry | None:
+        with Session(self._engine) as session:
+            row = session.get(MailOutboxEntryRow, entry_id)
+            if row is None:
+                return None
+            return MailOutboxEntry.model_validate(row.document)
+
+    def find_by_dedup_key(self, dedup_key: str) -> MailOutboxEntry | None:
+        with Session(self._engine) as session:
+            row = session.scalars(
+                select(MailOutboxEntryRow).where(
+                    MailOutboxEntryRow.dedup_key == dedup_key
+                )
+            ).first()
+            if row is None:
+                return None
+            return MailOutboxEntry.model_validate(row.document)
+
+    def list_entries(self) -> list[MailOutboxEntry]:
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(MailOutboxEntryRow).order_by(MailOutboxEntryRow.next_attempt_at)
+            )
+            return [MailOutboxEntry.model_validate(row.document) for row in rows]
+
+    def clear(self) -> None:
+        with Session(self._engine) as session:
+            session.execute(delete(MailOutboxEntryRow))
+            session.commit()
+
+
+class AbsenceEntryRow(Base):
+    """One row per recorded agent absence (deputy substitution window)."""
+
+    __tablename__ = "absence_entry"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
+
+
+class SqlAlchemyAbsenceStore:
+    """A durable absence store backed by a SQLAlchemy engine.
+
+    Each entry is a JSON document plus an ``agent_id`` column for lookups. Like
+    every other store the API stays backend-agnostic; the boundary lists the
+    (small) set of entries and resolves the currently-absent agents in Python.
+    """
+
+    def __init__(self, url: str, *, create_tables: bool = False) -> None:
+        self._engine = create_engine(url, future=True)
+        if create_tables:
+            Base.metadata.create_all(self._engine)
+
+    def put_entry(self, entry: AbsenceEntry) -> AbsenceEntry:
+        payload = entry.model_dump(mode="json")
+        with Session(self._engine) as session:
+            row = session.get(AbsenceEntryRow, entry.id)
+            if row is None:
+                row = AbsenceEntryRow(id=entry.id)
+                session.add(row)
+            row.agent_id = entry.agent_id
+            row.document = payload
+            session.commit()
+        return entry
+
+    def get_entry(self, entry_id: str) -> AbsenceEntry | None:
+        with Session(self._engine) as session:
+            row = session.get(AbsenceEntryRow, entry_id)
+            if row is None:
+                return None
+            return AbsenceEntry.model_validate(row.document)
+
+    def list_entries(self) -> list[AbsenceEntry]:
+        with Session(self._engine) as session:
+            rows = session.scalars(select(AbsenceEntryRow).order_by(AbsenceEntryRow.id))
+            return [AbsenceEntry.model_validate(row.document) for row in rows]
+
+    def delete_entry(self, entry_id: str) -> bool:
+        with Session(self._engine) as session:
+            row = session.get(AbsenceEntryRow, entry_id)
+            if row is None:
+                return False
+            session.delete(row)
+            session.commit()
+            return True
+
+    def clear(self) -> None:
+        with Session(self._engine) as session:
+            session.execute(delete(AbsenceEntryRow))
+            session.commit()
+
+
+class TemplateRow(Base):
+    """One row per user-created process template (keyed by template id)."""
+
+    __tablename__ = "process_template"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False, default="")
+    document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
+
+
+class SqlAlchemyTemplateStore:
+    """A durable user-template store backed by a SQLAlchemy engine.
+
+    Stores only user-created templates as JSON documents; built-in templates
+    are provided by :mod:`procworks.templates` and never persisted. Mirrors the
+    other stores' ``put``/``get``/``list_ids``/``delete``/``clear`` interface so
+    the API stays backend-agnostic.
+    """
+
+    def __init__(self, url: str, *, create_tables: bool = False) -> None:
+        self._engine = create_engine(url, future=True)
+        if create_tables:
+            Base.metadata.create_all(self._engine)
+
+    def put(self, template: ProcessTemplate) -> ProcessTemplate:
+        payload = template.model_dump(mode="json")
+        with Session(self._engine) as session:
+            row = session.get(TemplateRow, template.id)
+            if row is None:
+                row = TemplateRow(id=template.id)
+                session.add(row)
+            row.name = template.name
+            row.category = template.category
+            row.document = payload
+            session.commit()
+        return template
+
+    def get(self, template_id: str) -> ProcessTemplate | None:
+        with Session(self._engine) as session:
+            row = session.get(TemplateRow, template_id)
+            if row is None:
+                return None
+            return ProcessTemplate.model_validate(row.document)
+
+    def list_ids(self) -> list[str]:
+        with Session(self._engine) as session:
+            return list(session.scalars(select(TemplateRow.id).order_by(TemplateRow.id)))
+
+    def delete(self, template_id: str) -> bool:
+        with Session(self._engine) as session:
+            row = session.get(TemplateRow, template_id)
+            if row is None:
+                return False
+            session.delete(row)
+            session.commit()
+            return True
+
+    def clear(self) -> None:
+        with Session(self._engine) as session:
+            session.execute(delete(TemplateRow))
+            session.commit()
+
+
+class LicenseRow(Base):
+    """One row per license contingent (free quota / bought pack)."""
+
+    __tablename__ = "license"
+
+    license_id: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    slots: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    install_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
+
+
+class AgentBindingRow(Base):
+    """One row per agent->license assignment (explicit binding, §5A.2)."""
+
+    __tablename__ = "agent_license_binding"
+
+    agent_id: Mapped[str] = mapped_column(String, primary_key=True)
+    license_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+
+
+class LicenseMetaRow(Base):
+    """Key/value slot for the install id and the persisted time anchor."""
+
+    __tablename__ = "license_meta"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
+
+
+class SqlAlchemyLicenseStore:
+    """A durable license store backed by a SQLAlchemy engine.
+
+    Mirrors the other stores: each license is a JSON document plus a few
+    queryable columns; bindings and the small meta records (install id, time
+    anchor) are their own tables. The manager stays backend-agnostic.
+    """
+
+    _INSTALL_KEY = "install_id"
+    _ANCHOR_KEY = "time_anchor"
+    #: Open auto-pull claims share the generic meta table under this key prefix
+    #: (they are ephemeral, best-effort state that needs no dedicated schema).
+    _CLAIM_PREFIX = "claim:"
+
+    def __init__(self, url: str, *, create_tables: bool = False) -> None:
+        self._engine = create_engine(url, future=True)
+        if create_tables:
+            Base.metadata.create_all(self._engine)
+
+    def list_licenses(self) -> list[License]:
+        with Session(self._engine) as session:
+            rows = session.scalars(select(LicenseRow))
+            return [License.model_validate(row.document) for row in rows]
+
+    def put_license(self, lic: License) -> None:
+        payload = lic.model_dump(mode="json")
+        with Session(self._engine) as session:
+            row = session.get(LicenseRow, lic.license_id)
+            if row is None:
+                row = LicenseRow(license_id=lic.license_id)
+                session.add(row)
+            row.kind = lic.kind.value
+            row.slots = lic.slots
+            row.expires_at = lic.expires_at
+            row.install_id = lic.install_id
+            row.document = payload
+            session.commit()
+
+    def get_license(self, license_id: str) -> License | None:
+        with Session(self._engine) as session:
+            row = session.get(LicenseRow, license_id)
+            if row is None:
+                return None
+            return License.model_validate(row.document)
+
+    def remove_license(self, license_id: str) -> None:
+        with Session(self._engine) as session:
+            row = session.get(LicenseRow, license_id)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+
+    def list_bindings(self) -> list[AgentBinding]:
+        with Session(self._engine) as session:
+            rows = session.scalars(select(AgentBindingRow))
+            return [
+                AgentBinding(agent_id=row.agent_id, license_id=row.license_id)
+                for row in rows
+            ]
+
+    def bind(self, agent_id: str, license_id: str) -> None:
+        with Session(self._engine) as session:
+            row = session.get(AgentBindingRow, agent_id)
+            if row is None:
+                row = AgentBindingRow(agent_id=agent_id)
+                session.add(row)
+            row.license_id = license_id
+            session.commit()
+
+    def unbind(self, agent_id: str) -> None:
+        with Session(self._engine) as session:
+            row = session.get(AgentBindingRow, agent_id)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+
+    def get_time_anchor(self) -> TimeAnchor | None:
+        with Session(self._engine) as session:
+            row = session.get(LicenseMetaRow, self._ANCHOR_KEY)
+            if row is None:
+                return None
+            return TimeAnchor.model_validate(row.document)
+
+    def put_time_anchor(self, anchor: TimeAnchor) -> None:
+        payload = anchor.model_dump(mode="json")
+        with Session(self._engine) as session:
+            row = session.get(LicenseMetaRow, self._ANCHOR_KEY)
+            if row is None:
+                row = LicenseMetaRow(key=self._ANCHOR_KEY, document=payload)
+                session.add(row)
+            else:
+                row.document = payload
+            session.commit()
+
+    def list_claims(self) -> list[PendingClaim]:
+        with Session(self._engine) as session:
+            rows = session.scalars(
+                select(LicenseMetaRow).where(
+                    LicenseMetaRow.key.like(f"{self._CLAIM_PREFIX}%")
+                )
+            )
+            return [PendingClaim.model_validate(row.document) for row in rows]
+
+    def put_claim(self, claim: PendingClaim) -> None:
+        key = self._CLAIM_PREFIX + claim.claim_token
+        payload = claim.model_dump(mode="json")
+        with Session(self._engine) as session:
+            row = session.get(LicenseMetaRow, key)
+            if row is None:
+                row = LicenseMetaRow(key=key, document=payload)
+                session.add(row)
+            else:
+                row.document = payload
+            session.commit()
+
+    def remove_claim(self, claim_token: str) -> None:
+        with Session(self._engine) as session:
+            row = session.get(LicenseMetaRow, self._CLAIM_PREFIX + claim_token)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+
+    def install_id(self) -> str:
+        with Session(self._engine) as session:
+            row = session.get(LicenseMetaRow, self._INSTALL_KEY)
+            if row is not None:
+                return str(row.document["value"])
+            value = uuid.uuid4().hex
+            session.add(
+                LicenseMetaRow(key=self._INSTALL_KEY, document={"value": value})
+            )
+            session.commit()
+            return value
+
+    def clear(self) -> None:
+        with Session(self._engine) as session:
+            session.execute(delete(LicenseRow))
+            session.execute(delete(AgentBindingRow))
+            # The install id survives a data reset (it identifies the install,
+            # and bought packs are bound to it); the anchor and any open
+            # auto-pull claims are dropped.
+            session.execute(
+                delete(LicenseMetaRow).where(
+                    (LicenseMetaRow.key == self._ANCHOR_KEY)
+                    | (LicenseMetaRow.key.like(f"{self._CLAIM_PREFIX}%"))
+                )
+            )
             session.commit()
 
 

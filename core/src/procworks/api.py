@@ -14,17 +14,32 @@ Interactive docs at /docs (OpenAPI is generated automatically).
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from procworks import __version__, adhoc, assignment, backups, demo, metrics, migration
+from procworks import (
+    __version__,
+    adhoc,
+    assignment,
+    backups,
+    demo,
+    mail_runtime,
+    metrics,
+    migration,
+    worklist_priority,
+)
 from procworks import bpmn as bpmn_io
 from procworks import execution as exe
 from procworks import operations as ops
 from procworks import org as org_ops
+from procworks import (
+    templates as builtin_templates_mod,
+)
 from procworks.assignment import OpenTask
 from procworks.audit import (
     AuditEvent,
@@ -61,8 +76,21 @@ from procworks.connections import build_connection_registry
 from procworks.dal import DataAccessError
 from procworks.execution import ExecutionError
 from procworks.integration_runtime import ExternalTaskError, ExternalTaskRuntime
+from procworks.licensing import (
+    LICENSE_PSEUDO_ID,
+    AgentLicenseView,
+    License,
+    LicenseError,
+    LicenseManager,
+    PendingClaim,
+    SlotSummary,
+    TimeAnchor,
+    create_license_store,
+)
 from procworks.metrics import ModelReport
 from procworks.model import (
+    PRIORITY_RANK,
+    AbsenceEntry,
     AccessMode,
     AggregateKind,
     AutomationKind,
@@ -78,13 +106,20 @@ from procworks.model import (
     Incident,
     InstanceState,
     LifecycleState,
+    MailBinding,
+    MailOutboxEntry,
+    MailOutboxState,
+    NodeState,
+    NodeType,
     OrderBy,
     OrgModel,
     ProcessInstance,
     ProcessSchema,
+    ProcessTemplate,
     QueryFilter,
     ServiceBinding,
     StaffRule,
+    TemplateOrigin,
     TemplateParameter,
     TimeConstraint,
     ValueClass,
@@ -100,17 +135,26 @@ from procworks.outbox import (
     build_push_endpoint_registry,
 )
 from procworks.store import (
+    create_absence_store,
     create_external_task_store,
     create_instance_store,
+    create_mail_outbox_store,
     create_org_store,
     create_store,
+    create_template_store,
     create_webhook_store,
     dehydrate_org,
     hydrate_org,
     make_org_resolver,
     make_resolver,
 )
-from procworks.validator import CorrectnessError, ValidationFinding, validate
+from procworks.validator import (
+    CorrectnessError,
+    ValidationFinding,
+    _possible_agents,
+    validate,
+)
+from procworks.worklist_priority import TimeContext
 
 app = FastAPI(
     title="Process-Core API",
@@ -144,10 +188,129 @@ _external_tasks = create_external_task_store()
 _connections = build_connection_registry()
 _outbox = OutboxDispatcher(create_webhook_store())
 _push_endpoints = build_push_endpoint_registry()
+#: Process-wide mail sender for modelled e-mail notifications (rule group N).
+#: An SMTP sender when configured via the environment, else a no-op that keeps
+#: the feature fully modellable/validated without a mail server.
+_mail_sender = mail_runtime.create_mail_sender()
+#: Durable, retrying transactional outbox for those notifications: a task-ready
+#: mail is queued (surviving a crash) and delivered with a back-off/dead-letter.
+#: The store is kept alongside so the admin view can read it and ``/admin/reset``
+#: can wipe it.
+_mail_outbox_store = create_mail_outbox_store()
+_mail_outbox = mail_runtime.MailOutboxDispatcher(_mail_outbox_store)
+#: Operational store of recorded agent absences (deputy substitution windows).
+#: Read at the boundary to resolve who is absent *now*; that set gates deputy
+#: substitution in worklists, task completion and mail. Cleared by ``/admin/reset``.
+_absence_store = create_absence_store()
+#: Store of *user-created* process templates. Built-in templates are provided by
+#: :mod:`procworks.templates` (always available, never persisted); this store
+#: holds only the templates a modeller saves. Cleared by ``/admin/reset``.
+_template_store = create_template_store()
 _resolver = make_resolver(_store)
 _org_resolver = make_org_resolver(_org_store)
 _context = exe.ExecutionContext(_resolver, _instances)
 _audit = create_audit_log()
+
+#: Licensing / agent metering (dormant by default). Without a configured
+#: ``PROCWORKS_LICENSE_PUBKEY`` the manager is *not* enforced: every guard is a
+#: no-op and no bindings are written, so the whole layer is inert until a
+#: licensor key is set. Activation later is only setting that env var. The
+#: offline time ratchet is fed by the append-only, hash-chained audit log's
+#: newest timestamp; a trusted anchor is embedded back into that same log.
+_license_store = create_license_store()
+
+
+def _write_time_anchor(ts: float, trusted: bool) -> str:
+    """Embed a licensing time-ratchet checkpoint into the hash-chained log.
+
+    Returns the new head hash so the anchor can record the chain position that
+    witnessed it (tamper evidence, licensing concept §5A.4).
+    """
+
+    event = _audit.append(
+        EventType.TIME_ANCHOR,
+        LICENSE_PSEUDO_ID,
+        LICENSE_PSEUDO_ID,
+        detail={"hwm": f"{ts:.3f}", "trusted": "true" if trusted else "false"},
+    )
+    return event.entry_hash
+
+
+_license = LicenseManager(
+    _license_store,
+    pubkey_pem=os.environ.get("PROCWORKS_LICENSE_PUBKEY"),
+    grace_days=int(os.environ.get("PROCWORKS_LICENSE_GRACE_DAYS", "0")),
+    claim_ttl_seconds=int(os.environ.get("PROCWORKS_LICENSE_CLAIM_TTL", "1800")),
+    time_sources=[_audit.max_event_time],
+    anchor_writer=_write_time_anchor,
+)
+
+
+def _claim_fetcher(poll_url: str) -> str | None:
+    """Fetch an issued license token for one open auto-pull claim (best-effort).
+
+    Contacts the *separate* licensor claim endpoint (never a customer instance)
+    and returns the signed token once the paid order has been fulfilled, or
+    ``None`` while it is still pending or on any transient failure -- the poller
+    simply retries on the next pass. Deliberately tolerant: a malformed response
+    or network error must never raise into a process step (stability first). The
+    licensor answers ``200`` with JSON ``{"status": "issued", "token": "…"}``
+    once ready, and ``202`` (or ``{"status": "pending"}``) while still waiting.
+    """
+
+    from urllib import error as urllib_error
+    from urllib import request as urllib_request
+
+    req = urllib_request.Request(poll_url, method="GET")
+    try:
+        with urllib_request.urlopen(req, timeout=8) as resp:  # noqa: S310
+            if resp.status == 202:
+                return None
+            body = resp.read()
+    except urllib_error.HTTPError:
+        return None  # 4xx/5xx from the licensor -> treat as "not yet"
+    except Exception:  # noqa: BLE001 - network/DNS/timeout -> retry next pass
+        return None
+    try:
+        import json as _json
+
+        data = _json.loads(body.decode())
+    except Exception:  # noqa: BLE001 - non-JSON body -> nothing to activate
+        return None
+    if isinstance(data, dict) and data.get("status") == "issued":
+        token = data.get("token")
+        return token if isinstance(token, str) and token else None
+    return None
+
+
+def _all_agent_ids() -> set[str]:
+    """The universe of agent ids across all shared org models (metering base)."""
+
+    ids: set[str] = set()
+    for org_id in _org_store.list_ids():
+        org = _org_store.get(org_id)
+        if org is not None:
+            ids.update(org.agents)
+    return ids
+
+
+def _required_agent_ids(schema: ProcessSchema) -> set[str]:
+    """Design-time over-approximation of agents a schema's staff rules may need.
+
+    Reuses the validator's bounded ``_possible_agents`` (the same over-approx as
+    the N3 mail check): an unbounded rule (a runtime-resolved performer) yields
+    no concrete ids and is ignored -- the guard only pins agents it can name.
+    """
+
+    org = schema.org_model
+    if org is None:
+        return set()
+    required: set[str] = set()
+    for rule in schema.staff_rules.values():
+        bound = _possible_agents(org, rule)
+        if bound:
+            required.update(bound)
+    return required
 
 # Auth is a coarse boundary layer (Auth concept, Variant C). The backend is
 # swapped via ``PROCWORKS_AUTH``; the default open backend grants every role and
@@ -426,6 +589,35 @@ class CreateSchemaRequest(BaseModel):
     name: str = Field(..., examples=["Urlaubsantrag"])
 
 
+class SaveTemplateRequest(BaseModel):
+    """Capture an existing schema as a reusable template."""
+
+    schema_id: str = Field(..., examples=["urlaubsantrag"])
+    name: str = Field(..., examples=["Urlaubsantrag (Standard)"])
+    description: str = Field(default="", examples=["Antrag stellen, prüfen, entscheiden"])
+    category: str = Field(default="", examples=["Personal"])
+
+
+class InstantiateTemplateRequest(BaseModel):
+    """Create a fresh draft schema from a template (optional new name)."""
+
+    name: str | None = Field(default=None, examples=["Urlaubsantrag 2026"])
+
+
+class TemplateSummary(BaseModel):
+    """Lightweight catalogue entry for the template gallery (no blueprint).
+
+    Listing returns summaries so the (potentially large) embedded blueprint is
+    only transferred when a single template is fetched or instantiated.
+    """
+
+    id: str
+    name: str
+    description: str
+    category: str
+    origin: TemplateOrigin
+
+
 class SerialInsertRequest(BaseModel):
     label: str = Field(..., examples=["Antrag prüfen"])
     after_node_id: str = Field(..., examples=["start"])
@@ -559,12 +751,14 @@ class AddAgentRequest(BaseModel):
     org_unit_id: str | None = None
     agent_id: str | None = None
     deputy_id: str | None = Field(default=None, examples=["a2"])
+    email: str | None = Field(default=None, examples=["erika@firma.de"])
 
 
 class UpdateAgentRequest(BaseModel):
     name: str | None = Field(default=None, examples=["Erika Mustermann"])
     role_ids: list[str] | None = Field(default=None, examples=[["sb"]])
     org_unit_id: str | None = Field(default=None, examples=["einkauf"])
+    email: str | None = Field(default=None, examples=["erika@firma.de"])
 
 
 class SetManagerRequest(BaseModel):
@@ -577,6 +771,16 @@ class SetParentRequest(BaseModel):
 
 class SetDeputyRequest(BaseModel):
     deputy_id: str | None = Field(default=None, examples=["a2"])
+
+
+class SetMailboxRequest(BaseModel):
+    mailbox: str | None = Field(default=None, examples=["einkauf@firma.de"])
+
+
+class SetMailBindingRequest(BaseModel):
+    node_id: str = Field(..., examples=["act_1"])
+    #: ``None`` clears the notification of the node; a value sets/replaces it.
+    binding: MailBinding | None = Field(default=None)
 
 
 class CreateOrgModelRequest(BaseModel):
@@ -772,6 +976,36 @@ def _persist_schema(schema: ProcessSchema) -> ProcessSchema:
     return schema
 
 
+def _all_templates() -> dict[str, ProcessTemplate]:
+    """Merge the built-in library with the stored user templates, keyed by id.
+
+    Built-in templates (code) are listed first; a user template can never
+    shadow a built-in because their id namespaces differ (``tpl-*`` vs. minted
+    ``tpl_*``), but if one ever did the stored user template wins on lookup.
+    """
+
+    merged: dict[str, ProcessTemplate] = {
+        t.id: t for t in builtin_templates_mod.builtin_templates()
+    }
+    for tid in _template_store.list_ids():
+        template = _template_store.get(tid)
+        if template is not None:
+            merged[tid] = template
+    return merged
+
+
+def _get_template_or_404(template_id: str) -> ProcessTemplate:
+    """Resolve a template by id (built-in or user), or raise HTTP 404."""
+
+    user = _template_store.get(template_id)
+    if user is not None:
+        return user
+    for template in builtin_templates_mod.builtin_templates():
+        if template.id == template_id:
+            return template
+    raise HTTPException(status_code=404, detail=f"template '{template_id}' not found")
+
+
 def _commit_or_422(result_fn: object) -> ProcessSchema:
     """Execute an operation callable; map CorrectnessError to HTTP 422."""
 
@@ -914,6 +1148,174 @@ def _drive_pushes() -> None:
         pass
 
 
+def _mail_label(entry: MailOutboxEntry) -> str | None:
+    """Best-effort human label of a queued notification's node (for the audit).
+
+    Resolves the node label from the entry's base schema if it is still present;
+    a missing/renamed schema degrades to ``None`` rather than raising.
+    """
+
+    schema = _store.get(entry.schema_id)
+    return _label_of(schema, entry.node_id) if schema is not None else None
+
+
+def _dispatch_mail_outbox() -> None:
+    """Drive the durable mail outbox once and audit the terminal outcomes (N).
+
+    Attempts every due queued notification through the process-wide sender (read
+    dynamically so an operator/test can swap it). A successful send records a
+    ``mail.sent`` audit event; an exhausted retry budget records ``mail.failed``.
+    Only **metadata** is logged (recipient count, attempts, error), never the
+    address list or the body (DSGVO data minimisation, concept §8). Transient
+    failures stay silent -- they will be retried on a later drive. Never raises.
+    """
+
+    for result in _mail_outbox.dispatch_pending(_mail_sender):
+        entry = result.entry
+        instance = _instances.get(entry.instance_id)
+        version = instance.schema_version if instance is not None else 1
+        if result.delivered:
+            _audit.append(
+                EventType.MAIL_SENT,
+                entry.instance_id,
+                entry.schema_id,
+                schema_version=version,
+                node_id=entry.node_id,
+                label=_mail_label(entry),
+                detail={"recipients": str(len(entry.recipients))},
+            )
+        elif result.dead:
+            _audit.append(
+                EventType.MAIL_FAILED,
+                entry.instance_id,
+                entry.schema_id,
+                schema_version=version,
+                node_id=entry.node_id,
+                label=_mail_label(entry),
+                detail={
+                    "recipients": str(len(entry.recipients)),
+                    "attempts": str(entry.attempts),
+                    "error": (entry.last_error or "")[:200],
+                },
+            )
+
+
+def _notify_ready(
+    schema: ProcessSchema,
+    before_states: dict[str, NodeState] | None,
+    after: ProcessInstance,
+) -> None:
+    """Durably queue + deliver modelled e-mail notifications for ready tasks (N).
+
+    Boundary side effect, called after an engine advance. ``before_states`` is
+    the node marking *before* the advance (``None`` for a freshly instantiated
+    instance). Each task that just became ready and carries a mail binding is
+    enqueued idempotently into the durable outbox (surviving a crash), then the
+    outbox is driven synchronously so a healthy mail server is notified promptly.
+    Test instances never notify (mirrors the audit/webhook suppression); enqueue
+    reads the activation stamp, so ``_stamp_activations`` must run first
+    (see :func:`_after_advance`). Delivery errors are swallowed by the dispatcher,
+    so this can never break the triggering request.
+    """
+
+    if after.is_test:
+        return
+    mail_runtime.enqueue_ready_tasks(
+        schema, before_states, after, _mail_outbox, _current_absent_agents()
+    )
+    _dispatch_mail_outbox()
+
+
+def _after_advance(
+    schema: ProcessSchema,
+    before_states: dict[str, NodeState] | None,
+    after: ProcessInstance,
+) -> None:
+    """Run all boundary side effects of one engine advance, in the right order.
+
+    Stamps the worklist activation clock **before** the mail notification (the
+    durable outbox derives its per-activation idempotency key from that stamp),
+    drives the ``HTTP_PUSH`` sink, then persists the (stamp-mutated) instance.
+    Shared by every runtime-advance path -- the human mainline (start/complete),
+    the external-task completion, ad-hoc changes and migration -- so a task that
+    becomes ready is notified no matter which path activated it (concept §5, §10).
+    """
+
+    _stamp_activations(schema, before_states, after)
+    _drive_pushes()
+    _notify_ready(schema, before_states, after)
+    _instances.put(after)
+
+
+def _stamp_activations(
+    schema: ProcessSchema,
+    before_states: dict[str, NodeState] | None,
+    after: ProcessInstance,
+) -> None:
+    """Stamp the runtime clock of the time-based worklist prioritisation.
+
+    Records, per human-task ACTIVITY that *just* became ready (ACTIVATED in
+    ``after`` but not before), the current wall-clock into
+    ``after.node_activated_at`` -- the origin from which an open task's reaction
+    time is measured (Zeitbasierte-Priorisierung-Konzept, Section 4). On a fresh
+    instance (``before_states is None``) the instance ``started_at`` is set too
+    (origin of the process-deadline slack).
+
+    This lives at the API boundary and mirrors ``mail_runtime``'s ready-node diff
+    exactly, so the execution engine and the validator stay untouched (leitplanke
+    L2). A node re-activated by a loop overwrites its stamp, so its clock
+    restarts -- matching the loop-aware mail notification. The mutation is
+    persisted by the caller. Test instances are stamped as well (harmless: they
+    are not shown in operational worklists), keeping the helper branch-free.
+    """
+
+    now = datetime.now(UTC)
+    if before_states is None and after.started_at is None:
+        after.started_at = now
+    for node_id, state in after.node_states.items():
+        if state is not NodeState.ACTIVATED:
+            continue
+        if before_states is not None and before_states.get(node_id) is NodeState.ACTIVATED:
+            continue
+        node = schema.nodes.get(node_id)
+        if node is None or node.type is not NodeType.ACTIVITY:
+            continue
+        if node_id not in schema.staff_rules:
+            continue
+        after.node_activated_at[node_id] = now
+
+
+def _time_context(instance: ProcessInstance, schema: ProcessSchema) -> TimeContext:
+    """Build the read-time clock inputs for prioritising an instance's worklist.
+
+    Reads the current wall-clock, the per-node activation stamps and the process
+    start/deadline; the derived prioritisation logic lives in
+    ``worklist_priority``. Kept trivial and side-effect-free.
+    """
+
+    return TimeContext(
+        now=datetime.now(UTC),
+        activated_at=dict(instance.node_activated_at),
+        started_at=instance.started_at,
+        deadline_seconds=schema.deadline_seconds,
+    )
+
+
+def _current_absent_agents() -> frozenset[str]:
+    """Resolve which agents are absent right now (boundary read of the store).
+
+    Reads the absence store against the current wall-clock and returns the set of
+    absent agent ids. Handed to the runtime eligibility resolution
+    (:func:`procworks.assignment.eligible_agents`) so that, during an agent's
+    absence window, their deputy receives the tasks *in parallel*. Because
+    absence only *adds* the deputy and never removes the absent agent, an absence
+    without a registered deputy can never leave a task unassigned (safety
+    invariant) -- the task simply stays with the absent agent.
+    """
+
+    return assignment.absent_agent_ids(_absence_store.list_entries(), datetime.now(UTC))
+
+
 def _external_runtime() -> ExternalTaskRuntime:
     """Build the external-task boundary driver over the module singletons.
 
@@ -929,6 +1331,7 @@ def _external_runtime() -> ExternalTaskRuntime:
         dal=_connections.data_access_layer(),
         on_event=_emit_event,
         on_push=_push_external,
+        on_advance=_after_advance,
     )
 
 
@@ -1128,6 +1531,13 @@ def post_admin_reset(
     _instances.clear()
     _org_store.clear()
     _audit.clear()
+    _mail_outbox_store.clear()
+    _absence_store.clear()
+    # Drop user-created templates. Built-in templates are code, so they survive.
+    _template_store.clear()
+    # Drop licenses/bindings/anchor. The install id deliberately survives (it
+    # identifies the installation, and bought packs are bound to it).
+    _license_store.clear()
 
     keep = {DEFAULT_ADMIN_LOGIN}
     if principal.subject:
@@ -1142,6 +1552,7 @@ def post_admin_reset(
             org_store=_org_store,
             audit_log=_audit,
             password_backend=backend,
+            absence_store=_absence_store,
         )
 
     return ResetResponse(
@@ -1197,6 +1608,114 @@ def post_admin_backup_run_now() -> RunNowResponse:
     return RunNowResponse(requested=True)
 
 
+class MailOutboxEntryView(BaseModel):
+    """Read-only, data-minimised projection of a queued notification (admin).
+
+    Deliberately omits the recipient address list and the rendered body (DSGVO
+    data minimisation, concept §8): the ops view needs the delivery *state*, not
+    the personal content. The recipient *count* and the modeller-authored subject
+    are kept because they identify the notification without leaking a distribution
+    list. ``node_label`` is a convenience lookup and may be ``None``.
+    """
+
+    id: str
+    instance_id: str
+    node_id: str
+    node_label: str | None = None
+    schema_id: str
+    state: MailOutboxState
+    attempts: int
+    max_attempts: int
+    recipient_count: int
+    subject: str
+    last_error: str | None = None
+    created_at: float
+    next_attempt_at: float
+
+
+class MailOutboxStatus(BaseModel):
+    """The durable mail outbox at a glance: per-state counts plus the entries."""
+
+    configured: bool = Field(
+        description="True when a real SMTP sender is active (else a no-op sender)."
+    )
+    total: int
+    pending: int
+    failed: int
+    dead: int
+    sent: int
+    entries: list[MailOutboxEntryView]
+
+
+def _mail_outbox_view(entry: MailOutboxEntry) -> MailOutboxEntryView:
+    """Project a stored outbox entry to its data-minimised admin view."""
+
+    return MailOutboxEntryView(
+        id=entry.id,
+        instance_id=entry.instance_id,
+        node_id=entry.node_id,
+        node_label=_mail_label(entry),
+        schema_id=entry.schema_id,
+        state=entry.state,
+        attempts=entry.attempts,
+        max_attempts=entry.max_attempts,
+        recipient_count=len(entry.recipients),
+        subject=entry.subject,
+        last_error=entry.last_error,
+        created_at=entry.created_at,
+        next_attempt_at=entry.next_attempt_at,
+    )
+
+
+def _mail_outbox_status() -> MailOutboxStatus:
+    """Assemble the current mail-outbox status (newest entry first)."""
+
+    entries = sorted(
+        _mail_outbox_store.list_entries(), key=lambda e: e.created_at, reverse=True
+    )
+    counts: dict[MailOutboxState, int] = {state: 0 for state in MailOutboxState}
+    for entry in entries:
+        counts[entry.state] += 1
+    return MailOutboxStatus(
+        configured=isinstance(_mail_sender, mail_runtime.SmtpMailSender),
+        total=len(entries),
+        pending=counts[MailOutboxState.PENDING],
+        failed=counts[MailOutboxState.FAILED],
+        dead=counts[MailOutboxState.DEAD],
+        sent=counts[MailOutboxState.SENT],
+        entries=[_mail_outbox_view(entry) for entry in entries],
+    )
+
+
+@app.get("/admin/mail-outbox", response_model=MailOutboxStatus, dependencies=[_admin])
+def get_admin_mail_outbox() -> MailOutboxStatus:
+    """Read the durable mail outbox: queued notifications and their state (admin).
+
+    Read-only ops view of the modelled e-mail notifications (rule group N). Shows
+    per-state counts and the (data-minimised) entries so an operator can see what
+    is pending, being retried, delivered or dead-lettered -- and whether an SMTP
+    sender is configured at all. Never exposes recipient addresses or the body.
+    """
+
+    return _mail_outbox_status()
+
+
+@app.post(
+    "/admin/mail-outbox/dispatch", response_model=MailOutboxStatus, dependencies=[_admin]
+)
+def post_admin_mail_outbox_dispatch() -> MailOutboxStatus:
+    """Retry all due queued notifications now, then return the outbox (admin).
+
+    A manual flush for operators: after fixing an SMTP outage, this drives the
+    durable outbox once so ``PENDING``/``FAILED`` entries are re-attempted (and
+    ``mail.sent``/``mail.failed`` audit events are recorded) without waiting for
+    the next process advance. ``DEAD`` entries stay dead-lettered.
+    """
+
+    _dispatch_mail_outbox()
+    return _mail_outbox_status()
+
+
 @app.get("/schemas", dependencies=[_read])
 def list_schemas() -> list[str]:
     return _store.list_ids()
@@ -1207,6 +1726,102 @@ def list_schemas() -> list[str]:
 )
 def create_schema(req: CreateSchemaRequest) -> ProcessSchema:
     return _commit_or_422(lambda: ops.create_empty_schema(req.name))
+
+
+@app.get("/templates", response_model=list[TemplateSummary], dependencies=[_read])
+def list_templates() -> list[TemplateSummary]:
+    """List all process templates (built-in library + saved user templates).
+
+    Returns lightweight summaries; fetch a single template or instantiate it to
+    obtain the full blueprint. Built-in templates come first, user templates
+    after, each block sorted by name for a stable gallery order.
+    """
+
+    templates = list(_all_templates().values())
+    templates.sort(key=lambda t: (t.origin is not TemplateOrigin.BUILTIN, t.name.lower()))
+    return [
+        TemplateSummary(
+            id=t.id,
+            name=t.name,
+            description=t.description,
+            category=t.category,
+            origin=t.origin,
+        )
+        for t in templates
+    ]
+
+
+@app.get("/templates/{template_id}", response_model=ProcessTemplate, dependencies=[_read])
+def get_template(template_id: str) -> ProcessTemplate:
+    """Fetch a single template including its full schema blueprint."""
+
+    return _get_template_or_404(template_id)
+
+
+@app.post(
+    "/templates", response_model=ProcessTemplate, status_code=201, dependencies=[_model]
+)
+def save_template(req: SaveTemplateRequest) -> ProcessTemplate:
+    """Save an existing schema as a reusable *user* template (modeller/admin).
+
+    The source schema is captured as a self-contained, validated blueprint (its
+    org master data is embedded and it is reset to a clean draft). Only correct
+    schemas can be captured -- the operation runs the full validation, so a
+    broken blueprint is rejected with HTTP 422 (validate-before-commit).
+    """
+
+    schema = _get_or_404(req.schema_id)
+    try:
+        template = ops.save_as_template(
+            schema,
+            name=req.name,
+            description=req.description,
+            category=req.category,
+            origin=TemplateOrigin.USER,
+        )
+    except CorrectnessError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"findings": [f.model_dump() for f in exc.findings]},
+        ) from exc
+    return _template_store.put(template)
+
+
+@app.post(
+    "/templates/{template_id}/instantiate",
+    response_model=ProcessSchema,
+    status_code=201,
+    dependencies=[_model],
+)
+def instantiate_template(
+    template_id: str, req: InstantiateTemplateRequest
+) -> ProcessSchema:
+    """Create a fresh, editable draft schema from a template (modeller/admin).
+
+    Deep-copies the template blueprint into a new schema with a fresh id and
+    ``ENTWURF`` state; the modeller edits and releases it like any other draft.
+    """
+
+    template = _get_template_or_404(template_id)
+    return _commit_or_422(lambda: ops.instantiate_template(template, name=req.name))
+
+
+@app.delete("/templates/{template_id}", status_code=204, dependencies=[_model])
+def delete_template(template_id: str) -> Response:
+    """Delete a *user* template (modeller/admin). Built-in templates are code.
+
+    Deleting a built-in template is rejected with HTTP 422 -- it ships with the
+    product and cannot be removed. A missing template yields HTTP 404.
+    """
+
+    if _template_store.get(template_id) is None:
+        # Not a user template: either a built-in (refuse) or unknown (404).
+        _get_template_or_404(template_id)  # raises 404 if truly unknown
+        raise HTTPException(
+            status_code=422, detail="built-in templates cannot be deleted"
+        )
+    _template_store.delete(template_id)
+    return Response(status_code=204)
 
 
 @app.get("/schemas/{schema_id}", response_model=ProcessSchema, dependencies=[_read])
@@ -1306,6 +1921,24 @@ def patch_rename_node(
 def delete_schema_node(schema_id: str, node_id: str) -> ProcessSchema:
     schema = _get_or_404(schema_id)
     return _commit_or_422(lambda: ops.delete_node(schema, node_id))
+
+
+@app.post(
+    "/schemas/{schema_id}/nodes/{node_id}/remove-empty-branch",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_remove_empty_branch(schema_id: str, node_id: str) -> ProcessSchema:
+    """Remove the empty branch of the XOR split ``node_id`` (validate-before-commit).
+
+    ``node_id`` is the XOR_SPLIT that currently carries one empty ``split ->
+    join`` branch. Dissolves the whole gateway when only the non-empty branch
+    would remain, otherwise drops just the empty cell; an invalid result (e.g. a
+    lost catch-all) is rejected with HTTP 422.
+    """
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(lambda: ops.remove_empty_branch(schema, node_id))
 
 
 @app.post(
@@ -1630,7 +2263,19 @@ def post_org_set_parent(org_id: str, org_unit_id: str, req: SetParentRequest) ->
 @app.post("/org-models/{org_id}/agents", response_model=OrgModel, dependencies=[_admin])
 def post_org_add_agent(org_id: str, req: AddAgentRequest) -> OrgModel:
     org = _get_org_or_404(org_id)
-    return _commit_org_or_422(
+    # Licensing guard (dormant unless enforced): creating an agent beyond the
+    # covered contingent is a purchase offer, not an error (HTTP 402). No effect
+    # while licensing is off; then no quota applies and no binding is written.
+    before_ids = _all_agent_ids()
+    if _license.enforced and not _license.can_create_agent(before_ids):
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                "Agenten-Kontingent ausgeschöpft – bitte ein Agenten-Paket "
+                "(+5 Agenten / 1 Jahr) hinzubuchen."
+            ),
+        )
+    updated = _commit_org_or_422(
         lambda: org_ops.org_add_agent(
             org,
             req.name,
@@ -1638,8 +2283,189 @@ def post_org_add_agent(org_id: str, req: AddAgentRequest) -> OrgModel:
             org_unit_id=req.org_unit_id,
             agent_id=req.agent_id,
             deputy_id=req.deputy_id,
+            email=req.email,
         )
     )
+    if _license.enforced:
+        # Bind exactly the agent(s) just added (set difference vs. the earlier
+        # universe) to spare capacity, so the new agent counts against a slot.
+        all_ids = _all_agent_ids()
+        for new_id in set(updated.agents) - before_ids:
+            try:
+                _license.auto_bind_new_agent(new_id, all_ids)
+            except LicenseError:
+                # Quota was checked above; a race here should not fail the write.
+                break
+    return updated
+
+
+# --- Licensing / agent metering (dormant unless enforced) ------------------
+#
+# All of these endpoints exist unconditionally. While licensing is off
+# (``_license.enforced == False``) they still answer, reporting the free
+# contingent, so the web client can render the agent page uniformly. Only when a
+# licensor public key is configured do the mutating actions actually gate work.
+
+
+class ActivateLicenseRequest(BaseModel):
+    """A signed license token (base64-of-JSON or raw JSON) to install."""
+
+    token: str
+
+
+class CheckoutRequest(BaseModel):
+    """Requested pack size / duration for a purchase (defaults per concept)."""
+
+    slots: int = 5
+    months: int = 12
+
+
+class CheckoutResponse(BaseModel):
+    """Where to complete the (online) purchase, plus the install id to bind to.
+
+    ``claim_token``/``poll_url`` are only present when online auto-pull is
+    configured (``PROCWORKS_LICENSE_CLAIM_URL`` set) and licensing is enforced;
+    the web client then polls until the pack is issued and activates it
+    automatically. Absent -> the operator uses the manual copy-&-paste flow.
+    """
+
+    checkout_url: str | None
+    install_id: str
+    message: str
+    claim_token: str | None = None
+    poll_url: str | None = None
+
+
+class ClaimPollResult(BaseModel):
+    """Outcome of one auto-pull poll pass over the open claims."""
+
+    activated: int  # packs activated in this pass
+    pending: int  # claims still awaiting fulfilment
+    summary: SlotSummary
+
+
+class BindLicenseRequest(BaseModel):
+    """Re-home an agent onto another license contingent."""
+
+    license_id: str
+
+
+class RefreshTimeRequest(BaseModel):
+    """Optional trusted timestamp (epoch seconds) from a signed time source."""
+
+    trusted_now: float | None = None
+
+
+@app.get("/license/status", response_model=SlotSummary, dependencies=[_read])
+def get_license_status() -> SlotSummary:
+    """Contingent overview (slots used/total, next expiry, install id)."""
+
+    return _license.summary(_all_agent_ids())
+
+
+@app.get("/license/agents", response_model=list[AgentLicenseView], dependencies=[_read])
+def get_license_agents() -> list[AgentLicenseView]:
+    """Per-agent licensing badge data for the agent page."""
+
+    if _license.enforced:
+        _license.reconcile(_all_agent_ids())
+    return _license.agent_views(sorted(_all_agent_ids()))
+
+
+@app.post("/license/checkout", response_model=CheckoutResponse, dependencies=[_model])
+def post_license_checkout(req: CheckoutRequest) -> CheckoutResponse:
+    """Start a purchase: hand back the hosted checkout URL and the install id.
+
+    The actual payment/issuance runs on a *separate* licensor backend (never on
+    this self-hosted instance). Its base URL is configured via
+    ``PROCWORKS_LICENSE_CHECKOUT_URL``; without it the product reports that
+    self-service purchase is not configured (self-hosted, offline by default).
+    """
+
+    base = os.environ.get("PROCWORKS_LICENSE_CHECKOUT_URL", "").strip()
+    install_id = _license.install_id()
+    if not base:
+        return CheckoutResponse(
+            checkout_url=None,
+            install_id=install_id,
+            message=(
+                "Self-Service-Kauf ist für diese Installation nicht konfiguriert. "
+                "Bitte den Anbieter kontaktieren."
+            ),
+        )
+    # Optional online auto-pull: when a claim endpoint is configured and
+    # licensing is enforced, mint a single-use claim, hand its token to the
+    # licensor via the deep-link and let the instance fetch the issued pack
+    # itself. Otherwise the response omits the claim and the operator uses the
+    # manual copy-&-paste activation -- both paths stay fully additive.
+    claim_base = os.environ.get("PROCWORKS_LICENSE_CLAIM_URL", "").strip()
+    claim: PendingClaim | None = None
+    if claim_base and _license.enforced:
+        claim = _license.new_claim(claim_base, slots=req.slots, months=req.months)
+    sep = "&" if "?" in base else "?"
+    url = f"{base}{sep}install_id={install_id}&slots={req.slots}&months={req.months}"
+    if claim is not None:
+        url = f"{url}&claim_token={claim.claim_token}"
+    return CheckoutResponse(
+        checkout_url=url,
+        install_id=install_id,
+        message="Kauf im Browser abschließen; die Lizenz wird danach eingespielt.",
+        claim_token=claim.claim_token if claim is not None else None,
+        poll_url=claim.poll_url if claim is not None else None,
+    )
+
+
+@app.post("/license/claims/poll", response_model=ClaimPollResult, dependencies=[_read])
+def post_license_claims_poll() -> ClaimPollResult:
+    """Run one best-effort auto-pull pass and report the resulting contingent.
+
+    The web client calls this after starting a checkout (and on the license
+    page) to fetch and activate a freshly issued pack without copy-&-paste. It
+    never blocks a process step and is a no-op while licensing is not enforced
+    or no claim endpoint is configured (there are simply no open claims then).
+    """
+
+    activated = _license.poll_claims(_claim_fetcher)
+    pending = len(_license.pending_claims())
+    return ClaimPollResult(
+        activated=len(activated),
+        pending=pending,
+        summary=_license.summary(_all_agent_ids()),
+    )
+
+
+@app.post("/license/activate", response_model=License, dependencies=[_admin])
+def post_license_activate(req: ActivateLicenseRequest) -> License:
+    """Install a signed license token (verifies signature + install binding)."""
+
+    try:
+        return _license.activate(req.token)
+    except LicenseError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
+@app.post("/license/refresh-time", response_model=TimeAnchor, dependencies=[_read])
+def post_license_refresh_time(req: RefreshTimeRequest) -> TimeAnchor:
+    """Advance the offline time ratchet (optionally from a trusted timestamp)."""
+
+    return _license.refresh_time(req.trusted_now)
+
+
+@app.post(
+    "/agents/{agent_id}/bind-license",
+    response_model=AgentLicenseView,
+    dependencies=[_model],
+)
+def post_bind_agent_license(agent_id: str, req: BindLicenseRequest) -> AgentLicenseView:
+    """Re-home an agent onto another (valid, non-full) license contingent."""
+
+    if agent_id not in _all_agent_ids():
+        raise HTTPException(status_code=404, detail="unknown agent")
+    try:
+        _license.bind(agent_id, req.license_id, _all_agent_ids())
+    except LicenseError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    return _license.agent_view(agent_id)
 
 
 @app.patch(
@@ -1650,9 +2476,15 @@ def post_org_add_agent(org_id: str, req: AddAgentRequest) -> OrgModel:
 def patch_org_update_agent(org_id: str, agent_id: str, req: UpdateAgentRequest) -> OrgModel:
     org = _get_org_or_404(org_id)
     org_unit = req.org_unit_id if "org_unit_id" in req.model_fields_set else org_ops.KEEP
+    email = req.email if "email" in req.model_fields_set else org_ops.KEEP
     return _commit_org_or_422(
         lambda: org_ops.org_update_agent(
-            org, agent_id, name=req.name, role_ids=req.role_ids, org_unit_id=org_unit
+            org,
+            agent_id,
+            name=req.name,
+            role_ids=req.role_ids,
+            org_unit_id=org_unit,
+            email=email,
         )
     )
 
@@ -1665,6 +2497,41 @@ def patch_org_update_agent(org_id: str, agent_id: str, req: UpdateAgentRequest) 
 def post_org_set_deputy(org_id: str, agent_id: str, req: SetDeputyRequest) -> OrgModel:
     org = _get_org_or_404(org_id)
     return _commit_org_or_422(lambda: org_ops.org_set_deputy(org, agent_id, req.deputy_id))
+
+
+@app.put(
+    "/org-models/{org_id}/roles/{role_id}/mailbox",
+    response_model=OrgModel,
+    dependencies=[_admin],
+)
+def put_org_role_mailbox(org_id: str, role_id: str, req: SetMailboxRequest) -> OrgModel:
+    """Set (or clear) a role's shared group mailbox (rule group N).
+
+    A malformed address is rejected (N1, HTTP 422). Re-validates every schema
+    referencing this org so removing a mailbox that a group notification needs
+    (N3) is refused rather than silently breaking a released process.
+    """
+
+    org = _get_org_or_404(org_id)
+    return _commit_org_or_422(
+        lambda: org_ops.org_set_role_mailbox(org, role_id, req.mailbox)
+    )
+
+
+@app.put(
+    "/org-models/{org_id}/units/{org_unit_id}/mailbox",
+    response_model=OrgModel,
+    dependencies=[_admin],
+)
+def put_org_unit_mailbox(
+    org_id: str, org_unit_id: str, req: SetMailboxRequest
+) -> OrgModel:
+    """Set (or clear) an org unit's department mailbox (rule group N)."""
+
+    org = _get_org_or_404(org_id)
+    return _commit_org_or_422(
+        lambda: org_ops.org_set_unit_mailbox(org, org_unit_id, req.mailbox)
+    )
 
 
 @app.post(
@@ -1734,12 +2601,50 @@ def post_set_org_unit_parent(
     )
 
 
+@app.put(
+    "/schemas/{schema_id}/roles/{role_id}/mailbox",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def put_role_mailbox(
+    schema_id: str, role_id: str, req: SetMailboxRequest
+) -> ProcessSchema:
+    """Set (or clear) a role's group mailbox on the schema's embedded org (N)."""
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.set_role_mailbox(schema, role_id, req.mailbox)
+    )
+
+
+@app.put(
+    "/schemas/{schema_id}/org-units/{org_unit_id}/mailbox",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def put_unit_mailbox(
+    schema_id: str, org_unit_id: str, req: SetMailboxRequest
+) -> ProcessSchema:
+    """Set (or clear) an org unit's mailbox on the schema's embedded org (N)."""
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.set_unit_mailbox(schema, org_unit_id, req.mailbox)
+    )
+
+
 @app.post("/schemas/{schema_id}/agents", response_model=ProcessSchema, dependencies=[_model])
 def post_add_agent(schema_id: str, req: AddAgentRequest) -> ProcessSchema:
     schema = _get_or_404(schema_id)
     return _commit_or_422(
         lambda: ops.add_agent(
-            schema, req.name, req.role_ids, req.org_unit_id, req.agent_id, req.deputy_id
+            schema,
+            req.name,
+            req.role_ids,
+            req.org_unit_id,
+            req.agent_id,
+            req.deputy_id,
+            email=req.email,
         )
     )
 
@@ -1753,11 +2658,18 @@ def patch_update_agent(
     schema_id: str, agent_id: str, req: UpdateAgentRequest
 ) -> ProcessSchema:
     schema = _get_or_404(schema_id)
-    # Distinguish "org_unit_id omitted" (keep) from "org_unit_id: null" (detach).
+    # Distinguish "org_unit_id omitted" (keep) from "org_unit_id: null" (detach);
+    # same for the e-mail address.
     org_unit = req.org_unit_id if "org_unit_id" in req.model_fields_set else ops.KEEP
+    email = req.email if "email" in req.model_fields_set else ops.KEEP
     return _commit_or_422(
         lambda: ops.update_agent(
-            schema, agent_id, name=req.name, role_ids=req.role_ids, org_unit_id=org_unit
+            schema,
+            agent_id,
+            name=req.name,
+            role_ids=req.role_ids,
+            org_unit_id=org_unit,
+            email=email,
         )
     )
 
@@ -1891,6 +2803,26 @@ def post_set_priority(schema_id: str, req: SetPriorityRequest) -> ProcessSchema:
     schema = _get_or_404(schema_id)
     return _commit_or_422(
         lambda: ops.set_node_priority(schema, req.node_id, req.priority)
+    )
+
+
+@app.post(
+    "/schemas/{schema_id}/mail-binding",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_set_mail_binding(schema_id: str, req: SetMailBindingRequest) -> ProcessSchema:
+    """Attach (or clear with ``binding: null``) a modelled e-mail notification.
+
+    Validated like every other change (No-Bypass): the mail rules N1-N4 run
+    before commit, so a notification is only accepted when every possible
+    recipient has an address and every template placeholder resolves; otherwise
+    HTTP 422. It never sends a mail -- it only models when one is sent.
+    """
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.set_mail_binding(schema, req.node_id, req.binding)
     )
 
 
@@ -2111,6 +3043,15 @@ def post_instantiate(
             status_code=403,
             detail="only modellers/admins may start a test instance of a draft",
         )
+    if released:
+        # Licensing guard (dormant unless enforced): block *new* instances of a
+        # schema that references an expired/uncovered agent. Running instances
+        # are never touched. No effect while licensing is off. Test/draft starts
+        # (throw-away, no real work) are deliberately exempt.
+        try:
+            _license.assert_agents_licensed(_required_agent_ids(schema))
+        except LicenseError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     is_test = not released
     instance = _run_or_409(
         lambda: exe.instantiate(
@@ -2135,7 +3076,7 @@ def post_instantiate(
             schema_version=instance.schema_version,
         )
         _emit_event("instance.completed", _instance_event_payload(instance))
-    _drive_pushes()
+    _after_advance(schema, None, instance)
     return instance
 
 
@@ -2167,21 +3108,42 @@ def get_worklist(instance_id: str) -> WorklistReport:
 def get_instance_tasks(instance_id: str) -> list[OpenTask]:
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    return assignment.open_tasks(schema, instance)
+    return assignment.open_tasks(
+        schema,
+        instance,
+        _time_context(instance, schema),
+        absent_agents=_current_absent_agents(),
+    )
 
 
 def _tasks_for_agent(agent_id: str) -> list[OpenTask]:
-    """Collect the open tasks an agent is currently eligible for (incl. deputy)."""
+    """Collect the open tasks an agent is currently eligible for (incl. deputy).
+
+    Each instance's tasks are prioritised with its own time context (time-based
+    worklist prioritisation); the cross-instance list is then re-sorted so the
+    agent sees one coherent, most-urgent-first todo list across all instances.
+    """
 
     tasks: list[OpenTask] = []
+    absent = _current_absent_agents()
     for instance_id in _instances.list_ids():
         instance = _instances.get(instance_id)
         if instance is None or instance.state is not InstanceState.RUNNING:
             continue
         schema = _effective_schema_for(instance)
-        for task in assignment.open_tasks(schema, instance):
+        ctx = _time_context(instance, schema)
+        for task in assignment.open_tasks(schema, instance, ctx, absent_agents=absent):
             if agent_id in task.eligible_agents:
                 tasks.append(task)
+    tasks.sort(
+        key=lambda t: worklist_priority.sort_key(
+            t.time_criticality,
+            PRIORITY_RANK[t.priority],
+            t.due_at,
+            t.label,
+            t.node_id,
+        )
+    )
     return tasks
 
 
@@ -2202,15 +3164,132 @@ def get_agent_tasks(
     agent_id: str,
     principal: Principal = Depends(require_role("operator", "modeler", "admin")),
 ) -> list[OpenTask]:
-    # A bound, non-supervisor operator may only read their own worklist; an
-    # admin/modeler may inspect any agent's list (supervision).
+    _require_agent_self_or_supervisor(principal, agent_id)
+    return _tasks_for_agent(agent_id)
+
+
+# --- absence / deputy substitution ---------------------------------------
+
+
+def _require_agent_self_or_supervisor(principal: Principal, agent_id: str) -> None:
+    """Guard: a bound, non-supervisor operator may act only on their own record.
+
+    An admin/modeler may act for any agent (supervision); an unbound principal
+    (open dev mode) is unrestricted. Raises 403 otherwise. Shared by the worklist
+    and the absence endpoints so the access rule is defined once.
+    """
+
     if (
         principal.is_bound
         and principal.agent_id != agent_id
         and not principal.roles.intersection({"admin", "modeler"})
     ):
         raise HTTPException(status_code=403, detail="forbidden")
-    return _tasks_for_agent(agent_id)
+
+
+def _known_agent_ids() -> set[str]:
+    """Every agent id known to the system (shared org models + embedded orgs).
+
+    Absences are org-wide and keyed by agent id; this backs a helpful 404 when an
+    unknown agent id is submitted. The union spans the shared org store and every
+    schema's embedded org model, so a per-schema agent is recognised too.
+    """
+
+    ids: set[str] = set()
+    for org_id in _org_store.list_ids():
+        org = _org_store.get(org_id)
+        if org is not None:
+            ids.update(org.agents.keys())
+    for schema_id in _store.list_ids():
+        schema = _store.get(schema_id)
+        if schema is not None:
+            ids.update(schema.org_model.agents.keys())
+    return ids
+
+
+class CreateAbsenceRequest(BaseModel):
+    """Define an absence window for an agent (worklist self-service)."""
+
+    start_at: datetime
+    end_at: datetime
+    note: str = ""
+
+
+def _list_absences(agent_id: str) -> list[AbsenceEntry]:
+    """The recorded absences of one agent, earliest window first."""
+
+    entries = [e for e in _absence_store.list_entries() if e.agent_id == agent_id]
+    entries.sort(key=lambda e: (e.start_at, e.end_at))
+    return entries
+
+
+@app.get("/agents/{agent_id}/absences", response_model=list[AbsenceEntry])
+def get_agent_absences(
+    agent_id: str,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> list[AbsenceEntry]:
+    """List an agent's absence windows (self, or any agent for admin/modeler)."""
+
+    _require_agent_self_or_supervisor(principal, agent_id)
+    return _list_absences(agent_id)
+
+
+@app.get("/me/absences", response_model=list[AbsenceEntry])
+def get_my_absences(
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> list[AbsenceEntry]:
+    """The logged-in agent's own absence windows (empty when no bound agent)."""
+
+    if principal.agent_id is None:
+        return []
+    return _list_absences(principal.agent_id)
+
+
+@app.post("/agents/{agent_id}/absences", response_model=AbsenceEntry, status_code=201)
+def post_agent_absence(
+    agent_id: str,
+    req: CreateAbsenceRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> AbsenceEntry:
+    """Record an absence window for an agent (deputy stands in during it).
+
+    Self-service or supervisory. The window must be non-empty (``end_at >=
+    start_at``) and the agent must be known. The absence never removes the agent
+    from any worklist -- it only adds the deputy in parallel -- so it cannot stall
+    an instance even if no deputy is registered.
+    """
+
+    _require_agent_self_or_supervisor(principal, agent_id)
+    if agent_id not in _known_agent_ids():
+        raise HTTPException(status_code=404, detail=f"unknown agent '{agent_id}'")
+    if req.end_at < req.start_at:
+        raise HTTPException(
+            status_code=422, detail="end_at must not be before start_at"
+        )
+    entry = AbsenceEntry(
+        id=f"abs_{uuid.uuid4().hex}",
+        agent_id=agent_id,
+        start_at=req.start_at,
+        end_at=req.end_at,
+        note=req.note,
+    )
+    return _absence_store.put_entry(entry)
+
+
+@app.delete("/agents/{agent_id}/absences/{absence_id}", status_code=204)
+def delete_agent_absence(
+    agent_id: str,
+    absence_id: str,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> Response:
+    """Remove an absence window (self, or any agent for admin/modeler)."""
+
+    _require_agent_self_or_supervisor(principal, agent_id)
+    entry = _absence_store.get_entry(absence_id)
+    if entry is None or entry.agent_id != agent_id:
+        raise HTTPException(status_code=404, detail="absence not found")
+    _absence_store.delete_entry(absence_id)
+    return Response(status_code=204)
 
 
 @app.post("/instances/{instance_id}/start", response_model=ProcessInstance, dependencies=[_run])
@@ -2240,10 +3319,17 @@ def post_complete_activity(
 ) -> ProcessInstance:
     before = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(before)
+    before_states = dict(before.node_states)
     acting_agent = _resolve_acting_agent(principal, req.agent_id)
     after = _run_or_409(
         lambda: exe.complete_activity(
-            before, schema, req.node_id, req.data, agent_id=acting_agent, context=_context
+            before,
+            schema,
+            req.node_id,
+            req.data,
+            agent_id=acting_agent,
+            context=_context,
+            absent_agents=_current_absent_agents(),
         )
     )
     if not before.is_test:
@@ -2259,7 +3345,7 @@ def post_complete_activity(
             agent_id=acting_agent,
         )
         _record_completion(before, after)
-        _drive_pushes()
+        _after_advance(schema, before_states, after)
     return after
 
 
@@ -2274,6 +3360,7 @@ def post_complete_activity(
 def post_adhoc_insert(instance_id: str, req: AdhocInsertRequest) -> ProcessInstance:
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
+    before_states = dict(instance.node_states)
     after = _commit_instance_or_422(
         lambda: adhoc.adhoc_insert_activity(
             instance, schema, req.after_node_id, req.label, resolver=_resolver
@@ -2289,6 +3376,8 @@ def post_adhoc_insert(instance_id: str, req: AdhocInsertRequest) -> ProcessInsta
             node_id=req.after_node_id,
             detail={"label": req.label},
         )
+        # An ad-hoc insert can make a mail-bound activity ready -> notify (§10.7).
+        _after_advance(_effective_schema_for(after), before_states, after)
     return after
 
 
@@ -2300,6 +3389,7 @@ def post_adhoc_insert(instance_id: str, req: AdhocInsertRequest) -> ProcessInsta
 def post_adhoc_delete(instance_id: str, req: AdhocDeleteRequest) -> ProcessInstance:
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
+    before_states = dict(instance.node_states)
     after = _commit_instance_or_422(
         lambda: adhoc.adhoc_delete_node(
             instance, schema, req.node_id, resolver=_resolver
@@ -2314,6 +3404,8 @@ def post_adhoc_delete(instance_id: str, req: AdhocDeleteRequest) -> ProcessInsta
             schema_version=after.schema_version,
             node_id=req.node_id,
         )
+        # Deleting a node can hand control to a mail-bound successor -> notify.
+        _after_advance(_effective_schema_for(after), before_states, after)
     return after
 
 
@@ -2380,6 +3472,7 @@ def post_migrate(instance_id: str, req: MigrateRequest) -> ProcessInstance:
     instance = _get_instance_or_404(instance_id)
     source = _get_or_404(instance.schema_id)
     target = _get_or_404(req.target_schema_id)
+    before_states = dict(instance.node_states)
     after = _commit_instance_or_422(
         lambda: migration.migrate_instance(
             instance,
@@ -2399,6 +3492,10 @@ def post_migrate(instance_id: str, req: MigrateRequest) -> ProcessInstance:
             "target_schema_id": req.target_schema_id,
         },
     )
+    if not instance.is_test:
+        # Migration can activate mail-bound nodes on the *target* schema (a step
+        # the source did not have, or a re-mapped position) -> notify (§10.7).
+        _after_advance(_effective_schema_for(after), before_states, after)
     return after
 
 
@@ -2563,6 +3660,11 @@ def v1_start_instance(
                     "message": "only released schemas can be instantiated via /v1"
                 },
             )
+        # Licensing guard (dormant unless enforced): mirror the GUI entry point.
+        try:
+            _license.assert_agents_licensed(_required_agent_ids(schema))
+        except LicenseError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
         instance = _run_or_409(lambda: exe.instantiate(schema, context=_context))
         _audit.append(
             EventType.INSTANCE_CREATED,
@@ -2579,7 +3681,7 @@ def v1_start_instance(
                 schema_version=instance.schema_version,
             )
             _emit_event("instance.completed", _instance_event_payload(instance))
-        _drive_pushes()
+        _after_advance(schema, None, instance)
         return instance
 
     result = _idempotent(principal, idempotency_key, produce)
@@ -2606,7 +3708,9 @@ def v1_get_instance_tasks(
 ) -> list[OpenTask]:
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    return assignment.open_tasks(schema, instance)
+    return assignment.open_tasks(
+        schema, instance, absent_agents=_current_absent_agents()
+    )
 
 
 @_v1.post(

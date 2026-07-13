@@ -13,12 +13,15 @@ from collections.abc import Callable
 from typing import Protocol
 
 from procworks.model import (
+    AbsenceEntry,
     ExternalTask,
     Incident,
+    MailOutboxEntry,
     OrgModel,
     OutboxEntry,
     ProcessInstance,
     ProcessSchema,
+    ProcessTemplate,
     WebhookDelivery,
     WebhookSubscription,
 )
@@ -401,4 +404,193 @@ def create_webhook_store() -> WebhookStore:
 
         return SqlAlchemyWebhookStore(url, create_tables=True)
     return InMemoryWebhookStore()
+
+
+class MailOutboxStore(Protocol):
+    """Persistence for the durable mail outbox (modelled notifications, rule N).
+
+    The SMTP-channel sibling of :class:`WebhookStore`: it holds the transactional
+    queue of rendered e-mail notifications so a task-ready notification survives a
+    crash and can be retried. ``find_by_dedup_key`` backs the per-activation
+    idempotency (an activation is enqueued at most once). The dispatcher in
+    :mod:`procworks.mail_runtime` is agnostic of the backend, exactly like the
+    other stores.
+    """
+
+    def put_entry(self, entry: MailOutboxEntry) -> MailOutboxEntry: ...
+
+    def get_entry(self, entry_id: str) -> MailOutboxEntry | None: ...
+
+    def find_by_dedup_key(self, dedup_key: str) -> MailOutboxEntry | None: ...
+
+    def list_entries(self) -> list[MailOutboxEntry]: ...
+
+    def clear(self) -> None: ...
+
+
+class InMemoryMailOutboxStore:
+    """A dict-backed mail outbox, keyed by entry id with a dedup-key index.
+
+    The default store without configuration; with ``DATABASE_URL`` set,
+    ``create_mail_outbox_store`` returns the durable SQLAlchemy variant instead
+    (mirroring the webhook outbox).
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, MailOutboxEntry] = {}
+
+    def put_entry(self, entry: MailOutboxEntry) -> MailOutboxEntry:
+        self._entries[entry.id] = entry
+        return entry
+
+    def get_entry(self, entry_id: str) -> MailOutboxEntry | None:
+        return self._entries.get(entry_id)
+
+    def find_by_dedup_key(self, dedup_key: str) -> MailOutboxEntry | None:
+        """Return the (single) entry queued for ``dedup_key``, or ``None``.
+
+        Backs enqueue idempotency: a re-observed activation resolves to the same
+        key and is not queued twice. Linear scan is fine for the in-memory store;
+        the SQLAlchemy variant uses an indexed column.
+        """
+
+        for entry in self._entries.values():
+            if entry.dedup_key == dedup_key:
+                return entry
+        return None
+
+    def list_entries(self) -> list[MailOutboxEntry]:
+        return list(self._entries.values())
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
+def create_mail_outbox_store() -> MailOutboxStore:
+    """Build the mail outbox store from the environment (mirrors the others)."""
+
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        from procworks.db import SqlAlchemyMailOutboxStore
+
+        return SqlAlchemyMailOutboxStore(url, create_tables=True)
+    return InMemoryMailOutboxStore()
+
+
+class AbsenceStore(Protocol):
+    """Persistence for recorded agent absences (deputy substitution windows).
+
+    An operational store like the mail outbox: it holds the (small) set of
+    absence entries that gate runtime deputy substitution. It carries no
+    correctness logic -- the API boundary reads it, resolves which agents are
+    absent *now*, and hands that set to the eligibility resolution. Swappable
+    in-memory / SQLAlchemy exactly like the other stores.
+    """
+
+    def put_entry(self, entry: AbsenceEntry) -> AbsenceEntry: ...
+
+    def get_entry(self, entry_id: str) -> AbsenceEntry | None: ...
+
+    def list_entries(self) -> list[AbsenceEntry]: ...
+
+    def delete_entry(self, entry_id: str) -> bool: ...
+
+    def clear(self) -> None: ...
+
+
+class InMemoryAbsenceStore:
+    """A dict-backed absence store, keyed by entry id.
+
+    The default store without configuration; with ``DATABASE_URL`` set,
+    ``create_absence_store`` returns the durable SQLAlchemy variant instead.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, AbsenceEntry] = {}
+
+    def put_entry(self, entry: AbsenceEntry) -> AbsenceEntry:
+        self._entries[entry.id] = entry
+        return entry
+
+    def get_entry(self, entry_id: str) -> AbsenceEntry | None:
+        return self._entries.get(entry_id)
+
+    def list_entries(self) -> list[AbsenceEntry]:
+        return list(self._entries.values())
+
+    def delete_entry(self, entry_id: str) -> bool:
+        """Remove an entry; return whether it existed (idempotent delete)."""
+
+        return self._entries.pop(entry_id, None) is not None
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
+def create_absence_store() -> AbsenceStore:
+    """Build the absence store from the environment (mirrors the others)."""
+
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        from procworks.db import SqlAlchemyAbsenceStore
+
+        return SqlAlchemyAbsenceStore(url, create_tables=True)
+    return InMemoryAbsenceStore()
+
+
+class TemplateStore(Protocol):
+    """Persistence for *user-created* process templates (blueprints).
+
+    Only user templates live here; built-in templates ship as code
+    (:mod:`procworks.templates`) so they are always available and survive a
+    reset. The store is swappable in-memory / SQLAlchemy exactly like the other
+    stores, and carries no correctness logic -- a template's embedded blueprint
+    is validated by the operation that produces it (validate-before-commit).
+    """
+
+    def put(self, template: ProcessTemplate) -> ProcessTemplate: ...
+
+    def get(self, template_id: str) -> ProcessTemplate | None: ...
+
+    def list_ids(self) -> list[str]: ...
+
+    def delete(self, template_id: str) -> bool: ...
+
+    def clear(self) -> None: ...
+
+
+class InMemoryTemplateStore:
+    """A dict-backed template store keyed by template id (default for tests)."""
+
+    def __init__(self) -> None:
+        self._templates: dict[str, ProcessTemplate] = {}
+
+    def put(self, template: ProcessTemplate) -> ProcessTemplate:
+        self._templates[template.id] = template
+        return template
+
+    def get(self, template_id: str) -> ProcessTemplate | None:
+        return self._templates.get(template_id)
+
+    def list_ids(self) -> list[str]:
+        return list(self._templates.keys())
+
+    def delete(self, template_id: str) -> bool:
+        """Remove a template; return whether it existed (idempotent delete)."""
+
+        return self._templates.pop(template_id, None) is not None
+
+    def clear(self) -> None:
+        self._templates.clear()
+
+
+def create_template_store() -> TemplateStore:
+    """Build the template store from the environment (mirrors the others)."""
+
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        from procworks.db import SqlAlchemyTemplateStore
+
+        return SqlAlchemyTemplateStore(url, create_tables=True)
+    return InMemoryTemplateStore()
 

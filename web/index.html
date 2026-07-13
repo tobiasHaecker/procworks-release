@@ -12,24 +12,31 @@
   <aside class="sidebar">
     <div class="brand">
       <div class="logo">CbC</div>
-      <div>
+      <div class="brand-text">
         <b>ProcWorks</b>
         <small>Correctness by Construction</small>
       </div>
+      <button id="sidebar-toggle" class="side-collapse" type="button"
+              title="Men&uuml; ein-/ausklappen" aria-label="Men&uuml; ein-/ausklappen">&laquo;</button>
     </div>
     <nav class="nav" id="nav">
-      <button data-view="model" class="active"><span class="ico">&#9635;</span> Modellieren</button>
-      <button data-view="data"><span class="ico">&#9783;</span> Datensicht</button>
-      <button data-view="org"><span class="ico">&#9823;</span> Ressourcensicht</button>
-      <button data-view="run"><span class="ico">&#9654;</span> Ausf&uuml;hrung</button>
-      <button data-view="tasks"><span class="ico">&#9776;</span> Meine Aufgaben</button>
-      <button data-view="testrun"><span class="ico">&#9879;</span> Pr&uuml;finstanz</button>
-      <button data-view="monitor"><span class="ico">&#9788;</span> Monitoring</button>
-      <button data-view="integration"><span class="ico">&#8644;</span> Integration</button>
-      <button data-view="help"><span class="ico">&#9432;</span> Hilfe</button>
+      <button data-view="model" class="active" title="Modellieren"><span class="ico">&#9635;</span> <span class="lbl">Modellieren</span></button>
+      <button data-view="data" title="Datensicht"><span class="ico">&#9783;</span> <span class="lbl">Datensicht</span></button>
+      <button data-view="org" title="Ressourcensicht"><span class="ico">&#9823;</span> <span class="lbl">Ressourcensicht</span></button>
+      <button data-view="run" title="Ausf&uuml;hrung"><span class="ico">&#9654;</span> <span class="lbl">Ausf&uuml;hrung</span></button>
+      <button data-view="tasks" title="Meine Aufgaben"><span class="ico">&#9776;</span> <span class="lbl">Meine Aufgaben</span></button>
+      <button data-view="testrun" title="Pr&uuml;finstanz"><span class="ico">&#9879;</span> <span class="lbl">Pr&uuml;finstanz</span></button>
+      <button data-view="monitor" title="Monitoring"><span class="ico">&#9788;</span> <span class="lbl">Monitoring</span></button>
+      <button data-view="integration" title="Integration"><span class="ico">&#8644;</span> <span class="lbl">Integration</span></button>
+      <button data-view="admin" title="Administration"><span class="ico">&#9881;</span> <span class="lbl">Administration</span></button>
+      <button data-view="help" title="Hilfe"><span class="ico">&#9432;</span> <span class="lbl">Hilfe</span></button>
     </nav>
     <div class="side-foot">
       <div>Status: <span id="conn-pill" class="pill pill-gray">getrennt</span></div>
+      <div class="theme-switch" role="group" aria-label="Farbschema">
+        <button type="button" class="theme-btn" data-theme-choice="dark" title="Dunkles Farbschema">&#9789; Dunkel</button>
+        <button type="button" class="theme-btn" data-theme-choice="light" title="Helles Farbschema">&#9788; Hell</button>
+      </div>
       <label class="api-field">API
         <input id="api-base" type="text" spellcheck="false" />
       </label>

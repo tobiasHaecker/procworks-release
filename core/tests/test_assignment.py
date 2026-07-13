@@ -93,7 +93,7 @@ def test_eligible_agents_org_unit_non_recursive():
     assert eligible_agents(rel, act, instance) == {"a1"}
 
 
-def test_eligible_agents_deputy_transitive():
+def test_eligible_agents_deputy_transitive_only_when_absent():
     schema = _single_activity_schema("asgdep")
     act = _activity_id(schema, "Bearbeiten")
     schema = add_role(schema, "Sachbearbeiter", role_id="sb")
@@ -107,7 +107,17 @@ def test_eligible_agents_deputy_transitive():
     rel = set_agent_deputy(rel, "a2", "a3")
     instance = instantiate(rel)
 
-    assert eligible_agents(rel, act, instance) == {"a1", "a2", "a3"}
+    # Ohne Abwesenheit erhaelt nur der Agent selbst die Aufgabe (kein Vertreter).
+    assert eligible_agents(rel, act, instance) == {"a1"}
+    # Ist a1 abwesend, kommt der Vertreter a2 hinzu (parallel zum Agenten).
+    assert eligible_agents(rel, act, instance, absent_agents=frozenset({"a1"})) == {
+        "a1",
+        "a2",
+    }
+    # Ist zusaetzlich a2 abwesend, greift die Vertreterkette bis a3.
+    assert eligible_agents(
+        rel, act, instance, absent_agents=frozenset({"a1", "a2"})
+    ) == {"a1", "a2", "a3"}
 
 
 def test_eligible_agents_node_performing_agent():
@@ -132,6 +142,55 @@ def test_eligible_agents_node_performing_agent():
     instance = complete_activity(instance, rel, erfassen, agent_id="a1")
     assert instance.performed_by[erfassen] == "a1"
     assert eligible_agents(rel, pruefen, instance) == {"a1"}
+
+
+def test_eligible_agents_explicit_agent():
+    """An AGENT rule resolves to exactly the named agent (plus deputies)."""
+    schema = _single_activity_schema("asgagent")
+    act = _activity_id(schema, "Bearbeiten")
+    schema = add_agent(schema, "Erika", agent_id="a1")
+    schema = add_agent(schema, "Max", agent_id="a2")
+    schema = set_agent_deputy(schema, "a1", "a2")
+    rel = release(assign_staff_rule(schema, act, StaffRule(kind=StaffRuleKind.AGENT, ref="a1")))
+    instance = instantiate(rel)
+    # Ohne Abwesenheit nur der benannte Agent.
+    assert eligible_agents(rel, act, instance) == {"a1"}
+    # Waehrend seiner Abwesenheit kommt der Vertreter hinzu.
+    assert eligible_agents(rel, act, instance, absent_agents=frozenset({"a1"})) == {
+        "a1",
+        "a2",
+    }
+    # Der Mail-Opt-out (include_deputies=False) schaltet die Vertretung ganz ab.
+    assert eligible_agents(
+        rel, act, instance, include_deputies=False, absent_agents=frozenset({"a1"})
+    ) == {"a1"}
+
+
+def test_eligible_agents_supervisor_of_performer():
+    """The supervisor (org-unit manager) of the prior step's performer is
+    resolved at runtime -- e.g. a vacation approval by the creator's boss."""
+    schema = create_empty_schema("SupRun", schema_id="asgsup")
+    schema = serial_insert(schema, "Antrag", after_node_id="start")
+    schema = serial_insert(schema, "Genehmigen", after_node_id=_activity_id(schema, "Antrag"))
+    antrag = _activity_id(schema, "Antrag")
+    genehmigen = _activity_id(schema, "Genehmigen")
+    schema = add_agent(schema, "Chef", agent_id="chef")
+    schema = add_org_unit(schema, "Team", org_unit_id="team", manager_id="chef")
+    schema = add_agent(schema, "Antragsteller", org_unit_id="team", agent_id="mit")
+    schema = assign_staff_rule(schema, antrag, StaffRule(kind=StaffRuleKind.AGENT, ref="mit"))
+    schema = assign_staff_rule(
+        schema, genehmigen,
+        StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR, ref=antrag),
+    )
+    rel = release(schema)
+    instance = instantiate(rel)
+
+    # Antrag noch offen -> Genehmigen hat noch keinen Bearbeiter
+    assert eligible_agents(rel, genehmigen, instance) == set()
+
+    instance = complete_activity(instance, rel, antrag, agent_id="mit")
+    # der Vorgesetzte des Antragstellers ist der Manager seiner OrgEinheit
+    assert eligible_agents(rel, genehmigen, instance) == {"chef"}
 
 
 def test_eligible_agents_and_or_except():
@@ -234,7 +293,7 @@ def test_open_tasks_empty_when_instance_completed():
     assert open_tasks(rel, instance) == []
 
 
-def test_open_tasks_deputy_receives_task():
+def test_open_tasks_deputy_receives_task_when_agent_absent():
     schema = _single_activity_schema("asgdeptask")
     act = _activity_id(schema, "Bearbeiten")
     schema = add_role(schema, "Sachbearbeiter", role_id="sb")
@@ -244,7 +303,10 @@ def test_open_tasks_deputy_receives_task():
     rel = set_agent_deputy(release(schema), "a1", "a2")
     instance = instantiate(rel)
 
-    tasks = open_tasks(rel, instance)
+    # Ohne Abwesenheit sieht nur a1 die Aufgabe.
+    assert open_tasks(rel, instance)[0].eligible_agents == ["a1"]
+    # Waehrend a1 abwesend ist, erscheint die Aufgabe parallel beim Vertreter a2.
+    tasks = open_tasks(rel, instance, absent_agents=frozenset({"a1"}))
     assert tasks[0].eligible_agents == ["a1", "a2"]
 
 

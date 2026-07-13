@@ -9,6 +9,8 @@ layer (OrgModel, StaffRule, ServiceBinding) used by the resource rules Z1-Z4.
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -437,22 +439,33 @@ class ConnectorDescriptor(BaseModel):
 
 
 class Role(BaseModel):
-    """An organisational role (e.g. ``Sachbearbeiter``)."""
+    """An organisational role (e.g. ``Sachbearbeiter``).
+
+    ``mailbox`` is an optional shared group/distribution address for the role
+    (e.g. ``sachbearbeitung@firma.de``). It is the target of a modelled e-mail
+    notification in ``TO_GROUP_MAILBOX`` mode (rule group N); ``None`` means the
+    role has no group mailbox. Purely master data -- addresses are never inlined
+    in a process schema.
+    """
 
     id: str
     name: str
+    mailbox: str | None = None
 
 
 class OrgUnit(BaseModel):
     """An organisational unit; ``parent_id`` builds the unit hierarchy.
 
     ``manager_id`` names the supervisor (an agent) responsible for the unit.
+    ``mailbox`` is an optional shared department address (e.g. ``einkauf@firma.de``),
+    the target of a ``TO_GROUP_MAILBOX`` e-mail notification (rule group N).
     """
 
     id: str
     name: str
     parent_id: str | None = None
     manager_id: str | None = None
+    mailbox: str | None = None
 
 
 class Agent(BaseModel):
@@ -461,6 +474,12 @@ class Agent(BaseModel):
     ``deputy_id`` names another agent that stands in for this one: whenever
     this agent is eligible for a task, the deputy is eligible too (the
     substitution chain is followed transitively at runtime).
+
+    ``email`` is the agent's personal mailbox, the target of a modelled e-mail
+    notification in ``TO_ELIGIBLE_AGENTS`` mode (rule group N). ``None`` means no
+    address is on file; the correctness rule N3 forbids modelling a per-agent
+    notification for any activity that could be assigned to an address-less
+    agent, so a notification can never be sent to a missing address.
     """
 
     id: str
@@ -468,6 +487,7 @@ class Agent(BaseModel):
     role_ids: list[str] = Field(default_factory=list)
     org_unit_id: str | None = None
     deputy_id: str | None = None
+    email: str | None = None
 
 
 class OrgModel(BaseModel):
@@ -493,15 +513,41 @@ class StaffRuleKind(StrEnum):
 
     ROLE = "ROLE"
     ORG_UNIT = "ORG_UNIT"
+    #: A single, explicitly named agent (``ref`` is an agent id). Lets a model
+    #: pin a step to a concrete person instead of a role/unit -- the eligible
+    #: set is exactly that agent (plus deputies, added at resolution time).
+    AGENT = "AGENT"
+    #: The agent who performed a prior node (``ref`` is that node's id). The
+    #: performer is only known at runtime, so Z3 requires the node to run first.
     NODE_PERFORMING_AGENT = "NODE_PERFORMING_AGENT"
+    #: A resource chosen *relative to* the performer of a prior node: the
+    #: supervisor (the manager of the performer's org unit). ``ref`` is the
+    #: prior node's id (same back-reference discipline as
+    #: ``NODE_PERFORMING_AGENT``, enforced by Z3). Example: the supervisor of
+    #: the creator of a vacation request approves it.
+    NODE_PERFORMING_AGENT_SUPERVISOR = "NODE_PERFORMING_AGENT_SUPERVISOR"
     AND = "AND"
     OR = "OR"
     EXCEPT = "EXCEPT"
 
 
+#: Leaf staff-rule kinds that reference a prior *node* (their performer is only
+#: known at runtime, so Z3 requires the node to be guaranteed-executed before).
+STAFF_NODE_REF_KINDS = frozenset(
+    {
+        StaffRuleKind.NODE_PERFORMING_AGENT,
+        StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR,
+    }
+)
 #: Leaf staff-rule kinds (reference an org element or a prior node).
 STAFF_LEAF_KINDS = frozenset(
-    {StaffRuleKind.ROLE, StaffRuleKind.ORG_UNIT, StaffRuleKind.NODE_PERFORMING_AGENT}
+    {
+        StaffRuleKind.ROLE,
+        StaffRuleKind.ORG_UNIT,
+        StaffRuleKind.AGENT,
+        StaffRuleKind.NODE_PERFORMING_AGENT,
+        StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR,
+    }
 )
 #: Combinator staff-rule kinds (operate on operands).
 STAFF_COMBINATOR_KINDS = frozenset(
@@ -512,15 +558,92 @@ STAFF_COMBINATOR_KINDS = frozenset(
 class StaffRule(BaseModel):
     """A structured staff-assignment rule (BZR) as an expression tree.
 
-    Leaf kinds carry ``ref`` (a role/org-unit/node id); ``recursive`` applies
-    to ``ORG_UNIT`` to include sub-units (the ADEPT ``*``/``+`` modifiers).
-    Combinator kinds (AND/OR/EXCEPT) carry ``operands``.
+    Leaf kinds carry ``ref``: a role id (``ROLE``), an org-unit id (``ORG_UNIT``),
+    an agent id (``AGENT``), or a prior node's id (``NODE_PERFORMING_AGENT`` and
+    ``NODE_PERFORMING_AGENT_SUPERVISOR``). ``recursive`` applies to ``ORG_UNIT``
+    to include sub-units (the ADEPT ``*``/``+`` modifiers). Combinator kinds
+    (AND/OR/EXCEPT) carry ``operands``.
     """
 
     kind: StaffRuleKind
     ref: str | None = None
     recursive: bool = False
     operands: list[StaffRule] = Field(default_factory=list)
+
+
+# --- modelled e-mail notification (rule group N) -------------------------
+
+
+class MailRecipientMode(StrEnum):
+    """Who a modelled e-mail notification of an activity is addressed to."""
+
+    #: To each concrete agent currently eligible for the task (personal mailbox,
+    #: ``Agent.email``), resolved at runtime from the activity's staff rule.
+    TO_ELIGIBLE_AGENTS = "TO_ELIGIBLE_AGENTS"
+    #: To the shared group mailbox(es) of the role(s)/unit(s) the activity's
+    #: staff rule addresses (``Role.mailbox`` / ``OrgUnit.mailbox``).
+    TO_GROUP_MAILBOX = "TO_GROUP_MAILBOX"
+
+
+class MailBinding(BaseModel):
+    """A modelled e-mail notification attached to a single ACTIVITY node.
+
+    Optional and opt-in: only activities that carry a binding in
+    ``ProcessSchema.mail_bindings`` send a mail, and they send it once when the
+    task becomes ready (the node is activated). There is deliberately no global
+    "mail on every task" switch.
+
+    ``subject``/``body`` are plain-text templates that may contain
+    ``{element_id}`` placeholders; rule N4 guarantees every placeholder refers to
+    an INSTANCE data element that is written before the node, so it always
+    resolves at send time. ``include_deputies`` (per-agent mode only) mirrors the
+    runtime staff resolution, which also lists deputies as eligible.
+    """
+
+    mode: MailRecipientMode = MailRecipientMode.TO_ELIGIBLE_AGENTS
+    include_deputies: bool = True
+    subject: str
+    body: str = ""
+
+
+#: Matches a ``{element_id}`` placeholder in a mail template. The captured name
+#: is a bare data-element id (letters, digits, underscore, hyphen, dot); a literal
+#: ``{{`` / ``}}`` is *not* matched, so it can escape a literal brace if ever
+#: needed. Kept here so the validator (rule N4) and the runtime renderer share a
+#: single definition of what a placeholder is.
+_PLACEHOLDER_RE = re.compile(r"(?<!\{)\{([A-Za-z0-9_.\-]+)\}(?!\})")
+
+
+def template_placeholders(template: str) -> list[str]:
+    """Return the data-element ids referenced by ``{...}`` placeholders.
+
+    Order-preserving with duplicates removed. Used by rule N4 to check every
+    placeholder resolves and by the runtime renderer to substitute values.
+    """
+
+    seen: dict[str, None] = {}
+    for match in _PLACEHOLDER_RE.finditer(template):
+        seen.setdefault(match.group(1), None)
+    return list(seen)
+
+
+#: A deliberately strict, pragmatic e-mail syntax check for master-data
+#: addresses (rule N1). Not a full RFC 5322 parser -- it rejects the mistakes
+#: that matter (empty, embedded whitespace/newline, missing local or domain
+#: part, no dot in the domain). The no-whitespace guarantee also means a stored
+#: address can never smuggle a header-injecting newline into a sent mail.
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def is_valid_email(address: str) -> bool:
+    """True if ``address`` is a syntactically acceptable e-mail address (N1).
+
+    Shared by the validator (rule N1 on embedded org models) and
+    :func:`procworks.org.validate_org` (the same rule on shared org models), so
+    both paths reject the same malformed addresses.
+    """
+
+    return bool(_EMAIL_RE.match(address))
 
 
 # --- work-item priority (Section 3.8 / 6.2.1, roadmap E8) -----------------
@@ -600,13 +723,57 @@ class WorkItemPriority(BaseModel):
 class TimeConstraint(BaseModel):
     """An optional temporal annotation of a node (roadmap E5).
 
-    ``max_duration_seconds`` is the maximum expected processing duration of the
-    step; the schema-level ``deadline_seconds`` (see :class:`ProcessSchema`)
-    bounds the whole process. Both feed the static time-consistency rules
-    T1 (well-formed) and T2 (the critical path must fit the deadline).
+    ``max_duration_seconds`` is the maximum expected *processing* duration of the
+    step (measured from the moment an agent starts working it); the schema-level
+    ``deadline_seconds`` (see :class:`ProcessSchema`) bounds the whole process.
+    Both feed the static time-consistency rules T1 (well-formed) and T2 (the
+    critical path must fit the deadline).
+
+    ``target_lead_seconds`` is the optional *reaction* time (SLA) measured from
+    the moment the node becomes ready (ACTIVATED): the window within which the
+    task should be picked up and finished. It is the natural steering value for
+    the time-based worklist prioritisation (see ``worklist_priority``), because a
+    task "rots" while nobody touches it. When it is not set, the prioritisation
+    falls back to ``max_duration_seconds`` as the reaction time (fallback rule S
+    of the prioritisation concept), so a single annotated duration is enough to
+    drive the automatic ordering.
     """
 
     max_duration_seconds: float | None = None
+    target_lead_seconds: float | None = None
+
+
+# --- time-based worklist criticality (Zeitbasierte-Priorisierung-Konzept) --
+
+
+class TimeCriticality(StrEnum):
+    """Explainable criticality band of an open work item, derived at read time
+    from how much of its target time it has already consumed (never stored).
+
+    The band mirrors :class:`PriorityLevel` in spirit: an ordered, deterministic
+    label that makes the automatic worklist ordering explainable to end users
+    ("this is *overdue*"). ``NONE`` is the backward-compatible band for a task
+    without a target time -- it takes no part in the time ordering and is placed
+    purely by its static business priority.
+    """
+
+    ON_TRACK = "ON_TRACK"
+    WARNING = "WARNING"
+    AT_RISK = "AT_RISK"
+    OVERDUE = "OVERDUE"
+    NONE = "NONE"
+
+
+#: Numeric rank of each criticality band (higher = more urgent), used to sort a
+#: worklist. Kept separate from the enum so the ordering is explicit; ``NONE``
+#: ranks below ``ON_TRACK`` so timed tasks always outrank untimed ones.
+CRITICALITY_RANK: dict[TimeCriticality, int] = {
+    TimeCriticality.NONE: 0,
+    TimeCriticality.ON_TRACK: 1,
+    TimeCriticality.WARNING: 2,
+    TimeCriticality.AT_RISK: 3,
+    TimeCriticality.OVERDUE: 4,
+}
 
 
 # --- activity repository (templates, A1-A3) -------------------------------
@@ -930,6 +1097,11 @@ class ProcessSchema(BaseModel):
     #: Optional work-item priorities per interactive node (roadmap E8). Absent
     #: entries default to ``MEDIUM/MEDIUM`` when a worklist is rendered.
     node_priorities: dict[str, WorkItemPriority] = Field(default_factory=dict)
+    #: Optional modelled e-mail notifications per ACTIVITY node id (rule group
+    #: N). Empty by default so the mail rules N1-N4 stay silent for models
+    #: without notifications (fully additive). An entry means "send a mail when
+    #: this task becomes ready".
+    mail_bindings: dict[str, MailBinding] = Field(default_factory=dict)
     #: Optional per-node temporal annotations (roadmap E5). Empty by default so
     #: the temporal rules T1/T2 stay silent for models without time data.
     time_constraints: dict[str, TimeConstraint] = Field(default_factory=dict)
@@ -972,6 +1144,55 @@ class ProcessSchema(BaseModel):
         ]
 
 
+class TemplateOrigin(StrEnum):
+    """Where a process template came from.
+
+    ``BUILTIN`` templates ship with the product (blueprints for processes that
+    exist in most companies); ``USER`` templates are saved by a modeller from an
+    existing schema. The distinction gates deletion: built-in templates are
+    provided by code and can never be removed, only user templates can.
+    """
+
+    BUILTIN = "BUILTIN"
+    USER = "USER"
+
+
+class ProcessTemplate(BaseModel):
+    """A reusable process blueprint: a self-contained schema snapshot + metadata.
+
+    A template is *not* a runnable schema; it is a stored, correct
+    :class:`ProcessSchema` snapshot that a modeller can *instantiate* into a
+    fresh, editable draft schema. Two invariants keep a template portable and
+    safe to instantiate anywhere:
+
+    * the snapshot is always ``ENTWURF`` and ``version == 1`` (a clean draft),
+    * its organisation master data is **embedded** (``org_model`` populated,
+      ``org_model_id is None``) so the template never depends on a shared org
+      model that may or may not exist in the target installation.
+
+    Built-in templates are provided by :mod:`procworks.templates` and are always
+    available; user templates are persisted in the template store. Both are
+    validated before they are ever stored (No-Bypass), so a template can never
+    carry an incorrect blueprint.
+    """
+
+    id: str
+    name: str
+    #: Short human-readable summary shown in the template gallery.
+    description: str = ""
+    #: Optional grouping label (e.g. "Personal", "Einkauf", "IT") for the
+    #: gallery; purely presentational, never validated.
+    category: str = ""
+    origin: TemplateOrigin = TemplateOrigin.USER
+    #: The self-contained schema blueprint (see the class docstring for the
+    #: invariants that ``operations.save_as_template`` enforces on it). Named
+    #: ``blueprint`` rather than ``schema`` to avoid shadowing Pydantic's
+    #: ``BaseModel.schema`` helper.
+    blueprint: ProcessSchema
+    #: Wall-clock creation time (user templates); ``None`` for built-ins.
+    created_at: datetime | None = None
+
+
 class ProcessInstance(BaseModel):
     """A running instance of a RELEASED schema (Execution Engine, step 8).
 
@@ -1012,6 +1233,20 @@ class ProcessInstance(BaseModel):
     #: a modeller/admin. Test instances are excluded from monitoring KPIs (no
     #: audit events are recorded for them) and flagged as such in the UI.
     is_test: bool = False
+    #: Wall-clock time this instance was created, used as the origin for the
+    #: process-deadline slack of the time-based worklist prioritisation
+    #: (Zeitbasierte-Priorisierung-Konzept, Section 5.2). Additive and optional:
+    #: absent on instances created before the feature; the prioritisation then
+    #: simply omits the process-slack factor.
+    started_at: datetime | None = None
+    #: Wall-clock time each node last became ready (ACTIVATED), keyed by node id.
+    #: This is the runtime clock of the time-based worklist prioritisation: the
+    #: reaction time of an open task is measured from here. Stamped at the API
+    #: boundary (mirroring the mail-notification before/after diff) rather than
+    #: inside the engine, so ``execution.py`` stays untouched. A re-activated
+    #: node (loop) overwrites its stamp, so the clock restarts. Additive: absent
+    #: entries fall back to the ``NONE`` criticality band (backward compatible).
+    node_activated_at: dict[str, datetime] = Field(default_factory=dict)
 
 
 # --- integration runtime entities (roadmap E10-E13) ----------------------
@@ -1140,4 +1375,83 @@ class WebhookDelivery(BaseModel):
     ok: bool
     status_code: int | None = None
     error: str | None = None
+
+
+class MailOutboxState(StrEnum):
+    """Delivery lifecycle of a queued e-mail notification (rule group N).
+
+    Mirrors :class:`OutboxState` for the SMTP channel: an entry is ``PENDING``
+    until a send attempt succeeds (``SENT``); a transient error puts it back to
+    ``FAILED`` for a back-off retry; once the attempt budget is spent it becomes
+    a ``DEAD`` dead-letter (never silently dropped).
+    """
+
+    PENDING = "PENDING"    # awaiting (first or retried) send
+    SENT = "SENT"          # accepted by the SMTP server
+    FAILED = "FAILED"      # transient failure, will be retried after back-off
+    DEAD = "DEAD"          # retries exhausted -> dead-letter
+
+
+class MailOutboxEntry(BaseModel):
+    """One durably-queued modelled e-mail notification (transactional outbox, N).
+
+    The durable counterpart of the best-effort :class:`~procworks.mail_runtime.
+    MailMessage`: written to the mail outbox in the same boundary step that
+    observes a task becoming ready, so a notification is never lost on a crash;
+    a dispatcher later delivers it with a back-off retry and a dead-letter.
+
+    ``dedup_key`` is the *idempotency key per activation* (instance + node +
+    activation instant, see :func:`~procworks.mail_runtime.activation_dedup_key`):
+    a given task activation is enqueued at most once, while a loop re-activation
+    (a new activation instant) yields a fresh key and thus a fresh notification.
+    The rendered ``recipients``/``subject``/``body`` are snapshotted at enqueue
+    time so a later org edit cannot change an already-queued message.
+    """
+
+    id: str
+    dedup_key: str
+    instance_id: str
+    node_id: str
+    schema_id: str
+    recipients: list[str] = Field(default_factory=list)
+    subject: str = ""
+    body: str = ""
+    state: MailOutboxState = MailOutboxState.PENDING
+    attempts: int = 0
+    max_attempts: int = 5
+    next_attempt_at: float = 0.0
+    created_at: float = 0.0
+    last_error: str | None = None
+
+
+# --- absence / deputy substitution (operational runtime state) -----------
+
+
+class AbsenceEntry(BaseModel):
+    """A recorded absence (vacation / out-of-office) of an agent for a window.
+
+    Purely **operational runtime state** -- like the activation clock stamps and
+    the mail outbox it lives *outside* the correctness model: it is never part of
+    a :class:`ProcessSchema`, carries no validator rule, and never changes how a
+    model is validated. Its only effect is at runtime, on the *concrete* eligible
+    set (:func:`procworks.assignment.eligible_agents`): while ``now`` lies within
+    ``[start_at, end_at]`` the agent's deputy (``Agent.deputy_id``) is added to
+    the worklist **in parallel** to the agent.
+
+    Crucially the agent itself is **never removed** from the eligible set by an
+    absence -- absence only *adds* the deputy. An absence therefore can never
+    leave a task without an assignee, so an unregistered deputy cannot stall an
+    instance (the safety invariant): worst case the task simply stays with the
+    (absent) agent.
+
+    ``start_at``/``end_at`` are timezone-aware instants (inclusive window);
+    ``end_at >= start_at`` is checked at the API boundary. ``note`` is an optional
+    free-text reason shown back to the agent.
+    """
+
+    id: str
+    agent_id: str
+    start_at: datetime
+    end_at: datetime
+    note: str = ""
 

@@ -144,6 +144,61 @@ def test_delete_branch_via_api_dissolves_gateway() -> None:
     assert client.get(f"/schemas/{sid}/validation").json()["correct"] is True
 
 
+def test_empty_xor_branch_via_api_and_manual_removal() -> None:
+    """Deleting an XOR branch's last activity leaves an empty branch; it is then
+    removed on demand via ``remove-empty-branch``, which dissolves the gateway."""
+
+    sid = client.post("/schemas", json={"name": "LeererZweig"}).json()["id"]
+    client.post(
+        f"/schemas/{sid}/serial-insert",
+        json={"label": "Erfassen", "after_node_id": "start"},
+    )
+    erf = next(
+        nid
+        for nid, n in client.get(f"/schemas/{sid}").json()["nodes"].items()
+        if n.get("label") == "Erfassen"
+    )
+    client.post(
+        f"/schemas/{sid}/data-elements",
+        json={"name": "betrag", "data_type": "INTEGER", "element_id": "betrag"},
+    )
+    client.post(
+        f"/schemas/{sid}/data-access",
+        json={"node_id": erf, "element_id": "betrag", "mode": "WRITE"},
+    )
+    client.post(
+        f"/schemas/{sid}/conditional-insert",
+        json={
+            "after_node_id": erf,
+            "discriminator": "betrag",
+            "branches": [{"label": "Team", "upper": 1001}, {"label": "Leitung"}],
+        },
+    )
+    schema = client.get(f"/schemas/{sid}").json()
+    team = next(nid for nid, n in schema["nodes"].items() if n.get("label") == "Team")
+    split = next(nid for nid, n in schema["nodes"].items() if n["type"] == "XOR_SPLIT")
+    join = next(nid for nid, n in schema["nodes"].items() if n["type"] == "XOR_JOIN")
+
+    # Delete the sole activity of the "Team" branch -> empty branch remains.
+    resp = client.delete(f"/schemas/{sid}/nodes/{team}")
+    assert resp.status_code == 200
+    nodes = resp.json()["nodes"]
+    assert nodes[split]["type"] == "XOR_SPLIT"  # gateway kept
+    edges = resp.json()["edges"]
+    assert any(e["source"] == split and e["target"] == join for e in edges)
+    assert client.get(f"/schemas/{sid}/validation").json()["correct"] is True
+
+    # Manually remove the empty branch -> the two-way XOR dissolves.
+    resp = client.post(f"/schemas/{sid}/nodes/{split}/remove-empty-branch")
+    assert resp.status_code == 200
+    types = {n["type"] for n in resp.json()["nodes"].values()}
+    assert "XOR_SPLIT" not in types and "XOR_JOIN" not in types
+    labels = {n.get("label") for n in resp.json()["nodes"].values() if n["type"] == "ACTIVITY"}
+    assert labels == {"Erfassen", "Leitung"}
+    assert client.get(f"/schemas/{sid}/validation").json()["correct"] is True
+
+
+
 def test_release_via_api_then_immutable() -> None:
     sid = client.post("/schemas", json={"name": "R"}).json()["id"]
     client.post(f"/schemas/{sid}/serial-insert", json={"label": "S", "after_node_id": "start"})

@@ -10,12 +10,13 @@ demo -- including the RBAC gate and the login-preservation guarantee.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 import procworks.api as api_module
-from procworks import demo
+from procworks import assignment, demo
 from procworks.api import app
 from procworks.audit import InMemoryAuditLog, compute_kpis, discover_process_map
 from procworks.auth_password import (
@@ -35,6 +36,7 @@ from procworks.model import (
     ValueClass,
 )
 from procworks.store import (
+    InMemoryAbsenceStore,
     InMemoryInstanceStore,
     InMemoryOrgStore,
     InMemorySchemaStore,
@@ -220,6 +222,72 @@ def test_demo_urlaub_showcases_mask_valueclass_priority_and_time() -> None:
     assert urlaub.node_priorities  # at least one prioritised step
     assert urlaub.time_constraints  # per-step target durations
     assert urlaub.deadline_seconds is not None
+
+
+def test_demo_urlaub_approval_uses_supervisor_of_creator() -> None:
+    # The approval is assigned by the supervisor-relative BZR (the textbook case):
+    # whoever created the request (performer of "Antrag erfassen") is approved by
+    # their supervisor -- the manager of that performer's org unit. The rule
+    # back-references the creation step (Z3 guarantees it runs first).
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = ss.get(demo.SCHEMA_URLAUB)
+    assert urlaub is not None
+    erfassen = _node_id(urlaub, "Antrag erfassen")
+    genehmigung = _node_id(urlaub, "Genehmigung durch Leitung")
+    rule = urlaub.staff_rules[genehmigung]
+    assert rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR
+    assert rule.ref == erfassen
+
+
+def test_demo_urlaub_carries_reaction_sla() -> None:
+    # target_lead_seconds (reaction SLA, measured from activation) is set on the
+    # currently-active steps so the time-based worklist prioritisation has a
+    # basis to derive its criticality bands from.
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = ss.get(demo.SCHEMA_URLAUB)
+    assert urlaub is not None
+    erfassen = _node_id(urlaub, "Antrag erfassen")
+    genehmigung = _node_id(urlaub, "Genehmigung durch Leitung")
+    assert urlaub.time_constraints[erfassen].target_lead_seconds == 1800
+    assert urlaub.time_constraints[genehmigung].target_lead_seconds == 43200
+
+
+def test_demo_seeds_active_absence_with_parallel_deputy() -> None:
+    # An absence is only seeded when an absence store is supplied. Erika is out of
+    # office for a window covering "now"; her deputy is Tom. While absent, her open
+    # task (the fresh instance still at "Antrag erfassen") is offered to Tom **in
+    # parallel** -- and Erika is never removed (the safety invariant).
+    ss, ins, orgs, log = _fresh_stores()
+    absences = InMemoryAbsenceStore()
+    demo.load_demo(
+        schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log,
+        absence_store=absences,
+    )
+
+    absent = assignment.absent_agent_ids(absences.list_entries(), datetime.now(UTC))
+    assert "a-erika" in absent
+
+    org_resolver = make_org_resolver(orgs)
+    urlaub = hydrate_org(ss.get(demo.SCHEMA_URLAUB), org_resolver)  # type: ignore[arg-type]
+    fresh = ins.get("urlaub-2026-001")
+    assert fresh is not None
+    erfassen = _node_id(urlaub, "Antrag erfassen")
+    eligible = assignment.eligible_agents(
+        urlaub, erfassen, fresh, absent_agents=frozenset(absent)
+    )
+    assert "a-erika" in eligible  # base agent never removed by an absence
+    assert "a-tom" in eligible  # deputy added in parallel during the absence
+
+
+def test_demo_without_absence_store_seeds_no_absence() -> None:
+    # The absence seeding is opt-in: the pure loader without an absence store
+    # (e.g. the existing test call sites) creates no absences.
+    ss, ins, orgs, log = _fresh_stores()
+    absences = InMemoryAbsenceStore()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    assert absences.list_entries() == []
 
 
 def test_demo_beschaffung_showcases_connector_and_staff_rules() -> None:

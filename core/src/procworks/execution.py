@@ -201,6 +201,7 @@ def complete_activity(
     *,
     agent_id: str | None = None,
     context: ExecutionContext | None = None,
+    absent_agents: frozenset[str] = frozenset(),
 ) -> ProcessInstance:
     """Complete an activated/running ACTIVITY, write its data and advance.
 
@@ -208,7 +209,9 @@ def complete_activity(
     the parent SUBPROCESS node that spawned it. When ``agent_id`` is given it is
     recorded as the performer of the node; if the node carries a staff rule the
     agent must be eligible for it (runtime Z enforcement), otherwise an
-    ExecutionError is raised.
+    ExecutionError is raised. ``absent_agents`` is the currently-absent set used
+    to admit a deputy standing in for an absent agent (see
+    :func:`procworks.assignment.eligible_agents`); empty by default.
     """
 
     _require_running(instance)
@@ -219,7 +222,9 @@ def complete_activity(
             f"(state {instance.node_states[node.id].value})"
         )
     if agent_id is not None and node_id in schema.staff_rules:
-        eligible = assignment.eligible_agents(schema, node_id, instance)
+        eligible = assignment.eligible_agents(
+            schema, node_id, instance, absent_agents=absent_agents
+        )
         if agent_id not in eligible:
             raise ExecutionError(
                 f"agent '{agent_id}' is not eligible to perform activity '{node_id}'"

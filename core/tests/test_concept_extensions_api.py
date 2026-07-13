@@ -82,6 +82,54 @@ def test_deadline_violation_returns_422() -> None:
     assert any(f["rule"] == "T2" for f in resp.json()["detail"]["findings"])
 
 
+def test_worklist_stamps_activation_and_reports_time_fields() -> None:
+    """The runtime clock of the time-based prioritisation is stamped at the API
+    boundary and the worklist reports the derived time fields (concept Z1/Z2)."""
+
+    sid, act_id = _new_schema_with_activity("ZeitPrio")
+    # a modelled reaction target time and an eligible performer
+    client.post(
+        f"/schemas/{sid}/time-constraint",
+        json={"node_id": act_id, "constraint": {"target_lead_seconds": 3600}},
+    )
+    client.post(f"/schemas/{sid}/roles", json={"name": "SB", "role_id": "sb"})
+    client.post(
+        f"/schemas/{sid}/agents",
+        json={"name": "Erika", "role_ids": ["sb"], "agent_id": "a1"},
+    )
+    client.post(
+        f"/schemas/{sid}/staff-rule",
+        json={"node_id": act_id, "rule": {"kind": "ROLE", "ref": "sb"}},
+    )
+    client.post(f"/schemas/{sid}/release")
+    iid = client.post(f"/schemas/{sid}/instances", json={}).json()["id"]
+
+    # the instance carries the stamped activation clock ...
+    instance = client.get(f"/instances/{iid}").json()
+    assert act_id in instance["node_activated_at"]
+    assert instance["started_at"] is not None
+
+    # ... and the worklist derives the (freshly activated -> ON_TRACK) band.
+    tasks = client.get(f"/instances/{iid}/tasks").json()
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task["node_id"] == act_id
+    assert task["target_seconds"] == 3600
+    assert task["time_criticality"] == "ON_TRACK"
+    assert task["remaining_seconds"] > 0
+    assert task["due_at"] is not None
+
+
+def test_negative_target_lead_seconds_rejected_by_api() -> None:
+    sid, act_id = _new_schema_with_activity("ZeitLeadFehler")
+    resp = client.post(
+        f"/schemas/{sid}/time-constraint",
+        json={"node_id": act_id, "constraint": {"target_lead_seconds": -1}},
+    )
+    assert resp.status_code == 422
+    assert any(f["rule"] == "T1" for f in resp.json()["detail"]["findings"])
+
+
 def test_kpi_flexibility_ratio() -> None:
     log = InMemoryAuditLog()
     # Instance i1 used an ad-hoc change; i2 did not.

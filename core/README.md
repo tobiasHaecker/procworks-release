@@ -290,7 +290,7 @@ Clients senden `Authorization: Bearer <token>`. `GET /auth/me` liefert die
 verifizierte Identität, `GET /me/tasks` die eigene Arbeitsliste der angemeldeten
 Person. Die handelnde Bearbeiter-Identität wird bei `complete`/`decide` aus dem
 Token abgeleitet (Impersonation-Schutz); die feingranulare BZR-Eignungsprüfung
-im Kern bleibt unverändert aktiv. Details: [Auth-Konzept.md](https://procworks.de/docs/auth-konzept.html).
+im Kern bleibt unverändert aktiv.
 
 #### Passwort-Login ohne externen IdP
 
@@ -317,8 +317,7 @@ gesalzen gehasht (keine zusätzliche Abhängigkeit), Sessions sind opake
 Bearer-Token. Admin-Verwaltung über `POST /users`,
 `POST /users/{login}/reset-password` und `DELETE /users/{login}`. Im Web-Client
 bietet die Ressourcensicht je Agent einen Button „Login" (nur Admin), der genau
-diese Provisionierung auslöst und das Initialpasswort einmalig anzeigt. Details:
-[Auth-Konzept.md](https://procworks.de/docs/auth-konzept.html) (Abschnitt 11).
+diese Provisionierung auslöst und das Initialpasswort einmalig anzeigt.
 
 ## Web-Client starten
 

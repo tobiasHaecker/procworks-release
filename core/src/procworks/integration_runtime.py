@@ -27,6 +27,7 @@ Robustness properties (concept §6.2):
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -52,6 +53,8 @@ from procworks.model import (
     value_matches_type,
 )
 from procworks.store import ExternalTaskStore, InstanceStore
+
+logger = logging.getLogger("procworks.integration")
 
 #: Default base back-off (ms) for a re-queued failure when the worker does not
 #: supply an explicit ``retry_timeout_ms``. Doubled per attempt up to the cap.
@@ -207,6 +210,10 @@ class ExternalTaskRuntime:
         now: Callable[[], float] | None = None,
         on_event: Callable[[str, dict[str, object]], None] | None = None,
         on_push: Callable[[ServiceBinding, dict[str, object]], None] | None = None,
+        on_advance: Callable[
+            [ProcessSchema, dict[str, NodeState], ProcessInstance], None
+        ]
+        | None = None,
     ) -> None:
         self._tasks = tasks
         self._instances = instances
@@ -216,6 +223,11 @@ class ExternalTaskRuntime:
         self._now = now or time.time
         self._on_event = on_event
         self._on_push = on_push
+        #: Boundary side effects of an engine advance (activation stamping, mail
+        #: notification, push drive, persistence). Fired after a completing task
+        #: advances the instance, so a task that becomes ready via the external
+        #: path is notified exactly like the human mainline (mail concept §10.7).
+        self._on_advance = on_advance
 
     def _emit(self, event_type: str, **data: object) -> None:
         """Forward a domain event to the optional sink (event side, E13).
@@ -507,6 +519,7 @@ class ExternalTaskRuntime:
                 f"instance '{task.instance_id}' of task '{task_id}' is gone", 409
             )
         schema = self._schema_for(instance)
+        before_states = dict(instance.node_states)
         binding = schema.service_bindings.get(task.node_id)
         instance_out, external_out, scalar_out = _resolve_outputs(
             schema, task.node_id, binding, variables
@@ -555,6 +568,16 @@ class ExternalTaskRuntime:
             node_id=task.node_id,
             topic=task.topic,
         )
+        if self._on_advance is not None:
+            # Notify/stamp/push for any task the completion just made ready. This
+            # is a best-effort boundary observer; a failure here must never undo
+            # the (exactly-once) completion, so it is swallowed (stability > mail).
+            try:
+                self._on_advance(schema, before_states, advanced)
+            except Exception:  # noqa: BLE001 -- observer must not break completion
+                logger.exception(
+                    "post-completion advance hook failed for task %s", task.id
+                )
         return stored
 
     def failure(

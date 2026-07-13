@@ -393,8 +393,7 @@ New-NetFirewallRule -DisplayName "ProcWorks HTTPS" -Direction Inbound -Protocol 
 
 ## Weiterführend
 
-- Auth-/Login-Konzept im Detail: [`docs/Auth-Konzept.md`](https://procworks.de/docs/auth-konzept.html)
-  (Abschnitt 11: Passwort-Login).
-- Konfigurationsvariablen und Betriebshinweise: [`core/README.md`](../core/README.md),
-  [`SECURITY.md`](../SECURITY.md).
+- Passwort-Login, Rollen und Betriebshinweise im Detail:
+  [`core/README.md`](../core/README.md) (Abschnitt „Passwort-Login ohne externen
+  IdP"), [`SECURITY.md`](../SECURITY.md).
 </content>

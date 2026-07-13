@@ -22,6 +22,7 @@ from procworks.model import (
     SPLIT_TYPES,
     STAFF_COMBINATOR_KINDS,
     STAFF_LEAF_KINDS,
+    STAFF_NODE_REF_KINDS,
     WRITE_MODES,
     ActivityTemplate,
     AggregateKind,
@@ -32,6 +33,8 @@ from procworks.model import (
     FilterOperator,
     FollowUpTrigger,
     LifecycleState,
+    MailBinding,
+    MailRecipientMode,
     NodeType,
     OrgModel,
     ProcessSchema,
@@ -45,6 +48,8 @@ from procworks.model import (
     XorDecisionKind,
     aggregate_result_type,
     discriminator_kind,
+    is_valid_email,
+    template_placeholders,
     widget_matches_type,
 )
 
@@ -104,6 +109,7 @@ def validate(
     findings += _check_integration(schema)
     findings += _check_composition(schema, resolver)
     findings += _check_temporal(schema)
+    findings += _check_mail(schema)
     return findings
 
 
@@ -232,6 +238,22 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
             fail("branch targets do not match the split's outgoing edges", split_id)
         if len(decision.branches) < 2:
             fail("an XOR split needs at least two branches", split_id)
+
+        # An *empty* branch is a direct split -> join edge (its body was deleted
+        # but its partition cell is kept). At most one is allowed: the runtime
+        # keys edges by source+target, so two empty branches would collide on the
+        # same split -> join edge. This also guarantees at least one non-empty
+        # branch survives (a split with >= 2 branches can be at most all-but-one
+        # empty). Enforced here as the No-Bypass backstop for every path (edit,
+        # BPMN import, ad-hoc, migration).
+        empty_branches = [
+            b
+            for b in decision.branches
+            if (target := schema.nodes.get(b.target)) is not None
+            and target.type is NodeType.XOR_JOIN
+        ]
+        if len(empty_branches) > 1:
+            fail("an XOR split may carry at most one empty branch", split_id)
 
         element = schema.data_elements.get(decision.discriminator)
         if element is None:
@@ -1410,12 +1432,16 @@ def _check_staff_ref(
         return [
             ValidationFinding(rule="Z1", node_id=node_id, message=f"unknown org unit '{ref}'")
         ]
-    if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT and ref not in schema.nodes:
+    if rule.kind is StaffRuleKind.AGENT and ref not in org.agents:
+        return [
+            ValidationFinding(rule="Z1", node_id=node_id, message=f"unknown agent '{ref}'")
+        ]
+    if rule.kind in STAFF_NODE_REF_KINDS and ref not in schema.nodes:
         return [
             ValidationFinding(
                 rule="Z1",
                 node_id=node_id,
-                message=f"NodePerformingAgent references unknown node '{ref}'",
+                message=f"{rule.kind.value} references unknown node '{ref}'",
             )
         ]
     return []
@@ -1696,8 +1722,20 @@ def _possible_agents(org: OrgModel, rule: StaffRule) -> set[str] | None:
     if rule.kind is StaffRuleKind.ORG_UNIT:
         units = {rule.ref} | _descendant_units(org, rule.ref, rule.recursive)
         return {a.id for a in org.agents.values() if a.org_unit_id in units}
+    if rule.kind is StaffRuleKind.AGENT:
+        # A single named agent: the bound is exactly that agent (empty if the
+        # agent is unknown, which also makes Z2 flag it as unsatisfiable).
+        return {rule.ref} if rule.ref in org.agents else set()
     if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT:
         return None  # universe: resolved at runtime
+    if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR:
+        # The resolved supervisor is always the manager of *some* org unit, so
+        # the set of all org-unit managers is a safe (bounded) over-approximation.
+        # An empty bound (no unit has a manager) means the rule can never resolve
+        # -> Z2 rejects it; a bounded set also lets N3 check every recipient.
+        return {
+            u.manager_id for u in org.org_units.values() if u.manager_id is not None
+        }
     operand_sets = [_possible_agents(org, op) for op in rule.operands]
     if rule.kind is StaffRuleKind.AND:
         return _intersect_bounds(operand_sets)
@@ -1761,12 +1799,301 @@ def _check_z3_backrefs(schema: ProcessSchema) -> list[ValidationFinding]:
 
 
 def _node_refs(rule: StaffRule) -> set[str]:
-    if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT and rule.ref is not None:
+    if rule.kind in STAFF_NODE_REF_KINDS and rule.ref is not None:
         return {rule.ref}
     refs: set[str] = set()
     for operand in rule.operands:
         refs |= _node_refs(operand)
     return refs
+
+
+# --- N1-N4: modelled e-mail notification ---------------------------------
+
+
+def _check_mail(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Rule group N -- correctness of modelled e-mail notifications.
+
+    Silent unless the org model carries addresses or a node carries a
+    ``MailBinding`` (fully additive, like the temporal group). Enforces:
+
+    * N1 -- every address in the org master data is well-formed;
+    * N2 -- a mail binding sits on an ACTIVITY that carries a staff rule (BZR);
+    * N3 -- for the binding's mode, *every* address that could ever be needed
+      exists (per-agent: every possibly-eligible agent incl. deputies has an
+      ``email``; group: every addressed role/unit has a ``mailbox``);
+    * N4 -- every ``{element_id}`` placeholder in subject/body refers to an
+      INSTANCE data element guaranteed written before the node.
+
+    N3 is the correctness heart of the feature: because it runs before every
+    commit -- and the API re-runs the whole validator for every schema that
+    references a shared org model on each org edit -- a notification can never
+    reach a state in which a possible recipient has no address.
+    """
+
+    findings = _check_n1_addresses(schema.org_model)
+    if not schema.mail_bindings:
+        return findings
+    # ``_must_written_before`` needs an intact control graph (like D1/D2); when
+    # the structure is broken we still check placeholder existence/scope (N4) but
+    # skip the "guaranteed written" part until the structure is fixed.
+    before = None if _structure_broken(schema) else _must_written_before(schema)
+    for node_id, binding in schema.mail_bindings.items():
+        findings += _check_mail_binding(schema, node_id, binding, before)
+    return findings
+
+
+def _check_n1_addresses(org: OrgModel) -> list[ValidationFinding]:
+    """N1: every address set in the org master data is syntactically valid."""
+
+    findings: list[ValidationFinding] = []
+    for agent in org.agents.values():
+        if agent.email is not None and not is_valid_email(agent.email):
+            findings.append(
+                ValidationFinding(
+                    rule="N1",
+                    message=f"agent '{agent.id}' has a malformed e-mail address",
+                )
+            )
+    for role in org.roles.values():
+        if role.mailbox is not None and not is_valid_email(role.mailbox):
+            findings.append(
+                ValidationFinding(
+                    rule="N1",
+                    message=f"role '{role.id}' has a malformed group mailbox",
+                )
+            )
+    for unit in org.org_units.values():
+        if unit.mailbox is not None and not is_valid_email(unit.mailbox):
+            findings.append(
+                ValidationFinding(
+                    rule="N1",
+                    message=f"org unit '{unit.id}' has a malformed mailbox",
+                )
+            )
+    return findings
+
+
+def _check_mail_binding(
+    schema: ProcessSchema,
+    node_id: str,
+    binding: MailBinding,
+    before: dict[str, set[str]] | None,
+) -> list[ValidationFinding]:
+    """N2-N4 for a single mail binding."""
+
+    # N2: the binding must sit on an ACTIVITY that has a staff rule -- only an
+    # interactive step has an assignee to notify.
+    node = schema.nodes.get(node_id)
+    if node is None:
+        return [
+            ValidationFinding(
+                rule="N2", node_id=node_id, message="mail binding on unknown node"
+            )
+        ]
+    if node.type is not NodeType.ACTIVITY:
+        return [
+            ValidationFinding(
+                rule="N2",
+                node_id=node_id,
+                message="mail notifications are only allowed on ACTIVITY nodes",
+            )
+        ]
+    rule = schema.staff_rules.get(node_id)
+    if rule is None:
+        return [
+            ValidationFinding(
+                rule="N2",
+                node_id=node_id,
+                message=(
+                    "mail notification requires a staff rule (BZR) on the node -- "
+                    "there is no assignee to address"
+                ),
+            )
+        ]
+    findings = _check_n3_addresses(schema.org_model, node_id, binding, rule)
+    findings += _check_n4_template(schema, node_id, binding, before)
+    return findings
+
+
+def _check_n3_addresses(
+    org: OrgModel, node_id: str, binding: MailBinding, rule: StaffRule
+) -> list[ValidationFinding]:
+    """N3: every address the binding could ever need is present in the org."""
+
+    findings: list[ValidationFinding] = []
+    if binding.mode is MailRecipientMode.TO_ELIGIBLE_AGENTS:
+        possible = _possible_agents(org, rule)
+        if possible is None:
+            # The rule depends on a prior node's performer (universe); the
+            # recipient set is not statically bounded, so we cannot guarantee
+            # every recipient has an address. CbC therefore forbids per-agent
+            # notification here (the group-mailbox mode stays available).
+            return [
+                ValidationFinding(
+                    rule="N3",
+                    node_id=node_id,
+                    message=(
+                        "recipient set is not statically determinable (the staff "
+                        "rule depends on a prior node's performer); a per-agent mail "
+                        "notification cannot be modelled here -- use a group mailbox"
+                    ),
+                )
+            ]
+        recipients = _with_deputies(org, possible) if binding.include_deputies else possible
+        for agent_id in sorted(recipients):
+            agent = org.agents.get(agent_id)
+            if agent is None or not (agent.email or "").strip():
+                who = agent.name if agent is not None else agent_id
+                findings.append(
+                    ValidationFinding(
+                        rule="N3",
+                        node_id=node_id,
+                        message=f"possible assignee '{who}' has no e-mail address",
+                    )
+                )
+        return findings
+
+    # TO_GROUP_MAILBOX: every addressed role/unit must carry a mailbox.
+    groups = _group_refs(rule)
+    if not groups:
+        findings.append(
+            ValidationFinding(
+                rule="N3",
+                node_id=node_id,
+                message=(
+                    "staff rule addresses no role or org unit, so there is no group "
+                    "mailbox to notify"
+                ),
+            )
+        )
+    for kind, ref in groups:
+        if kind is StaffRuleKind.ROLE:
+            role = org.roles.get(ref)
+            if role is None or not (role.mailbox or "").strip():
+                findings.append(
+                    ValidationFinding(
+                        rule="N3", node_id=node_id, message=f"role '{ref}' has no group mailbox"
+                    )
+                )
+        else:
+            unit = org.org_units.get(ref)
+            if unit is None or not (unit.mailbox or "").strip():
+                findings.append(
+                    ValidationFinding(
+                        rule="N3", node_id=node_id, message=f"org unit '{ref}' has no mailbox"
+                    )
+                )
+    if _node_refs(rule):
+        findings.append(
+            ValidationFinding(
+                rule="N3",
+                node_id=node_id,
+                message=(
+                    "staff rule includes a prior-node performer, which has no group "
+                    "mailbox; use the per-agent mode for it"
+                ),
+            )
+        )
+    return findings
+
+
+def _check_n4_template(
+    schema: ProcessSchema,
+    node_id: str,
+    binding: MailBinding,
+    before: dict[str, set[str]] | None,
+) -> list[ValidationFinding]:
+    """N4: every template placeholder resolves to an available INSTANCE element."""
+
+    findings: list[ValidationFinding] = []
+    available = None if before is None else before.get(node_id, set())
+    for field, text in (("subject", binding.subject), ("body", binding.body)):
+        for ref in template_placeholders(text):
+            element = schema.data_elements.get(ref)
+            if element is None:
+                findings.append(
+                    ValidationFinding(
+                        rule="N4",
+                        node_id=node_id,
+                        message=(
+                            f"{field} placeholder '{{{ref}}}' refers to unknown data "
+                            f"element '{ref}'"
+                        ),
+                    )
+                )
+                continue
+            if element.source is not DataSourceKind.INSTANCE:
+                findings.append(
+                    ValidationFinding(
+                        rule="N4",
+                        node_id=node_id,
+                        message=(
+                            f"{field} placeholder '{{{ref}}}' refers to a non-INSTANCE data "
+                            f"element that is not available in the mail text"
+                        ),
+                    )
+                )
+                continue
+            if available is not None and ref not in available:
+                findings.append(
+                    ValidationFinding(
+                        rule="N4",
+                        node_id=node_id,
+                        message=(
+                            f"{field} placeholder '{{{ref}}}' is not guaranteed to be set "
+                            f"when this task becomes ready"
+                        ),
+                    )
+                )
+    return findings
+
+
+def _with_deputies(org: OrgModel, base: set[str]) -> set[str]:
+    """Extend an agent set by deputies, following the chain transitively (N3).
+
+    Mirrors the runtime resolution in :mod:`procworks.assignment`: whenever an
+    agent is eligible, so is its deputy. Kept local so the validator stays
+    self-contained (like ``_descendant_units``).
+    """
+
+    result = set(base)
+    frontier = list(base)
+    while frontier:
+        agent = org.agents.get(frontier.pop())
+        if agent is None or agent.deputy_id is None:
+            continue
+        if agent.deputy_id not in result:
+            result.add(agent.deputy_id)
+            frontier.append(agent.deputy_id)
+    return result
+
+
+def _group_refs(
+    rule: StaffRule, *, positive: bool = True
+) -> list[tuple[StaffRuleKind, str]]:
+    """Collect the (kind, ref) of every role/unit the rule *positively* addresses.
+
+    Group-mailbox notification targets named groups. An ``EXCEPT`` right operand
+    subtracts agents, so those groups are *not* notified -- they are skipped.
+    Duplicates are removed while preserving order.
+    """
+
+    refs: list[tuple[StaffRuleKind, str]] = []
+    if rule.kind in (StaffRuleKind.ROLE, StaffRuleKind.ORG_UNIT) and rule.ref is not None:
+        if positive:
+            refs.append((rule.kind, rule.ref))
+    elif rule.kind is StaffRuleKind.EXCEPT:
+        if rule.operands:
+            refs += _group_refs(rule.operands[0], positive=positive)
+        for operand in rule.operands[1:]:
+            refs += _group_refs(operand, positive=False)
+    else:  # AND / OR
+        for operand in rule.operands:
+            refs += _group_refs(operand, positive=positive)
+    seen: dict[tuple[StaffRuleKind, str], None] = {}
+    for item in refs:
+        seen.setdefault(item, None)
+    return list(seen)
 
 
 # --- H1-H4 / F1-F3: composition (sub- and follow-up processes) -----------
@@ -2105,6 +2432,18 @@ def _check_temporal(schema: ProcessSchema) -> list[ValidationFinding]:
                     message=(
                         f"max_duration_seconds of '{node_id}' must be >= 0, "
                         f"got {duration}"
+                    ),
+                    node_id=node_id,
+                )
+            )
+        lead = constraint.target_lead_seconds
+        if lead is not None and lead < 0:
+            findings.append(
+                ValidationFinding(
+                    rule="T1",
+                    message=(
+                        f"target_lead_seconds of '{node_id}' must be >= 0, "
+                        f"got {lead}"
                     ),
                     node_id=node_id,
                 )

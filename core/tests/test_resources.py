@@ -169,6 +169,79 @@ def test_except_rule_upper_bound_resolvable():
     assert validate(schema) == []
 
 
+def test_agent_rule_pins_a_single_agent():
+    """A staff rule can name a concrete agent (AGENT leaf)."""
+    schema = create_empty_schema("Explicit", schema_id="explicit")
+    schema = serial_insert(schema, "Bearbeiten", after_node_id="start")
+    act = _activity_ids(schema, "Bearbeiten")[0]
+    schema = add_agent(schema, "Erika", agent_id="a1")
+    schema = assign_staff_rule(schema, act, StaffRule(kind=StaffRuleKind.AGENT, ref="a1"))
+    assert validate(schema) == []
+
+
+def test_z1_rejects_unknown_agent_in_rule():
+    schema = create_empty_schema("BadAgent", schema_id="badagent")
+    schema = serial_insert(schema, "Bearbeiten", after_node_id="start")
+    act = _activity_ids(schema, "Bearbeiten")[0]
+    with pytest.raises(CorrectnessError) as exc:
+        assign_staff_rule(schema, act, StaffRule(kind=StaffRuleKind.AGENT, ref="ghost"))
+    assert any(f.rule == "Z1" for f in exc.value.findings)
+
+
+def test_supervisor_relative_rule_is_correct():
+    """The supervisor of a prior step's performer can approve (e.g. a vacation
+    request created earlier)."""
+    schema = create_empty_schema("Urlaub", schema_id="urlaub")
+    schema = serial_insert(schema, "Antrag stellen", after_node_id="start")
+    antrag = _activity_ids(schema, "Antrag stellen")[0]
+    schema = serial_insert(schema, "Genehmigen", after_node_id=antrag)
+    genehmigen = _activity_ids(schema, "Genehmigen")[0]
+
+    schema = add_agent(schema, "Chef", agent_id="chef")
+    schema = add_org_unit(schema, "Team", org_unit_id="team", manager_id="chef")
+    schema = add_agent(schema, "Antragsteller", org_unit_id="team", agent_id="mit")
+    schema = assign_staff_rule(schema, antrag, StaffRule(kind=StaffRuleKind.AGENT, ref="mit"))
+    schema = assign_staff_rule(
+        schema,
+        genehmigen,
+        StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR, ref=antrag),
+    )
+    assert validate(schema) == []
+
+
+def test_z2_rejects_supervisor_rule_without_any_manager():
+    """No org unit has a manager -> the supervisor-relative rule can never
+    resolve (Z2)."""
+    schema = create_empty_schema("NoMgr", schema_id="nomgr")
+    schema = serial_insert(schema, "Antrag", after_node_id="start")
+    antrag = _activity_ids(schema, "Antrag")[0]
+    schema = serial_insert(schema, "Genehmigen", after_node_id=antrag)
+    genehmigen = _activity_ids(schema, "Genehmigen")[0]
+    schema = add_org_unit(schema, "Team", org_unit_id="team")
+    schema = add_agent(schema, "Mit", org_unit_id="team", agent_id="mit")
+    schema = assign_staff_rule(schema, antrag, StaffRule(kind=StaffRuleKind.AGENT, ref="mit"))
+    with pytest.raises(CorrectnessError) as exc:
+        assign_staff_rule(
+            schema,
+            genehmigen,
+            StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR, ref=antrag),
+        )
+    assert any(f.rule == "Z2" for f in exc.value.findings)
+
+
+def test_z3_rejects_supervisor_backref_not_guaranteed_before():
+    schema = create_empty_schema("SupZ3", schema_id="supz3")
+    schema = parallel_insert(schema, ["Zweig 1", "Zweig 2"], after_node_id="start")
+    b1 = _activity_ids(schema, "Zweig 1")[0]
+    b2 = _activity_ids(schema, "Zweig 2")[0]
+    schema = add_agent(schema, "Chef", agent_id="chef")
+    schema = add_org_unit(schema, "Team", org_unit_id="team", manager_id="chef")
+    rule = StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR, ref=b1)
+    with pytest.raises(CorrectnessError) as exc:
+        assign_staff_rule(schema, b2, rule)
+    assert any(f.rule == "Z3" for f in exc.value.findings)
+
+
 def test_update_agent_changes_name_roles_and_unit():
     schema = create_empty_schema("Update", schema_id="upd")
     schema = add_role(schema, "Sachbearbeiter", role_id="sb")

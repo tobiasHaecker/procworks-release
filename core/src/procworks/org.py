@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import itertools
 
-from procworks.model import Agent, OrgModel, OrgUnit, Role
+from procworks.model import Agent, OrgModel, OrgUnit, Role, is_valid_email
 from procworks.validator import CorrectnessError, ValidationFinding
 
 _counter = itertools.count(1)
@@ -47,13 +47,16 @@ KEEP = _KeepSentinel()
 def validate_org(org: OrgModel) -> list[ValidationFinding]:
     """Check the internal referential integrity of a shared org model.
 
-    Mirrors the org master-data rules the schema validator applies (rule
-    ``Z1``): agents reference existing roles / units / deputies, units
-    reference existing managers / parents, no agent is its own deputy, and the
-    unit hierarchy is acyclic.
+    Mirrors the org master-data rules the schema validator applies (rules
+    ``Z1`` and ``N1``): agents reference existing roles / units / deputies,
+    units reference existing managers / parents, no agent is its own deputy, the
+    unit hierarchy is acyclic, and every e-mail address / group mailbox is
+    syntactically well-formed (N1) -- so a malformed address can never be stored
+    on a shared org model either.
     """
 
     findings: list[ValidationFinding] = []
+    findings += _check_addresses(org)
     for agent in org.agents.values():
         for role_id in agent.role_ids:
             if role_id not in org.roles:
@@ -100,6 +103,34 @@ def validate_org(org: OrgModel) -> list[ValidationFinding]:
                 )
             )
     findings += _check_hierarchy_acyclic(org)
+    return findings
+
+
+def _check_addresses(org: OrgModel) -> list[ValidationFinding]:
+    """N1: every e-mail address / group mailbox on the org model is well-formed."""
+
+    findings: list[ValidationFinding] = []
+    for agent in org.agents.values():
+        if agent.email is not None and not is_valid_email(agent.email):
+            findings.append(
+                ValidationFinding(
+                    rule="N1", message=f"agent '{agent.id}' has a malformed e-mail address"
+                )
+            )
+    for role in org.roles.values():
+        if role.mailbox is not None and not is_valid_email(role.mailbox):
+            findings.append(
+                ValidationFinding(
+                    rule="N1", message=f"role '{role.id}' has a malformed group mailbox"
+                )
+            )
+    for unit in org.org_units.values():
+        if unit.mailbox is not None and not is_valid_email(unit.mailbox):
+            findings.append(
+                ValidationFinding(
+                    rule="N1", message=f"org unit '{unit.id}' has a malformed mailbox"
+                )
+            )
     return findings
 
 
@@ -184,6 +215,7 @@ def org_add_agent(
     org_unit_id: str | None = None,
     agent_id: str | None = None,
     deputy_id: str | None = None,
+    email: str | None = None,
 ) -> OrgModel:
     candidate = org.model_copy(deep=True)
     aid = agent_id or _new_id("agent")
@@ -202,6 +234,7 @@ def org_add_agent(
         role_ids=list(role_ids or []),
         org_unit_id=org_unit_id,
         deputy_id=deputy_id,
+        email=email,
     )
     return raise_if_invalid_org(candidate)
 
@@ -213,6 +246,7 @@ def org_update_agent(
     name: str | None = None,
     role_ids: list[str] | None = None,
     org_unit_id: str | None | _KeepSentinel = KEEP,
+    email: str | None | _KeepSentinel = KEEP,
 ) -> OrgModel:
     candidate = org.model_copy(deep=True)
     agent = candidate.agents.get(agent_id)
@@ -229,6 +263,10 @@ def org_update_agent(
         if org_unit_id is not None and org_unit_id not in candidate.org_units:
             raise _fail(f"org unit '{org_unit_id}' does not exist")
         agent.org_unit_id = org_unit_id
+    if not isinstance(email, _KeepSentinel):
+        # ``None`` clears the address; a value is checked for well-formedness by
+        # the validator (N1) before commit.
+        agent.email = email
     return raise_if_invalid_org(candidate)
 
 
@@ -273,4 +311,35 @@ def org_set_deputy(org: OrgModel, agent_id: str, deputy_id: str | None) -> OrgMo
         if deputy_id not in candidate.agents:
             raise _fail(f"deputy '{deputy_id}' does not exist")
     agent.deputy_id = deputy_id
+    return raise_if_invalid_org(candidate)
+
+
+def org_set_role_mailbox(org: OrgModel, role_id: str, mailbox: str | None) -> OrgModel:
+    """Set (or clear with ``None``) a role's shared group mailbox (rule group N).
+
+    The address is checked for well-formedness (N1) before commit; a malformed
+    address is rejected. Used as the target of a ``TO_GROUP_MAILBOX`` mail
+    notification addressed to this role.
+    """
+
+    candidate = org.model_copy(deep=True)
+    role = candidate.roles.get(role_id)
+    if role is None:
+        raise _fail(f"role '{role_id}' does not exist")
+    role.mailbox = mailbox
+    return raise_if_invalid_org(candidate)
+
+
+def org_set_unit_mailbox(org: OrgModel, org_unit_id: str, mailbox: str | None) -> OrgModel:
+    """Set (or clear with ``None``) an org unit's department mailbox (rule group N).
+
+    The address is checked for well-formedness (N1) before commit. Used as the
+    target of a ``TO_GROUP_MAILBOX`` mail notification addressed to this unit.
+    """
+
+    candidate = org.model_copy(deep=True)
+    unit = candidate.org_units.get(org_unit_id)
+    if unit is None:
+        raise _fail(f"org unit '{org_unit_id}' does not exist")
+    unit.mailbox = mailbox
     return raise_if_invalid_org(candidate)

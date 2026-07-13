@@ -5,8 +5,8 @@ description: |
   the stateless API server plus the web GUI / reverse proxy. PostgreSQL is
   provided externally and referenced via a DATABASE_URL secret.
 type: application
-version: 1.2.0
-appVersion: "1.2.0"
+version: 1.3.0
+appVersion: "1.3.0"
 keywords:
   - bpm
   - process-engine

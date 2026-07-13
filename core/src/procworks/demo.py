@@ -8,6 +8,14 @@ processes (one *released*, one *draft*), three running/finished instances at
 different points, process variables and -- in password mode -- a handful of
 ready-to-use logins.
 
+The released leave-request process also exercises the newer runtime features so
+their views are not empty on a fresh reset: the approval step uses the
+supervisor-relative staff rule (the manager of the request creator approves it),
+the currently-active steps carry a reaction SLA (``target_lead_seconds``, the
+basis of the time-based worklist prioritisation) and -- when an absence store is
+supplied -- one agent (Erika) is seeded absent with a deputy (Tom), so the
+absence-gated, parallel deputy substitution is visible out of the box.
+
 The data is built exclusively through the public operations (the same
 validate-before-commit path every client uses), so the demo can never create an
 incorrect schema. Loading is wired to ``POST /admin/reset`` (admin only); the
@@ -15,6 +23,8 @@ same endpoint also wipes everything back to an empty system.
 """
 
 from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
 
 from procworks import execution as exe
 from procworks import operations as ops
@@ -26,6 +36,7 @@ from procworks.auth_password import (
     hash_password,
 )
 from procworks.model import (
+    AbsenceEntry,
     AccessMode,
     Cardinality,
     ConnectorKind,
@@ -46,6 +57,7 @@ from procworks.model import (
     WorkItemPriority,
 )
 from procworks.store import (
+    AbsenceStore,
     InstanceStore,
     OrgStore,
     SchemaStore,
@@ -129,6 +141,12 @@ def _build_org() -> OrgModel:
     org = org_ops.org_set_manager(org, "leitung", "a-sabine")
     org = org_ops.org_set_manager(org, "vertrieb", "a-tom")
     org = org_ops.org_set_manager(org, "einkauf-abt", "a-paul")
+    # Erika Sander hat selbst eine Vertretung (Tom Berger). Zusammen mit der unten
+    # geseedeten aktiven Abwesenheit macht das die abwesenheitsgesteuerte, parallele
+    # Substitution im Demo sichtbar: waehrend Erikas Urlaub erscheinen ihre offenen
+    # Aufgaben zusaetzlich bei Tom, ohne je aus Erikas Liste zu verschwinden. Der
+    # Vertreter wird erst hier gesetzt, weil er (Tom) als Agent existieren muss (Z1).
+    org = org_ops.org_set_deputy(org, "a-erika", "a-tom")
     return org
 
 
@@ -177,7 +195,17 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
     s = ops.link_org_model(s, ORG_ID, org)
     s = ops.assign_staff_rule(s, erfassen, _role("sachbearbeiter"))
     s = ops.assign_staff_rule(s, pruefen, _role("sachbearbeiter"))
-    s = ops.assign_staff_rule(s, _nid(s, "Genehmigung durch Leitung"), _role("teamleitung"))
+    # Vorgesetzten-BZR (Z1-Z3, relativ zum Ausfuehrer): den Antrag genehmigt die
+    # vorgesetzte Person der/des Erfassenden -- der Manager der Organisationseinheit,
+    # in der "Antrag erfassen" ausgefuehrt wurde (der Lehrbuch-Fall). Der Bezugsknoten
+    # laeuft garantiert vorher (Z3) und mindestens eine vorgesetzte Person ist gepflegt
+    # (Z2: die moeglichen Erfasser sitzen im Vertrieb, dessen Manager Tom Berger ist),
+    # sonst wiese der Kern die Zuordnung ab.
+    s = ops.assign_staff_rule(
+        s,
+        _nid(s, "Genehmigung durch Leitung"),
+        StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR, ref=erfassen),
+    )
     s = ops.assign_staff_rule(s, _nid(s, "Ablehnung dokumentieren"), _role("sachbearbeiter"))
     s = ops.assign_staff_rule(s, _nid(s, "Mitarbeiter benachrichtigen"), _role("sachbearbeiter"))
 
@@ -225,13 +253,24 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
         WorkItemPriority(impact=ImpactUrgency.HIGH, urgency=ImpactUrgency.HIGH),
     )
 
-    # Temporal perspective (E5, T1/T2 static): per-step target durations and a
-    # process deadline. The critical path (erfassen + pruefen + longest branch +
-    # benachrichtigen) must fit the deadline, which the validator checks (T2).
-    s = ops.set_time_constraint(s, erfassen, TimeConstraint(max_duration_seconds=3600))
-    s = ops.set_time_constraint(s, pruefen, TimeConstraint(max_duration_seconds=7200))
+    # Temporal perspective (E5, T1/T2 static): per-step target durations, an
+    # optional *reaction* SLA (``target_lead_seconds``, measured from activation)
+    # and a process deadline. The reaction SLA is what the time-based worklist
+    # prioritisation reads to derive the criticality bands (the "Faellig" column);
+    # T1 only checks it is >= 0. The critical path (erfassen + pruefen + longest
+    # branch + benachrichtigen) must fit the deadline, which the validator checks
+    # (T2). The two currently-active steps in the seeded instances (erfassen,
+    # Genehmigung) carry a reaction SLA so their worklist bands are populated.
     s = ops.set_time_constraint(
-        s, _nid(s, "Genehmigung durch Leitung"), TimeConstraint(max_duration_seconds=86400)
+        s, erfassen, TimeConstraint(max_duration_seconds=3600, target_lead_seconds=1800)
+    )
+    s = ops.set_time_constraint(
+        s, pruefen, TimeConstraint(max_duration_seconds=7200, target_lead_seconds=3600)
+    )
+    s = ops.set_time_constraint(
+        s,
+        _nid(s, "Genehmigung durch Leitung"),
+        TimeConstraint(max_duration_seconds=86400, target_lead_seconds=43200),
     )
     s = ops.set_time_constraint(
         s, _nid(s, "Ablehnung dokumentieren"), TimeConstraint(max_duration_seconds=3600)
@@ -469,6 +508,35 @@ def _seed_instances(
     _complete(schema, i3, benachrichtigen, ctx, audit, agent_id="a-erika")
 
 
+def _seed_absences(absence_store: AbsenceStore) -> None:
+    """Seed one *currently active* absence so the deputy substitution is live.
+
+    Erika Sander (``a-erika``) is on vacation for a window that spans "now"; her
+    registered deputy is Tom Berger (set in :func:`_build_org`). While the window
+    covers the wall clock, Erika's open tasks -- e.g. capturing the first, freshly
+    started leave request (instance ``urlaub-2026-001`` still waiting at "Antrag
+    erfassen") -- appear **in parallel** on Tom's worklist, without ever leaving
+    Erika's own. Logging in as ``tom.berger`` therefore shows a task that is
+    really Erika's, which is exactly the point of the feature. The window is
+    anchored to load time (like the audit timestamps), so the demo stays "current"
+    whenever it is reset.
+
+    Purely operational runtime state -- it lives outside the correctness model and
+    never changes how any schema validates (see :class:`AbsenceEntry`).
+    """
+
+    now = datetime.now(UTC)
+    absence_store.put_entry(
+        AbsenceEntry(
+            id="abs-demo-erika",
+            agent_id="a-erika",
+            start_at=now - timedelta(days=1),
+            end_at=now + timedelta(days=6),
+            note="Jahresurlaub",
+        )
+    )
+
+
 class _NoopSchemaStore:
     """A throwaway empty schema store for the instance execution context.
 
@@ -520,13 +588,16 @@ def load_demo(
     org_store: OrgStore,
     audit_log: AuditLog,
     password_backend: PasswordAuthBackend | None = None,
+    absence_store: AbsenceStore | None = None,
 ) -> int:
     """Populate the stores with the demo world; returns the seeded-user count.
 
     Call this on an already-empty system (the admin reset clears first). The
     shared org, both schemas and the three instances are always created; demo
     logins are only seeded when password login is active (otherwise the open
-    dev mode already grants every role and needs no users).
+    dev mode already grants every role and needs no users). When an
+    ``absence_store`` is given, one active absence is seeded as well so the
+    deputy substitution is visible out of the box (see :func:`_seed_absences`).
     """
 
     org = _build_org()
@@ -538,6 +609,9 @@ def load_demo(
     schema_store.put(dehydrate_org(beschaffung))
 
     _seed_instances(urlaub, instance_store, audit_log)
+
+    if absence_store is not None:
+        _seed_absences(absence_store)
 
     if password_backend is not None:
         return _seed_users(password_backend)

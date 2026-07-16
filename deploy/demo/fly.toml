@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: BUSL-1.1
+#
+# Fly.io Machines configuration for ONE throw-away demo instance.
+#
+# The demo broker (see broker/) creates one Machine per visitor from this app's
+# image via the Machines API; this file is the reference shape for that image
+# and a manual `fly deploy`. Scale-to-zero + per-second billing give ~0 EUR at
+# rest (Leitplanke L1). EU region for the "hosted in the EU" expectation.
+#
+# Build/deploy from the repository root:
+#   fly deploy --config deploy/demo/fly.toml --dockerfile deploy/demo/Dockerfile
+#
+# NOTE: Fly's config schema evolves -- verify field names/values against the
+# current `fly.toml` reference before relying on this in production.
+
+app = "procworks-demo"
+primary_region = "fra"          # Frankfurt (EU); "ams" is an alternative.
+
+  # dockerfile path is resolved relative to THIS config file's directory.
+[build]
+  dockerfile = "Dockerfile"
+
+# The demo image already bakes in its runtime env (see the Dockerfile). These
+# are repeated here only to make the demo posture explicit at the platform.
+[env]
+  PROCWORKS_LOAD_DEMO = "1"
+  PROCWORKS_WEB_DIR = "/app/web"
+  PROCWORKS_AUTH = "password"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Scale-to-zero: stop on idle, auto-start on the next request. min = 0 keeps
+  # a stopped instance at ~0 EUR. A re-started instance boots fresh (in-memory,
+  # re-seeded) -- acceptable and even desired for a throw-away demo.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 50
+    soft_limit = 25
+
+# Small, capped Micro-VM (DoS/cost containment, Leitplanke L5/L6).
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Platform-side liveness/readiness check against the public /health endpoint.
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "20s"
+  method = "get"
+  path = "/health"
+
+# Egress hardening (SSRF / abuse): block outbound traffic from demo Machines.
+# Fly does not express a blanket egress-deny in fly.toml today; enforce it via
+# the org's networking policy / private networking and keep all outbound-target
+# env vars empty (see the Dockerfile). Documented here as an explicit TODO so it
+# is not forgotten when the broker provisions Machines.

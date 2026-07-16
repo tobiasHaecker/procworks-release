@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Runtime dependencies for the demo broker (a standalone deployable, separate
+# from the API package). Pin exact versions before production.
+fastapi
+uvicorn[standard]

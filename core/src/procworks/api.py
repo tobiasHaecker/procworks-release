@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from procworks import (
     __version__,
@@ -156,10 +159,54 @@ from procworks.validator import (
 )
 from procworks.worklist_priority import TimeContext
 
+
+def _env_truthy(name: str) -> bool:
+    """Return True when the environment variable ``name`` reads as a yes.
+
+    Accepts the common truthy spellings (``1``/``true``/``yes``/``on``, case-
+    insensitive). Anything else -- including an unset or empty variable -- is
+    False. Used for the additive boot switches that must default to *off*.
+    """
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _demo_mode() -> bool:
+    """Return True only for a public throw-away demo (``PROCWORKS_DEMO_MODE``).
+
+    Gate for the demo-login conveniences surfaced on ``/auth/config`` (visible
+    demo credentials + auto-login). **Default off**, so a regular deployment
+    never exposes the shared demo password. The demo *image* sets this alongside
+    ``PROCWORKS_LOAD_DEMO``; seeding data and advertising its logins stay two
+    separate, independently-off decisions.
+    """
+    return _env_truthy("PROCWORKS_DEMO_MODE")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Application lifespan: optionally seed the demo world at boot.
+
+    When ``PROCWORKS_LOAD_DEMO`` is truthy, the built-in demo cosmos is loaded
+    once into the (still empty) module singletons, so a throw-away cloud demo
+    container comes up *ready* -- no manual ``POST /admin/reset`` needed (see
+    docs/Demo-Hosting-Konzept.md, D0a). This is a pure boundary convenience and
+    touches no correctness rule; the seed goes through the same
+    ``demo.load_demo`` path as the admin reset.
+
+    Idempotent by design: it only seeds when no schema exists yet, so a
+    re-entrant lifespan (test client, ``--reload``) or an already-populated
+    store is left untouched. Off by default -- without the env var nothing runs.
+    """
+    if _env_truthy("PROCWORKS_LOAD_DEMO") and not _store.list_ids():
+        _seed_demo()
+    yield
+
+
 app = FastAPI(
     title="Process-Core API",
     version=__version__,
     summary="Headless, block-structured process engine kernel (Correctness by Construction).",
+    lifespan=_lifespan,
 )
 
 # The browser-based UI (Section 8) is a thin web client that may be served from
@@ -218,6 +265,28 @@ _audit = create_audit_log()
 #: offline time ratchet is fed by the append-only, hash-chained audit log's
 #: newest timestamp; a trusted anchor is embedded back into that same log.
 _license_store = create_license_store()
+
+
+def _seed_demo() -> None:
+    """Load the built-in demo world into the current (empty) stores.
+
+    Shared by ``POST /admin/reset {load_demo:true}`` and the boot seed
+    (``PROCWORKS_LOAD_DEMO``, see :func:`_lifespan`), so both paths produce the
+    exact same demo cosmos. Password logins are seeded only when password auth
+    is active -- the open dev backend already grants every role and needs none.
+    Assumes the stores were cleared beforehand (``demo.load_demo`` expects an
+    empty system); callers guard that (reset wipes first, the boot seed only
+    runs on an empty store).
+    """
+    backend = _auth_backend if isinstance(_auth_backend, PasswordAuthBackend) else None
+    demo.load_demo(
+        schema_store=_store,
+        instance_store=_instances,
+        org_store=_org_store,
+        audit_log=_audit,
+        password_backend=backend,
+        absence_store=_absence_store,
+    )
 
 
 def _write_time_anchor(ts: float, trusted: bool) -> str:
@@ -518,9 +587,28 @@ def _record_completion(before: ProcessInstance, after: ProcessInstance) -> None:
 # --- request models ------------------------------------------------------
 
 
+class DemoLogin(BaseModel):
+    """One advertised demo login (public throw-away demo only)."""
+
+    login: str = Field(..., examples=["mara.modell"])
+    name: str = Field(..., examples=["Mara Modell"])
+    role: str = Field(..., examples=["modeler"])
+
+
 class AuthConfig(BaseModel):
     mode: str = Field(..., examples=["password"])
     password_login: bool = False
+    # --- Demo-only fields (populated solely in PROCWORKS_DEMO_MODE) ---------
+    #: True in a public throw-away demo -> the client may auto-login and show
+    #: the credential hint. False/absent everywhere else.
+    demo: bool = False
+    #: Shared password of the seeded demo logins (already public in demo mode).
+    #: null outside demo mode -- never leaks a real deployment's secrets.
+    demo_password: str | None = None
+    #: Login the client should auto-authenticate a fresh visitor as (the modeler).
+    demo_autologin: str | None = None
+    #: The other advertised demo logins, for one-click role switching.
+    demo_logins: list[DemoLogin] = []
 
 
 class LoginRequest(BaseModel):
@@ -1378,10 +1466,27 @@ def get_me(principal: Principal = Depends(get_principal)) -> Principal:
 
 @app.get("/auth/config", response_model=AuthConfig)
 def get_auth_config() -> AuthConfig:
-    """Public: tell the client which login UI to render (open/token/password)."""
+    """Public: tell the client which login UI to render (open/token/password).
 
+    In a public demo (``PROCWORKS_DEMO_MODE`` **and** password login) this also
+    advertises the seeded demo logins + their shared password and names the
+    login to auto-authenticate, so a fresh visitor lands in the editor without
+    guessing credentials. Outside demo mode all demo fields stay empty -- a
+    regular deployment never exposes any password here.
+    """
     mode = _auth_mode()
-    return AuthConfig(mode=mode, password_login=mode == "password")
+    cfg = AuthConfig(mode=mode, password_login=mode == "password")
+    if mode == "password" and _demo_mode():
+        from procworks.demo import DEMO_AUTOLOGIN, DEMO_PASSWORD, DEMO_USERS
+
+        cfg.demo = True
+        cfg.demo_password = DEMO_PASSWORD
+        cfg.demo_autologin = DEMO_AUTOLOGIN
+        cfg.demo_logins = [
+            DemoLogin(login=login, name=name, role=next(iter(roles), "viewer"))
+            for login, name, roles, _agent in DEMO_USERS
+        ]
+    return cfg
 
 
 @app.post("/auth/login", response_model=LoginResponse)
@@ -1545,15 +1650,7 @@ def post_admin_reset(
     _wipe_users(keep)
 
     if req.load_demo:
-        backend = _auth_backend if isinstance(_auth_backend, PasswordAuthBackend) else None
-        demo.load_demo(
-            schema_store=_store,
-            instance_store=_instances,
-            org_store=_org_store,
-            audit_log=_audit,
-            password_backend=backend,
-            absence_store=_absence_store,
-        )
+        _seed_demo()
 
     return ResetResponse(
         demo_loaded=req.load_demo,
@@ -4217,4 +4314,63 @@ def _raise_webhook_404(subscription_id: str) -> object:
 
 
 app.include_router(_v1)
+
+
+class _ApiPrefixShim:
+    """ASGI shim: strip a leading ``/api`` segment from request paths.
+
+    In the single-container demo the SPA is served from the *same* origin as the
+    API and computes its API base as ``origin + "/api"`` -- its full-stack
+    convention, where Caddy routes ``/api`` to the API and ``/`` to the SPA. This
+    process instead serves the API at root, so without this shim every
+    ``/api/...`` call from the co-served SPA would 404 (login, schemas, ...).
+
+    Installed **only** when the SPA is co-served (:func:`_maybe_mount_web`), i.e.
+    exactly the single-container demo; a regular deployment never mounts the SPA
+    here and so never installs it. Static SPA paths (``/``, ``/app.js`` ...) and
+    ``/docs`` carry no ``/api`` prefix and pass through untouched.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path == "/api" or path.startswith("/api/"):
+                stripped = path[len("/api") :] or "/"
+                scope = dict(scope)
+                scope["path"] = stripped
+                if scope.get("raw_path") is not None:
+                    scope["raw_path"] = stripped.encode("latin-1")
+        await self._app(scope, receive, send)
+
+
+def _maybe_mount_web(target: FastAPI, web_dir: str) -> bool:
+    """Mount the static web client at ``/`` when ``web_dir`` is a real directory.
+
+    D0b (Demo-Hosting-Konzept, Variante A): optionally serve the static web
+    client from this same process, so one container = whole app = one URL --
+    the simplest UX for a throw-away cloud demo (no separate Caddy reverse
+    proxy). Off by default: regular deployments front the SPA with Caddy and
+    leave ``PROCWORKS_WEB_DIR`` unset, so this is a no-op and returns False.
+
+    Must be called LAST (after every router is included) so the mount only
+    catches paths no API route -- nor ``/docs``/``/openapi.json`` -- already
+    claimed; ``html=True`` then serves ``index.html`` at ``/`` and for unknown
+    sub-paths. When it mounts, it also installs :class:`_ApiPrefixShim` so the
+    co-served SPA's ``/api/...`` calls reach the root-mounted API. Returns True
+    when a mount was added (factored out so the wiring is unit-testable without
+    reloading the module).
+    """
+    web_dir = web_dir.strip()
+    if web_dir and os.path.isdir(web_dir):
+        target.mount("/", StaticFiles(directory=web_dir, html=True), name="web")
+        # Single-container demo only: let the SPA's /api-prefixed calls through.
+        target.add_middleware(_ApiPrefixShim)
+        return True
+    return False
+
+
+_maybe_mount_web(app, os.environ.get("PROCWORKS_WEB_DIR", ""))
 

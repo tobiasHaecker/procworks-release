@@ -64,6 +64,22 @@ WEBHOOK_EVENTS = frozenset(
 #: Comma-separated host allow-list for webhook targets (SSRF guard, rule I6).
 _ALLOWLIST_ENV = "PROCWORKS_WEBHOOK_ALLOWLIST"
 
+#: Hard egress lockdown for the outbox HTTP layer (SSRF/egress hardening). When
+#: truthy, EVERY webhook/push target is refused -- the instance makes no outbound
+#: HTTP from the outbox at all, not even to allow-listed or server-configured
+#: (``allow_internal``) targets. Default off. Set it on throw-away public demos so
+#: a visitor cannot register a webhook that turns the instance into an egress
+#: beacon or data-exfil channel; regular deployments leave it unset and keep the
+#: normal allow-list / internal-only policy. Orthogonal to ``PROCWORKS_DEMO_MODE``
+#: (a login convenience) -- a general hardening posture on its own env switch.
+_EGRESS_DENY_ENV = "PROCWORKS_EGRESS_DENY"
+
+
+def _egress_denied() -> bool:
+    """Whether the hard outbound lockdown (``PROCWORKS_EGRESS_DENY``) is active."""
+
+    return os.environ.get(_EGRESS_DENY_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
 _BACKOFF_BASE_MS = 2000
 _BACKOFF_CAP_MS = 300_000
 
@@ -124,8 +140,14 @@ def assert_url_allowed(url: str, *, allow_internal: bool = False) -> None:
     server-configured push targets (resolved from ``PROCWORKS_PUSH_ENDPOINTS``),
     which may legitimately live on a private network -- the scheme and host are
     still enforced. User-supplied webhook URLs always use the strict policy.
+
+    When the hard egress lockdown (``PROCWORKS_EGRESS_DENY``) is active, *every*
+    target is refused up front -- even ``allow_internal`` push targets -- so a
+    locked-down instance (e.g. a public demo) makes no outbound HTTP at all.
     """
 
+    if _egress_denied():
+        raise WebhookError("outbound webhook/push delivery is disabled on this instance", 403)
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise WebhookError(f"webhook url scheme '{parsed.scheme}' is not allowed", 422)

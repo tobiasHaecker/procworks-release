@@ -50,6 +50,14 @@ const state = {
   principal: null,
   authMode: "open",
   passwordLogin: false,
+  // Public-demo login conveniences, filled from /auth/config in demo mode only
+  // (PROCWORKS_DEMO_MODE on the server). Empty/false in every real deployment.
+  demo: false,
+  demoPassword: "",
+  demoAutologin: "",
+  demoLogins: [],
+  // One-shot guard so the auto-login is only attempted once per page load.
+  demoAutologinTried: false,
   view: localStorage.getItem("view") || "model",
   schemaIds: [],
   schemaNames: {},
@@ -5729,9 +5737,18 @@ async function loadAuthConfig() {
     const cfg = await api.get("/auth/config");
     state.authMode = cfg.mode || "open";
     state.passwordLogin = !!cfg.password_login;
+    // Demo-only conveniences (absent/false outside PROCWORKS_DEMO_MODE).
+    state.demo = !!cfg.demo;
+    state.demoPassword = cfg.demo_password || "";
+    state.demoAutologin = cfg.demo_autologin || "";
+    state.demoLogins = Array.isArray(cfg.demo_logins) ? cfg.demo_logins : [];
   } catch (_e) {
     state.authMode = "open";
     state.passwordLogin = false;
+    state.demo = false;
+    state.demoPassword = "";
+    state.demoAutologin = "";
+    state.demoLogins = [];
   }
   const tokenField = byId("token-field");
   if (tokenField) tokenField.style.display = state.passwordLogin ? "none" : "";
@@ -5861,6 +5878,78 @@ async function logout() {
   localStorage.removeItem("authToken");
   if (state.passwordLogin) showLoginOverlay();
   else await boot();
+}
+
+// --- Public-demo login conveniences (demo mode only) ----------------------
+
+// Log in as a seeded demo user by exchanging the advertised demo credentials
+// for a session token (via the normal /auth/login path -- no auth bypass).
+// Returns true on success. Used for the silent auto-login and role switching.
+// Demo users skip the forced first-change, so no password-change step follows.
+async function demoLoginAs(login) {
+  try {
+    const res = await api.post("/auth/login", { login, password: state.demoPassword });
+    state.token = res.token;
+    localStorage.setItem("authToken", state.token);
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+// One-click role switch from the demo banner: re-authenticate as another seeded
+// demo user and reboot the app so nav/permissions reflect the new role.
+async function switchDemoRole(login) {
+  if (login === (state.principal && state.principal.subject)) return;
+  const ok = await demoLoginAs(login);
+  if (ok) {
+    sessionStorage.removeItem("demoBannerDismissed");
+    hideOverlay();
+    await boot();
+  } else {
+    toast("err", "Rollenwechsel fehlgeschlagen", ["Bitte erneut versuchen."]);
+  }
+}
+
+// Mount (or refresh) the dismissible demo banner: shows the current demo
+// identity and offers one-click switches to the other seeded roles plus the
+// shared password. Idempotent -- re-created on each boot so it reflects the
+// active role; stays hidden once dismissed for the session.
+function mountDemoBanner() {
+  const old = byId("demo-banner");
+  if (old) old.remove();
+  if (sessionStorage.getItem("demoBannerDismissed") === "1") return;
+
+  const meLogin = state.principal && state.principal.subject;
+  const meName = (state.principal && state.principal.display_name) || meLogin || "–";
+  const meRole = ((state.principal && state.principal.roles) || [])
+    .map((r) => ROLE_LABELS[r] || r).join(", ") || "ohne Rolle";
+
+  const switches = state.demoLogins
+    .filter((u) => u.login !== meLogin)
+    .map((u) => el("button", {
+      class: "demo-switch",
+      title: `Als ${u.name} anmelden`,
+      onClick: () => switchDemoRole(u.login),
+    }, `${ROLE_LABELS[u.role] || u.role}: ${u.name}`));
+
+  const banner = el("div", { id: "demo-banner", class: "demo-banner", role: "region", "aria-label": "Demo-Hinweis" },
+    el("div", { class: "demo-banner-main" },
+      el("span", { class: "demo-badge" }, "DEMO"),
+      el("span", {}, `Angemeldet als ${meName} (${meRole}).`),
+      switches.length
+        ? el("span", { class: "demo-switch-wrap" },
+            el("span", { class: "demo-switch-label" }, "Andere Rolle testen:"), ...switches)
+        : null,
+      state.demoPassword
+        ? el("span", { class: "demo-pw" }, `Passwort: ${state.demoPassword}`)
+        : null),
+    el("button", {
+      class: "demo-banner-close", "aria-label": "Hinweis schließen", title: "Schließen",
+      onClick: () => { sessionStorage.setItem("demoBannerDismissed", "1"); banner.remove(); },
+    }, "×"));
+
+  document.body.appendChild(banner);
 }
 
 
@@ -6069,8 +6158,18 @@ async function boot() {
     // In password mode an unauthenticated visitor must log in first; the rest
     // of the app stays hidden behind the overlay until /auth/me succeeds.
     if (state.passwordLogin && !state.token) {
-      showLoginOverlay();
-      return;
+      // Public demo: silently auto-login as the modeler so the visitor lands
+      // straight in the editor. Attempted once; on failure fall back to the
+      // normal login overlay so the demo is never a dead end.
+      let autologged = false;
+      if (state.demo && state.demoAutologin && !state.demoAutologinTried) {
+        state.demoAutologinTried = true;
+        autologged = await demoLoginAs(state.demoAutologin);
+      }
+      if (!autologged) {
+        showLoginOverlay();
+        return;
+      }
     }
     await loadPrincipal();
     if (state.passwordLogin && !state.principal) {
@@ -6078,6 +6177,7 @@ async function boot() {
       return;
     }
     hideOverlay();
+    if (state.demo) mountDemoBanner();
     await loadSchemas();
     await refreshSchema();
     // Baseline the live-update revision to "now" so the first poll only fires on

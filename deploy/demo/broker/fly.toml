@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: BUSL-1.1
+#
+# Fly.io config for the demo BROKER service (scale-to-zero). Deploy from THIS
+# directory (deploy/demo/broker) so the build context contains app.py /
+# provision.py / requirements.txt:
+#   cd deploy/demo/broker && fly deploy -a procworks-demo-broker
+#
+# Provide the provisioning token as a secret (NOT in [env]):
+#   fly secrets set FLY_API_TOKEN=... -a procworks-demo-broker
+#
+# Optional admin token: set a shared secret to enable the guarded ops endpoints
+# POST /admin/reap (scheduled-reaper backstop -- an external scheduler sweeps
+# expired demos by poking this scale-to-zero broker) and GET /admin/metrics
+# (read-only observability: live active count, caps, since-start counters).
+# Unset -> both endpoints stay disabled (404).
+#   fly secrets set DEMO_ADMIN_TOKEN=... -a procworks-demo-broker
+
+app = "procworks-demo-broker"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Non-secret configuration. FLY_API_TOKEN is set via `fly secrets set`.
+[env]
+  DEMO_PROVISIONER = "fly"
+  FLY_ORG = "personal"
+  FLY_REGION = "fra"
+  # Demo image the broker provisions per visitor. MUST be DEMO_IMAGE_REF, not
+  # FLY_IMAGE_REF: Fly injects FLY_IMAGE_REF at runtime (the machine's own image),
+  # which would make the broker clone itself instead of the demo image.
+  DEMO_IMAGE_REF = "registry.fly.io/procworks-demo:demo"
+  BROKER_CORS_ORIGINS = "https://procworks.de"
+  # Conservative cost caps for the initial rollout (raise later as needed).
+  DEMO_MAX_ACTIVE = "5"
+  DEMO_MAX_PER_DAY = "50"
+  DEMO_MAX_PER_IP = "3"
+  DEMO_IP_WINDOW_SECONDS = "3600"
+  # Hard lifetime per demo; the broker reaps older instances on each /trial, so
+  # an abandoned tab is cleaned up when the next visitor needs a slot.
+  DEMO_TTL_SECONDS = "7200"
+  # CAPTCHA_SECRET intentionally unset -> no Captcha (rate limits + active cap).
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 25
+    soft_limit = 10
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "15s"
+  method = "get"
+  path = "/health"

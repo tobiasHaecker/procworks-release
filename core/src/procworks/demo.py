@@ -82,6 +82,12 @@ DEMO_USERS: list[tuple[str, str, frozenset[str], str | None]] = [
     ("vera.viewer", "Vera Viewer", frozenset({"viewer"}), None),
 ]
 
+#: The login a public demo auto-authenticates a fresh visitor as (the modeler --
+#: the modelling experience is the product's core, so a visitor lands straight in
+#: the editor). Consumed only in demo mode by the ``/auth/config`` boundary; see
+#: ``api._demo_login_info``. Must be one of :data:`DEMO_USERS`.
+DEMO_AUTOLOGIN = "mara.modell"
+
 
 def _nid(schema: ProcessSchema, label: str) -> str:
     """Return the id of the (unique) node carrying ``label``."""

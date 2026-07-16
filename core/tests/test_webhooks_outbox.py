@@ -108,6 +108,42 @@ def test_assert_url_allowed_blocks_internal_without_allowlist(
         assert_url_allowed("http://localhost/hook")
 
 
+# --- Hard egress lockdown (PROCWORKS_EGRESS_DENY) --------------------------
+
+_EGRESS = "PROCWORKS_EGRESS_DENY"
+
+
+def test_egress_deny_refuses_even_allowlisted_host(
+    allowlist: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the lockdown on, an otherwise allow-listed host is still refused (403).
+
+    This is the demo posture: a visitor cannot make the instance dial *any*
+    external host, so no webhook can turn it into an egress beacon.
+    """
+    monkeypatch.setenv(_EGRESS, "1")
+    with pytest.raises(WebhookError) as err:
+        assert_url_allowed(_URL)  # normally allowed by the allow-list
+    assert err.value.status == 403
+
+
+def test_egress_deny_refuses_internal_push_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lockdown overrides ``allow_internal`` too -- no outbound at all."""
+    monkeypatch.setenv(_EGRESS, "1")
+    with pytest.raises(WebhookError) as err:
+        assert_url_allowed("https://tool.internal/push", allow_internal=True)
+    assert err.value.status == 403
+
+
+@pytest.mark.parametrize("value", ["0", "false", "off", "", "  "])
+def test_egress_deny_off_by_default_permits_allowlisted(
+    allowlist: None, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """Unset/false lockdown leaves the normal allow-list policy intact."""
+    monkeypatch.setenv(_EGRESS, value)
+    assert_url_allowed(_URL)  # no raise
+
+
 # --- OutboxDispatcher: subscribe / validation -----------------------------
 
 

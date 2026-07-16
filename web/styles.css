@@ -606,3 +606,34 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .tpl-cat { font-size: 11px; font-weight: 600; color: var(--txt-dim); }
 .tpl-desc { font-size: 12px; color: var(--txt-dim); line-height: 1.35; }
 
+/* ---- Demo-Banner (nur im öffentlichen Demo-Modus, PROCWORKS_DEMO_MODE) ---- */
+.demo-banner {
+  position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 900;
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border-radius: 12px;
+  background: var(--bg-elev2); border: 1px solid var(--line);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
+  font-size: 13px; color: var(--txt);
+}
+.demo-banner-main { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; flex: 1; }
+.demo-badge {
+  font-size: 11px; font-weight: 700; letter-spacing: .06em;
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent-txt);
+}
+.demo-switch-wrap { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.demo-switch-label { color: var(--txt-dim); }
+.demo-switch {
+  cursor: pointer; font-size: 12px; font-weight: 600;
+  padding: 4px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg-elev); color: var(--txt);
+  transition: .15s;
+}
+.demo-switch:hover { border-color: var(--accent); color: var(--accent); }
+.demo-pw { color: var(--txt-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.demo-banner-close {
+  cursor: pointer; border: none; background: transparent; color: var(--txt-dim);
+  font-size: 20px; line-height: 1; padding: 0 4px; flex: none;
+}
+.demo-banner-close:hover { color: var(--txt); }
+

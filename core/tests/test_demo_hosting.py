@@ -216,6 +216,24 @@ def test_auth_config_exposes_demo_logins_in_demo_mode(
     assert autol0["role"] == "modeler"
 
 
+def test_auth_config_exposes_feedback_url_in_demo_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PROCWORKS_DEMO_FEEDBACK_URL surfaces on /auth/config so the SPA can POST
+    the post-demo survey to the broker; absent -> the SPA shows no survey."""
+    monkeypatch.setenv("PROCWORKS_DEMO_MODE", "1")
+    monkeypatch.setenv("PROCWORKS_DEMO_FEEDBACK_URL", "https://broker.example/feedback")
+    original = api._auth_backend
+    _with_password_backend()
+    try:
+        cfg = TestClient(app).get("/auth/config").json()
+    finally:
+        api._auth_backend = original
+
+    assert cfg["demo"] is True
+    assert cfg["demo_feedback_url"] == "https://broker.example/feedback"
+
+
 def test_auth_config_hides_demo_fields_without_demo_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -233,6 +251,7 @@ def test_auth_config_hides_demo_fields_without_demo_mode(
     assert cfg["demo_password"] is None
     assert cfg["demo_autologin"] is None
     assert cfg["demo_logins"] == []
+    assert cfg["demo_feedback_url"] is None
 
 
 def test_auth_config_no_demo_fields_in_open_mode(

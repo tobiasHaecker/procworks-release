@@ -55,6 +55,8 @@
 
   <main class="main">
     <header class="topbar">
+      <button id="nav-burger" class="nav-burger" type="button" aria-expanded="false"
+              title="Men&uuml; &ouml;ffnen" aria-label="Men&uuml; &ouml;ffnen">&#9776;</button>
       <h1 id="view-title">Modellieren</h1>
       <span class="sub" id="view-sub"></span>
       <span class="spacer"></span>
@@ -63,6 +65,10 @@
     </header>
     <section class="content" id="content"></section>
   </main>
+
+  <!-- Abdunkelnder Hintergrund hinter der ausgefahrenen Mobil-Schublade; nur in
+       der mobilen Ansicht sichtbar (styles.css), schliesst das Menue per Tipp. -->
+  <div id="nav-scrim" class="nav-scrim"></div>
 </div>
 
 <div id="modal-root"></div>

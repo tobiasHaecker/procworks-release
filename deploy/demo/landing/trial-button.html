@@ -1,43 +1,88 @@
 <!-- SPDX-License-Identifier: BUSL-1.1 -->
 <!--
-  "Start test version" button for the marketing site (procworks.de, IONOS).
+  "Jetzt online testen" contact gate for the marketing site (procworks.de, IONOS).
 
   Self-contained snippet: paste the markup into the landing page and set the
-  placeholders below. It POSTs to the separately hosted demo broker, shows a
-  short "preparing" state, then redirects the visitor to their own demo URL.
+  placeholders below. Clicking the button reveals a short contact form; on submit
+  it POSTs the lead to the separately hosted demo broker, shows a "preparing"
+  state, then redirects the visitor to their own demo URL.
+
+  Why a form first: a demo requires a lead (name + company + e-mail + consent).
+  The broker relays each lead to the operator by e-mail and stores nothing; it
+  also enforces all abuse limits (active cap, per-IP, daily, TTL) and — if
+  enabled — the Captcha server-side. This page holds no secrets, no storage and
+  no correctness logic.
+
+  DSGVO: the mandatory consent covers only PROVIDING/supporting the test access
+  (Art. 6 (1) (b)); marketing contact is a SEPARATE, optional opt-in
+  (Art. 6 (1) (a)) — the demo must not hinge on it (Kopplungsverbot).
 
   Configure (on the #pw-trial element):
-    * data-broker-url : the broker's /trial endpoint.
-        - Live on the custom domain: https://broker.procworks.de/trial
-          (A/AAAA at IONOS → procworks-demo-broker, Fly TLS cert verified).
-        - The raw app URL https://procworks-demo-broker.fly.dev/trial also works
-          as a fallback.
-    * data-sitekey    : your Cloudflare Turnstile *site* key (public) — ONLY if
-        you run the broker WITH a Captcha (CAPTCHA_SECRET set). The productive
-        broker runs Captcha-free (rate limits + active cap), so leave this empty
-        or at the placeholder and no Turnstile is loaded; the button works right
-        away. Set a real sitekey (and the broker's CAPTCHA_SECRET) to turn the
-        Captcha on — the widget then gates the button and its token is sent along.
-
-  The broker enforces all limits (active cap, per-IP, daily, TTL) and — if
-  enabled — the Captcha server-side; this page holds no secrets and no
-  correctness logic.
+    * data-broker-url : the broker's /trial endpoint
+        (live: https://broker.procworks.de/trial).
+    * data-privacy-url: your Datenschutzerklärung URL (linked in the consent).
+    * data-sitekey    : Cloudflare Turnstile *site* key (public) — ONLY if the
+        broker runs WITH a Captcha (CAPTCHA_SECRET set). Leave empty for the
+        productive Captcha-free broker (rate limits + active cap guard it).
 -->
 <div id="pw-trial"
      data-broker-url="https://broker.procworks.de/trial"
+     data-privacy-url="https://procworks.de/datenschutz.html"
      data-sitekey="">
-  <button id="pw-trial-btn" type="button">Testversion starten</button>
-  <!-- Turnstile renders here ONLY when a real data-sitekey is configured. -->
-  <div id="pw-trial-captcha"></div>
+  <button id="pw-trial-btn" type="button">Jetzt online testen</button>
+
+  <form id="pw-trial-form" hidden novalidate>
+    <p class="pw-trial-intro">Für deinen kostenlosen Testzugang brauchen wir nur ein paar Angaben.</p>
+    <label>Name*
+      <input name="name" type="text" required autocomplete="name" />
+    </label>
+    <label>Firma*
+      <input name="company" type="text" required autocomplete="organization" />
+    </label>
+    <label>E-Mail*
+      <input name="email" type="email" required autocomplete="email" />
+    </label>
+    <label class="pw-check">
+      <input name="consent" type="checkbox" required />
+      <span>Ich willige ein, dass meine Angaben zur Bereitstellung und Betreuung des
+        Testzugangs verarbeitet werden. Näheres in der
+        <a id="pw-trial-privacy" href="#" target="_blank" rel="noopener">Datenschutzerklärung</a>.*</span>
+    </label>
+    <label class="pw-check">
+      <input name="marketing" type="checkbox" />
+      <span>Optional: ProcWorks darf mich zu Updates und Rückfragen per E-Mail kontaktieren.
+        Diese Einwilligung kann ich jederzeit widerrufen.</span>
+    </label>
+    <!-- Turnstile renders here ONLY when a real data-sitekey is configured. -->
+    <div id="pw-trial-captcha"></div>
+    <button id="pw-trial-submit" type="submit">Testversion starten</button>
+  </form>
+
   <p id="pw-trial-status" role="status" aria-live="polite"></p>
 </div>
+
+<style>
+  #pw-trial-form { display: none; flex-direction: column; gap: 10px; max-width: 420px; margin-top: 14px; text-align: left; }
+  #pw-trial-form[data-open] { display: flex; }
+  #pw-trial-form label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+  #pw-trial-form input[type="text"], #pw-trial-form input[type="email"] { padding: 9px 11px; border-radius: 8px; border: 1px solid #b9c2cf; font: inherit; }
+  #pw-trial-form .pw-check { flex-direction: row; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.4; }
+  #pw-trial-form .pw-check input { margin-top: 3px; }
+  #pw-trial-form .pw-trial-intro { margin: 0; font-size: 14px; opacity: .85; }
+  #pw-trial-status { margin-top: 10px; font-size: 14px; }
+</style>
 
 <script>
   (function () {
     var root = document.getElementById("pw-trial");
-    var btn = document.getElementById("pw-trial-btn");
+    var trigger = document.getElementById("pw-trial-btn");
+    var form = document.getElementById("pw-trial-form");
+    var submitBtn = document.getElementById("pw-trial-submit");
     var status = document.getElementById("pw-trial-status");
     var captchaBox = document.getElementById("pw-trial-captcha");
+    var privacy = document.getElementById("pw-trial-privacy");
+
+    if (root.dataset.privacyUrl) privacy.href = root.dataset.privacyUrl;
 
     // A sitekey counts as "configured" only if it is a non-empty, non-placeholder
     // value. Empty/placeholder => Captcha-free mode (matches the productive broker).
@@ -47,61 +92,69 @@
 
     function fail(msg) {
       status.textContent = msg;
-      btn.disabled = false;
+      submitBtn.disabled = false;
     }
 
-    // Fire the actual provisioning request. `captcha_token` is null when Captcha
-    // is off; the broker's _verify_captcha then passes (no CAPTCHA_SECRET).
+    // Reveal the contact form on the first click (progressive disclosure).
+    trigger.addEventListener("click", function () {
+      form.setAttribute("data-open", "");
+      form.hidden = false;
+      trigger.hidden = true;
+      var first = form.querySelector("input");
+      if (first) first.focus();
+    });
+
+    // Send the lead + provision the demo. `captcha_token` is null when Captcha is
+    // off; the broker's _verify_captcha then passes (no CAPTCHA_SECRET).
     function startTrial() {
-      btn.disabled = true;
+      var data = new FormData(form);
+      submitBtn.disabled = true;
       status.textContent = "Deine Testumgebung wird vorbereitet …";
 
       fetch(root.dataset.brokerUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ captcha_token: token })
+        body: JSON.stringify({
+          name: (data.get("name") || "").trim(),
+          company: (data.get("company") || "").trim(),
+          email: (data.get("email") || "").trim(),
+          consent: data.get("consent") === "on",
+          marketing_consent: data.get("marketing") === "on",
+          captcha_token: token
+        })
       })
         .then(function (r) {
+          if (r.status === 422) throw new Error("Bitte Name, Firma und eine gültige E-Mail angeben und der Verarbeitung zustimmen.");
           if (r.status === 429) throw new Error("Gerade viel los – bitte in ein paar Minuten erneut versuchen.");
           if (!r.ok) throw new Error("Die Testversion konnte nicht gestartet werden. Bitte später erneut versuchen.");
           return r.json();
         })
-        .then(function (data) {
+        .then(function (payload) {
           status.textContent = "Bereit! Du wirst weitergeleitet …";
-          window.location.href = data.url;
+          window.location.href = payload.url;
         })
         .catch(function (e) { fail(e.message); });
     }
 
-    if (captchaOn) {
-      // Captcha mode: render Turnstile, keep the button disabled until the
-      // visitor passes, then carry the token into the request.
-      btn.disabled = true;
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      // HTML5 validation (required fields + consent checkbox + e-mail format).
+      if (!form.checkValidity()) { form.reportValidity(); return; }
+      if (captchaOn && !token) { fail("Bitte zuerst die Sicherheitsprüfung abschließen."); return; }
+      startTrial();
+    });
 
+    if (captchaOn) {
       var widget = document.createElement("div");
       widget.className = "cf-turnstile";
       widget.setAttribute("data-sitekey", sitekey);
       widget.setAttribute("data-callback", "pwTrialReady");
       captchaBox.appendChild(widget);
-
-      window.pwTrialReady = function (t) {
-        token = t;
-        btn.disabled = false;
-      };
-
+      window.pwTrialReady = function (t) { token = t; };
       var s = document.createElement("script");
       s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
-      s.async = true;
-      s.defer = true;
+      s.async = true; s.defer = true;
       document.head.appendChild(s);
-
-      btn.addEventListener("click", function () {
-        if (!token) { fail("Bitte zuerst die Sicherheitsprüfung abschließen."); return; }
-        startTrial();
-      });
-    } else {
-      // Captcha-free mode (productive default): button is live immediately.
-      btn.addEventListener("click", startTrial);
     }
   })();
 </script>

@@ -135,6 +135,34 @@ role-switch box (operator/viewer) — so visitors never face an empty login form
 This is a throw-away-demo-only switch; a real deployment leaves it unset and
 never exposes any credentials.
 
+### Contact gate (leads) + post-demo survey
+
+A demo is **gated behind a short contact form**: `landing/trial-button.html`
+reveals name + company + e-mail + a mandatory consent (and an optional marketing
+opt-in) and only then POSTs `/trial`. The broker validates the fields (missing/
+invalid → 422) and **relays the lead to the operator by e-mail, storing nothing**
+(data minimisation). The lead is relayed *before* provisioning, so every demo
+that boots has a delivered lead; if SMTP is configured but the relay fails, the
+trial is refused (503) rather than silently dropping the lead. Configure the
+relay via the `LEAD_SMTP_*` / `LEAD_MAIL_TO` secrets (see `broker/fly.toml`);
+without SMTP the relay is skipped (local/dev).
+
+When the visitor clicks **"Demo beenden"** in the demo banner, the SPA shows a
+**2-minute survey** and POSTs it to the broker's `/feedback` (relayed by e-mail
+too, best-effort, never blocks the visitor). The SPA only shows this when the
+demo image sets `PROCWORKS_DEMO_FEEDBACK_URL` (→ surfaced on `/auth/config`).
+Both the lead and the feedback mail carry the **trial id**, so the operator can
+correlate them without any server-side store. The survey asks: role/context,
+overall satisfaction (1–5), how important the *correctness-by-construction* value
+is (1–5), ease of modelling (1–5), adoption intent, and one open-text field.
+
+**DSGVO:** the mandatory consent covers only providing/supporting the test
+access (Art. 6 (1) (b)); marketing contact is a **separate, optional** opt-in
+(Art. 6 (1) (a)) so the demo does not hinge on it (Kopplungsverbot). No IP is
+stored with a lead; the consent text links the Datenschutzerklärung
+(`data-privacy-url` on the snippet). A Datenschutzerklärung must be live before
+going public.
+
 ### Deploying the broker (productive rollout)
 
 The broker runs as its own scale-to-zero Fly app (`broker/Dockerfile`,

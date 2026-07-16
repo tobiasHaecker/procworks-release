@@ -21,8 +21,11 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN python -m pip install --upgrade pip && python -m pip install -r requirements.txt
 
-# Only the runtime modules (not the tests).
-COPY app.py provision.py ./
+# Only the runtime modules (not the tests). ACHTUNG: jedes neue Modul, das app.py
+# importiert, muss hier mit aufgenommen werden -- fehlt es, startet der Container
+# gar nicht (ImportError). Der Guard-Test test_dockerfile_copies_all_runtime_modules
+# erzwingt das.
+COPY app.py provision.py mailer.py ./
 
 RUN useradd --create-home --uid 10001 appuser
 USER appuser

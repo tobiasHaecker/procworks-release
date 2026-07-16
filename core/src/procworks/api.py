@@ -609,6 +609,9 @@ class AuthConfig(BaseModel):
     demo_autologin: str | None = None
     #: The other advertised demo logins, for one-click role switching.
     demo_logins: list[DemoLogin] = []
+    #: Broker endpoint the SPA POSTs the post-demo survey to (``PROCWORKS_DEMO_FEEDBACK_URL``).
+    #: null/absent -> the SPA shows no "end demo & give feedback" flow. Demo-only.
+    demo_feedback_url: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -1486,6 +1489,9 @@ def get_auth_config() -> AuthConfig:
             DemoLogin(login=login, name=name, role=next(iter(roles), "viewer"))
             for login, name, roles, _agent in DEMO_USERS
         ]
+        # Broker survey endpoint for the "end demo & give feedback" flow (unset ->
+        # the SPA simply shows no survey). Not a secret; the broker gates + relays.
+        cfg.demo_feedback_url = os.environ.get("PROCWORKS_DEMO_FEEDBACK_URL", "").strip() or None
     return cfg
 
 

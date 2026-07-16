@@ -8,12 +8,14 @@ network, no cloud. Requires ``pytest`` and the broker's own deps (fastapi).
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
 import time
 from pathlib import Path
 
 import app as broker
+import mailer
 import provision as p
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +23,15 @@ from fastapi.testclient import TestClient
 # The reaper lives in a sibling package; make it importable for the TTL tests.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "reaper"))
 import reaper as reaper_mod  # noqa: E402
+
+#: A valid contact-gate payload for POST /trial (name/company/email + consent).
+#: The demo is gated behind this form, so every trial test must supply it.
+_LEAD = {
+    "name": "Max Muster",
+    "company": "Muster AG",
+    "email": "max@muster.de",
+    "consent": True,
+}
 
 
 class _Resp:
@@ -162,14 +173,15 @@ def _fresh_client(monkeypatch: pytest.MonkeyPatch, *, max_active: int = 5) -> Te
     broker._MAX_ACTIVE = max_active
     broker._guard = broker._AbuseGuard(max_per_day=100, max_per_ip=100, ip_window_seconds=3600)
     broker._metrics = broker._Metrics()  # isolate observability counters per test
+    broker._notifier = broker.create_lead_notifier()  # unconfigured w/o SMTP env
     return TestClient(broker.app)
 
 
 def test_trial_endpoint_no_captcha_needed(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _fresh_client(monkeypatch)
     assert client.get("/health").json()["status"] == "ok"
-    # Empty body works because Captcha is disabled.
-    ok = client.post("/trial", json={})
+    # A valid contact gate + Captcha disabled -> a trial is minted.
+    ok = client.post("/trial", json=_LEAD)
     assert ok.status_code == 200
     body = ok.json()
     assert body["url"].startswith("https://trial-") and body["trial_id"] in body["url"]
@@ -183,16 +195,16 @@ def test_trial_endpoint_no_captcha_needed(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_trial_active_cap_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _fresh_client(monkeypatch, max_active=1)
-    assert client.post("/trial", json={}).status_code == 200
+    assert client.post("/trial", json=_LEAD).status_code == 200
     # Second one: one demo is already live -> authoritative cap -> 429.
-    assert client.post("/trial", json={}).status_code == 429
+    assert client.post("/trial", json=_LEAD).status_code == 429
 
 
 def test_trial_per_ip_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _fresh_client(monkeypatch, max_active=100)
     broker._guard = broker._AbuseGuard(max_per_day=100, max_per_ip=1, ip_window_seconds=3600)
-    assert client.post("/trial", json={}).status_code == 200
-    assert client.post("/trial", json={}).status_code == 429  # same IP, 2nd blocked
+    assert client.post("/trial", json=_LEAD).status_code == 200
+    assert client.post("/trial", json=_LEAD).status_code == 429  # same IP, 2nd blocked
 
 
 def test_trial_reaps_expired_before_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,7 +216,7 @@ def test_trial_reaps_expired_before_cap(monkeypatch: pytest.MonkeyPatch) -> None
     # Age it well past the TTL (abandoned tab).
     broker._provisioner._created_at[old.instance_id] = time.time() - 10_000
     # Without reaping this would 429 (cap=1); the reap frees the slot first.
-    resp = client.post("/trial", json={})
+    resp = client.post("/trial", json=_LEAD)
     assert resp.status_code == 200
     assert old.instance_id not in broker._provisioner.list_ids()  # reaped
 
@@ -215,7 +227,7 @@ def test_trial_keeps_young_instances(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _fresh_client(monkeypatch, max_active=1)
     broker._TTL_SECONDS = 7200
     young = broker._provisioner.create(trial_id="fresh")  # age ~0
-    assert client.post("/trial", json={}).status_code == 429
+    assert client.post("/trial", json=_LEAD).status_code == 429
     assert young.instance_id in broker._provisioner.list_ids()  # untouched
 
 
@@ -315,8 +327,8 @@ def test_metrics_reports_active_config_and_counters(monkeypatch: pytest.MonkeyPa
     hdr = {"Authorization": "Bearer s3cr3t"}
     try:
         # One successful trial, then a second that hits the active cap (=1).
-        assert client.post("/trial", json={}).status_code == 200
-        assert client.post("/trial", json={}).status_code == 429
+        assert client.post("/trial", json=_LEAD).status_code == 200
+        assert client.post("/trial", json=_LEAD).status_code == 429
 
         body = client.get("/admin/metrics", headers=hdr).json()
         assert body["active"] == 1  # one demo actually live (from the provisioner)
@@ -338,8 +350,8 @@ def test_metrics_counts_ratelimit_and_reaped(monkeypatch: pytest.MonkeyPatch) ->
     broker._guard = broker._AbuseGuard(max_per_day=100, max_per_ip=1, ip_window_seconds=3600)
     hdr = {"Authorization": "Bearer s3cr3t"}
     try:
-        assert client.post("/trial", json={}).status_code == 200  # started=1
-        assert client.post("/trial", json={}).status_code == 429  # same IP -> rate limit
+        assert client.post("/trial", json=_LEAD).status_code == 200  # started=1
+        assert client.post("/trial", json=_LEAD).status_code == 429  # same IP -> rate limit
 
         # Age the live instance past the TTL and reap it via the admin poke.
         (live_id,) = broker._provisioner.list_ids()
@@ -352,3 +364,191 @@ def test_metrics_counts_ratelimit_and_reaped(monkeypatch: pytest.MonkeyPatch) ->
         assert counters["reaped"] == 1
     finally:
         broker._ADMIN_TOKEN = ""
+
+
+# --- Contact gate + lead/feedback relay ------------------------------------
+
+
+class _FakeNotifier:
+    """Records relayed leads/feedback (or raises) in place of real SMTP."""
+
+    def __init__(self, *, configured: bool = True, boom: bool = False) -> None:
+        self._configured = configured
+        self._boom = boom
+        self.leads: list[dict] = []
+        self.feedback: list[dict] = []
+
+    @property
+    def configured(self) -> bool:
+        return self._configured
+
+    def send_lead(self, **kw: object) -> None:
+        if self._boom:
+            raise RuntimeError("smtp down")
+        self.leads.append(kw)
+
+    def send_feedback(self, **kw: object) -> None:
+        if self._boom:
+            raise RuntimeError("smtp down")
+        self.feedback.append(kw)
+
+
+def test_trial_gate_rejects_missing_or_invalid_contact(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A demo requires name + company + valid e-mail + consent; else 422, no demo."""
+    client = _fresh_client(monkeypatch)
+    assert client.post("/trial", json={}).status_code == 422  # nothing
+    assert client.post("/trial", json={**_LEAD, "consent": False}).status_code == 422
+    assert client.post("/trial", json={**_LEAD, "email": "not-an-email"}).status_code == 422
+    assert client.post("/trial", json={**_LEAD, "company": ""}).status_code == 422
+    # A rejected gate provisions nothing and is tallied.
+    assert broker._provisioner.list_ids() == []
+    assert broker._metrics.snapshot().get("trials_rejected_gate") == 4
+
+
+def test_trial_relays_lead_before_provision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A valid gate relays the lead (name/company/email/trial_id) then provisions."""
+    client = _fresh_client(monkeypatch)
+    fake = _FakeNotifier()
+    broker._notifier = fake
+    resp = client.post("/trial", json=_LEAD)
+    assert resp.status_code == 200
+    assert len(fake.leads) == 1
+    lead = fake.leads[0]
+    assert lead["email"] == "max@muster.de"
+    assert lead["company"] == "Muster AG"
+    assert lead["marketing_consent"] is False
+    assert lead["trial_id"] in resp.json()["url"]
+    assert broker._metrics.snapshot().get("leads_relayed") == 1
+
+
+def test_trial_marketing_consent_passed_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The optional marketing opt-in reaches the relayed lead when ticked."""
+    client = _fresh_client(monkeypatch)
+    fake = _FakeNotifier()
+    broker._notifier = fake
+    client.post("/trial", json={**_LEAD, "marketing_consent": True})
+    assert fake.leads[0]["marketing_consent"] is True
+
+
+def test_trial_refused_when_lead_relay_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An undeliverable lead must refuse the trial (503), never drop it silently."""
+    client = _fresh_client(monkeypatch)
+    broker._notifier = _FakeNotifier(boom=True)
+    resp = client.post("/trial", json=_LEAD)
+    assert resp.status_code == 503
+    assert broker._provisioner.list_ids() == []  # no demo without a delivered lead
+
+
+def test_trial_skips_relay_without_smtp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local/dev broker with no SMTP still mints demos (relay simply skipped)."""
+    client = _fresh_client(monkeypatch)
+    broker._notifier = _FakeNotifier(configured=False)
+    resp = client.post("/trial", json=_LEAD)
+    assert resp.status_code == 200
+    assert broker._metrics.snapshot().get("leads_relayed", 0) == 0
+
+
+def test_feedback_relays_and_is_best_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Feedback is counted + relayed, and a relay failure never fails the visitor."""
+    client = _fresh_client(monkeypatch)
+    fake = _FakeNotifier()
+    broker._notifier = fake
+    resp = client.post(
+        "/feedback",
+        json={"trial_id": "abc", "role": "IT", "satisfaction": 5, "comment": "top"},
+    )
+    assert resp.status_code == 200 and resp.json()["status"] == "ok"
+    assert len(fake.feedback) == 1 and fake.feedback[0]["trial_id"] == "abc"
+    assert broker._metrics.snapshot().get("feedback_received") == 1
+    # A relay failure must NOT surface to the visitor.
+    broker._notifier = _FakeNotifier(boom=True)
+    assert client.post("/feedback", json={"trial_id": "xyz"}).status_code == 200
+
+
+# --- mailer: transport + formatting ----------------------------------------
+
+
+def test_notifier_unconfigured_without_smtp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No SMTP host / recipient -> notifier reports unconfigured (relay skipped)."""
+    monkeypatch.delenv("LEAD_SMTP_HOST", raising=False)
+    monkeypatch.delenv("LEAD_MAIL_TO", raising=False)
+    assert broker.create_lead_notifier().configured is False
+
+
+def test_notifier_configured_with_smtp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a host + recipient the notifier is configured and relays for real."""
+    monkeypatch.setenv("LEAD_SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("LEAD_MAIL_TO", "ops@example.com")
+    assert broker.create_lead_notifier().configured is True
+
+
+def test_notifier_send_lead_builds_consent_record() -> None:
+    """send_lead builds one plain-text message doubling as the consent record."""
+    captured: list[object] = []
+
+    class _T:
+        def send(self, message: object) -> None:
+            captured.append(message)
+
+    notifier = mailer.LeadNotifier(sender="from@x", recipient="ops@x", transport=_T())
+    notifier.send_lead(
+        name="Max Muster", company="ACME", email="a@b.de", marketing_consent=True, trial_id="t1"
+    )
+    assert len(captured) == 1
+    msg = captured[0]
+    assert msg["To"] == "ops@x"  # type: ignore[index]
+    body = msg.get_content()  # type: ignore[attr-defined]
+    assert "a@b.de" in body and "ACME" in body and "t1" in body
+    assert "Marketing-Kontakt (optional) eingewilligt: ja" in body
+
+
+def test_notifier_send_feedback_lists_answers() -> None:
+    """send_feedback renders every answer and carries the trial id for matching."""
+    captured: list[object] = []
+
+    class _T:
+        def send(self, message: object) -> None:
+            captured.append(message)
+
+    notifier = mailer.LeadNotifier(sender="from@x", recipient="ops@x", transport=_T())
+    notifier.send_feedback(trial_id="t9", answers={"Rolle": "IT", "Gesamteindruck (1-5)": 5})
+    body = captured[0].get_content()  # type: ignore[attr-defined]
+    assert "t9" in body and "Rolle: IT" in body and "Gesamteindruck (1-5): 5" in body
+
+
+def test_dockerfile_copies_every_runtime_module_app_imports() -> None:
+    """Guard: jedes lokale Modul, das ``app.py`` importiert, muss im Image liegen.
+
+    Regressionsschutz fuer einen echten Ausfall: ``mailer.py`` wurde ergaenzt, aber
+    nicht ins ``COPY`` des Dockerfiles aufgenommen -- der Container startete dann gar
+    nicht mehr (``ImportError`` beim Boot), was die komplette Demo lahmlegte. Die
+    Testsuite laeuft gegen das Dateisystem und haette das nie bemerkt, weil dort
+    ohnehin alle Module nebeneinander liegen. Deshalb pruefen wir hier direkt das
+    Dockerfile.
+    """
+    here = Path(__file__).parent
+    dockerfile = (here / "Dockerfile").read_text(encoding="utf-8")
+
+    # Lokale Module = *.py neben app.py, ohne die Tests selbst.
+    local = {p.stem for p in here.glob("*.py") if not p.name.startswith("test_")}
+
+    # Welche davon importiert app.py tatsaechlich?
+    tree = ast.parse((here / "app.py").read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imported.add(node.module.split(".")[0])
+    needed = (imported & local) | {"app"}
+
+    copied: set[str] = set()
+    for line in dockerfile.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("COPY "):
+            for token in stripped.split()[1:-1]:
+                if token.endswith(".py"):
+                    copied.add(token[:-3])
+
+    missing = needed - copied
+    assert not missing, f"Dockerfile kopiert nicht: {sorted(missing)} (COPY in Dockerfile ergaenzen)"

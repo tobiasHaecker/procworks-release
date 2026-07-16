@@ -14,6 +14,14 @@
 # (read-only observability: live active count, caps, since-start counters).
 # Unset -> both endpoints stay disabled (404).
 #   fly secrets set DEMO_ADMIN_TOKEN=... -a procworks-demo-broker
+#
+# Lead + feedback relay (the contact gate + post-demo survey mail every lead and
+# feedback to you and store NOTHING). Set the SMTP secrets + recipient; without
+# LEAD_SMTP_HOST the relay is skipped (a lead would then be undeliverable and the
+# trial refused with 503, so configure it for the gated flow):
+#   fly secrets set LEAD_SMTP_HOST=... LEAD_SMTP_USER=... LEAD_SMTP_PASSWORD=... \
+#                   LEAD_MAIL_FROM=... LEAD_MAIL_TO=... -a procworks-demo-broker
+# (LEAD_SMTP_PORT default 587, LEAD_SMTP_STARTTLS default on.)
 
 app = "procworks-demo-broker"
 primary_region = "fra"

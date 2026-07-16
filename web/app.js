@@ -56,6 +56,8 @@ const state = {
   demoPassword: "",
   demoAutologin: "",
   demoLogins: [],
+  // Broker endpoint for the post-demo survey ("Demo beenden"). Empty -> no survey.
+  demoFeedbackUrl: "",
   // One-shot guard so the auto-login is only attempted once per page load.
   demoAutologinTried: false,
   view: localStorage.getItem("view") || "model",
@@ -189,6 +191,29 @@ function toggleSidebar() {
 
 // Fruehzeitig anwenden, damit die Sidebar nicht kurz breit aufblitzt.
 applySidebar();
+
+/**
+ * Spiegelt den offen/geschlossen-Zustand der mobilen Menue-Schublade ins DOM:
+ * setzt `data-mobile-nav` aufs <html> (styles.css schiebt die Sidebar dann als
+ * Overlay ein/aus) und pflegt `aria-expanded` am Hamburger-Knopf. Reine
+ * Darstellung – nur in der mobilen Ansicht sichtbar wirksam.
+ *
+ * @param {boolean} open true = Schublade einfahren, false = schliessen.
+ */
+function applyMobileNav(open) {
+  document.documentElement.setAttribute("data-mobile-nav", open ? "open" : "closed");
+  const burger = byId("nav-burger");
+  if (burger) burger.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+/** Schaltet die mobile Menue-Schublade um (Hamburger-Knopf). */
+function toggleMobileNav() {
+  const open = document.documentElement.getAttribute("data-mobile-nav") !== "open";
+  applyMobileNav(open);
+}
+
+/** Schliesst die mobile Menue-Schublade (Tipp auf Hintergrund / Menuewahl). */
+function closeMobileNav() { applyMobileNav(false); }
 
 const NODE_TYPE = {
   START: "START", END: "END", ACTIVITY: "ACTIVITY",
@@ -5493,11 +5518,32 @@ function deleteWebhook(sub) {
 function emptyState(text) { return el("div", { class: "empty" }, text); }
 function kpi(label, value) { return el("div", { class: "kpi" }, el("div", { class: "label" }, label), el("div", { class: "value" }, String(value))); }
 
+/**
+ * Baut eine Standardtabelle aus Kopfzeilen und Zeilen.
+ *
+ * Jede Zelle erhaelt zusaetzlich ein `data-label`-Attribut mit dem Text ihrer
+ * Spaltenueberschrift. Auf dem Desktop ist das Attribut wirkungslos; in der
+ * mobilen Ansicht (styles.css, Breakpoint <= 720px) rendert die Tabelle als
+ * gestapelte Karten und blendet die Kopfzeile aus – dort dient `data-label`
+ * als vorangestellte Feldbeschriftung, sodass jede Zeile (z. B. eine Aufgabe)
+ * ohne horizontales Scrollen lesbar bleibt. Leere Ueberschriften (etwa die
+ * Aktionsspalte mit dem „Erledigen"-Knopf) tragen bewusst kein Label, damit die
+ * Zelle mobil die volle Breite nutzt.
+ *
+ * @param {string[]} headers Spaltenueberschriften (leere Strings erlaubt).
+ * @param {Array<Array>} rows Zeilen; jede ein Array von Zellen (Node oder Text).
+ * @param {(i:number)=>string} [rowClassFn] Optionale CSS-Klasse je Zeilenindex.
+ * @returns {Node} Das <table>-Element.
+ */
 function table(headers, rows, rowClassFn) {
   return el("table", null,
     el("thead", null, el("tr", null, ...headers.map((h) => el("th", null, h)))),
-    el("tbody", null, ...rows.map((r, i) => el("tr", rowClassFn ? { class: rowClassFn(i) || null } : null, ...r.map((c) =>
-      el("td", null, c instanceof Node ? c : String(c)))))));
+    el("tbody", null, ...rows.map((r, i) => el("tr", rowClassFn ? { class: rowClassFn(i) || null } : null,
+      ...r.map((c, j) => {
+        const label = headers[j];
+        const attrs = label ? { "data-label": String(label) } : null;
+        return el("td", attrs, c instanceof Node ? c : String(c));
+      })))));
 }
 
 function listPanel(title, headers, rows, onAdd, addLabel) {
@@ -5742,6 +5788,7 @@ async function loadAuthConfig() {
     state.demoPassword = cfg.demo_password || "";
     state.demoAutologin = cfg.demo_autologin || "";
     state.demoLogins = Array.isArray(cfg.demo_logins) ? cfg.demo_logins : [];
+    state.demoFeedbackUrl = cfg.demo_feedback_url || "";
   } catch (_e) {
     state.authMode = "open";
     state.passwordLogin = false;
@@ -5749,6 +5796,7 @@ async function loadAuthConfig() {
     state.demoPassword = "";
     state.demoAutologin = "";
     state.demoLogins = [];
+    state.demoFeedbackUrl = "";
   }
   const tokenField = byId("token-field");
   if (tokenField) tokenField.style.display = state.passwordLogin ? "none" : "";
@@ -5915,6 +5963,82 @@ async function switchDemoRole(login) {
 // identity and offers one-click switches to the other seeded roles plus the
 // shared password. Idempotent -- re-created on each boot so it reflects the
 // active role; stays hidden once dismissed for the session.
+// Derive the demo's own trial id from its hostname (trial-<id>.fly.dev). Sent
+// with the survey so the operator can match feedback to the earlier lead mail
+// from the same session (both carry the id). Empty when not on a trial host.
+function currentTrialId() {
+  const m = /^trial-([0-9a-f]+)\./.exec(window.location.hostname);
+  return m ? m[1] : "";
+}
+
+// A 1..5 radio scale as one row of options; read the pick with
+// ``node.querySelector('input:checked')`` after submit.
+function scaleField(name) {
+  return el("div", { class: "survey-scale" },
+    ...[1, 2, 3, 4, 5].map((i) =>
+      el("label", { class: "survey-scale-opt" },
+        el("input", { type: "radio", name, value: String(i) }),
+        el("span", {}, String(i)))));
+}
+
+// The post-demo, 2-minute survey ("Demo beenden"). Purely a demo feature: it is
+// only reachable when the server advertised a broker feedback URL. The answers
+// are POSTed cross-origin to the broker (which relays them by e-mail and stores
+// nothing); delivery is best-effort, so the visitor is always thanked, even if
+// the POST fails. Nothing here touches the correctness core.
+function endDemoSurvey() {
+  if (!state.demoFeedbackUrl) return;
+  const roleSel = el("select", { class: "input" },
+    el("option", { value: "" }, "– bitte wählen –"),
+    ...["Fachbereich / Prozessverantwortung", "IT / Entwicklung", "Beratung / Consulting",
+      "Management / Geschäftsführung", "Lehre / Studium", "Sonstiges"]
+      .map((r) => el("option", { value: r }, r)));
+  const intentSel = el("select", { class: "input" },
+    el("option", { value: "" }, "– bitte wählen –"),
+    ...["Ja, konkret", "Ja, perspektivisch", "Eher nicht", "Nein"]
+      .map((v) => el("option", { value: v }, v)));
+  const comment = el("textarea", { class: "input", rows: "3", maxlength: "2000",
+    placeholder: "Was hat gefehlt, was war unklar, was würdest du verbessern?" });
+
+  const field = (label, node) => el("label", { class: "survey-field" },
+    el("span", { class: "survey-q" }, label), node);
+  const body = el("div", { class: "survey" },
+    field("Was beschreibt dich am besten?", roleSel),
+    field("Wie zufrieden bist du mit ProcWorks insgesamt? (1 = gar nicht, 5 = sehr)",
+      scaleField("satisfaction")),
+    field("ProcWorks lässt per Konstruktion keine fehlerhaften Prozessmodelle zu. "
+      + "Wie wichtig ist dir das? (1–5)", scaleField("cbc")),
+    field("Wie leicht fiel dir das Modellieren? (1–5)", scaleField("ease")),
+    field("Könntest du dir vorstellen, ProcWorks einzusetzen?", intentSel),
+    field("Was würdest du verbessern? (optional)", comment));
+
+  const scale = (name) => {
+    const hit = body.querySelector(`input[name="${name}"]:checked`);
+    return hit ? Number(hit.value) : null;
+  };
+  openModal("Demo beenden – 2-Minuten-Feedback", body, async () => {
+    const payload = {
+      trial_id: currentTrialId(),
+      role: roleSel.value,
+      satisfaction: scale("satisfaction"),
+      cbc_importance: scale("cbc"),
+      ease: scale("ease"),
+      intent: intentSel.value,
+      comment: comment.value,
+    };
+    try {
+      await fetch(state.demoFeedbackUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (_e) { /* best-effort: thank the visitor regardless */ }
+    toast("success", "Danke für dein Feedback!",
+      ["Es hilft uns, ProcWorks zu verbessern. Du kannst den Tab jetzt schließen."]);
+    return true;
+  }, "Absenden & beenden");
+}
+
 function mountDemoBanner() {
   const old = byId("demo-banner");
   if (old) old.remove();
@@ -5944,10 +6068,17 @@ function mountDemoBanner() {
       state.demoPassword
         ? el("span", { class: "demo-pw" }, `Passwort: ${state.demoPassword}`)
         : null),
-    el("button", {
-      class: "demo-banner-close", "aria-label": "Hinweis schließen", title: "Schließen",
-      onClick: () => { sessionStorage.setItem("demoBannerDismissed", "1"); banner.remove(); },
-    }, "×"));
+    el("div", { class: "demo-banner-actions" },
+      state.demoFeedbackUrl
+        ? el("button", {
+            class: "demo-end", title: "Demo beenden und kurz Feedback geben",
+            onClick: endDemoSurvey,
+          }, "Demo beenden")
+        : null,
+      el("button", {
+        class: "demo-banner-close", "aria-label": "Hinweis schließen", title: "Schließen",
+        onClick: () => { sessionStorage.setItem("demoBannerDismissed", "1"); banner.remove(); },
+      }, "×")));
 
   document.body.appendChild(banner);
 }
@@ -6112,15 +6243,28 @@ function wireNav() {
     state.orgFocusUnit = null;
     state.orgFocusAgents = [];
     state.returnTo = null;
+    // Auf dem Smartphone faehrt die Menue-Schublade nach der Wahl wieder ein,
+    // damit sofort der gewaehlte Inhalt (z. B. „Meine Aufgaben") sichtbar ist.
+    closeMobileNav();
     render();
   });
   const sideToggle = byId("sidebar-toggle");
   if (sideToggle) sideToggle.addEventListener("click", toggleSidebar);
-  // Vollbild des Kontrollflusses per Escape verlassen (nur wenn aktiv).
+  // Mobile Menue-Schublade: Hamburger oeffnet/schliesst, Tipp auf den
+  // abdunkelnden Hintergrund schliesst.
+  const burger = byId("nav-burger");
+  if (burger) burger.addEventListener("click", toggleMobileNav);
+  const scrim = byId("nav-scrim");
+  if (scrim) scrim.addEventListener("click", closeMobileNav);
+  // Escape verlaesst das Kontrollfluss-Vollbild bzw. schliesst die mobile
+  // Menue-Schublade (nur wenn jeweils aktiv).
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && state.graphMaximized) {
+    if (e.key !== "Escape") return;
+    if (state.graphMaximized) {
       state.graphMaximized = false;
       render();
+    } else if (document.documentElement.getAttribute("data-mobile-nav") === "open") {
+      closeMobileNav();
     }
   });
   const apiInput = byId("api-base");

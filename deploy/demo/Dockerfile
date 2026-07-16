@@ -42,7 +42,8 @@ ENV PROCWORKS_LOAD_DEMO=1 \
     PROCWORKS_WEB_DIR=/app/web \
     PROCWORKS_AUTH=password \
     PROCWORKS_SESSION_TTL_MINUTES=120 \
-    PROCWORKS_EGRESS_DENY=1
+    PROCWORKS_EGRESS_DENY=1 \
+    PROCWORKS_DEMO_FEEDBACK_URL=https://broker.procworks.de/feedback
 # PROCWORKS_DEMO_MODE surfaces the seeded demo logins on /auth/config so the SPA
 # auto-logs the visitor in as the modeler (no credential guessing). It is a
 # throw-away-demo-only switch and MUST stay unset in any real deployment.

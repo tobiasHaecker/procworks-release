@@ -46,6 +46,7 @@ from collections import defaultdict, deque
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from mailer import LeadNotifier, create_lead_notifier
 from provision import (
     DemoInstance,
     FlyProvisioner,
@@ -191,10 +192,11 @@ def _verify_captcha(token: str, *, remote_ip: str | None = None) -> bool:
 
 app = FastAPI(title="ProcWorks Demo Broker", summary="Mints one demo instance per visitor.")
 
-# The "Start test version" button lives on the marketing site (a different
-# origin than this broker), so cross-origin POSTs must be allowed. Pin the
-# site origin(s) via BROKER_CORS_ORIGINS (comma-separated); default to the
-# public site. Only POST /trial is exposed, so this is narrow.
+# Cross-origin POSTs come from two places: the "Start test version" contact form
+# on the marketing site (POST /trial) and the survey inside each demo instance
+# (POST /feedback, served from https://trial-<id>.fly.dev). Pin the site
+# origin(s) via BROKER_CORS_ORIGINS; allow the per-visitor demo subdomains via a
+# regex (BROKER_CORS_ORIGIN_REGEX). Only POST is exposed, so this stays narrow.
 _cors_origins = [
     o.strip()
     for o in os.environ.get("BROKER_CORS_ORIGINS", "https://procworks.de").split(",")
@@ -203,6 +205,9 @@ _cors_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
+    allow_origin_regex=os.environ.get(
+        "BROKER_CORS_ORIGIN_REGEX", r"https://trial-[0-9a-f]+\.fly\.dev"
+    ),
     allow_methods=["POST", "OPTIONS"],
     allow_headers=["content-type"],
 )
@@ -225,6 +230,30 @@ _guard = _AbuseGuard(
 #: Since-start observability counters (see :class:`_Metrics`), surfaced read-only
 #: on ``GET /admin/metrics``. Non-persistent, best-effort, never affects handling.
 _metrics = _Metrics()
+#: Relays each lead + feedback to the operator inbox by e-mail and stores nothing
+#: (data minimisation). ``configured is False`` on a broker without SMTP (local
+#: dev) -> the relay is skipped, not enforced. See :mod:`mailer`.
+_notifier: LeadNotifier = create_lead_notifier()
+
+#: Length caps for the contact-gate fields (defensive against oversized payloads).
+_MAX_NAME = 120
+_MAX_COMPANY = 160
+_MAX_EMAIL = 254
+_MAX_COMMENT = 4000
+
+
+def _valid_email(email: str) -> bool:
+    """Lightweight e-mail plausibility check (no external validator dependency).
+
+    Requires a single ``@`` with non-empty local part and a dotted domain. This
+    is a *format* gate for the contact form, not full RFC validation -- the real
+    confirmation is that the operator can reach the address.
+    """
+    email = email.strip()
+    if email.count("@") != 1 or len(email) > _MAX_EMAIL:
+        return False
+    local, _, domain = email.partition("@")
+    return bool(local) and "." in domain and not domain.startswith(".") and not domain.endswith(".")
 #: Shared secret guarding the scheduled-reaper poke (``POST /admin/reap``). When
 #: unset (the default) the endpoint is *disabled* (404) so there is no open,
 #: destructive trigger; set it to enable an external scheduler to sweep expired
@@ -288,13 +317,23 @@ def _require_admin(request: Request) -> None:
 
 
 class TrialRequest(BaseModel):
-    """Landing-page payload for POST /trial.
+    """Contact-gate payload for POST /trial (a demo requires a lead).
 
-    ``captcha_token`` is only needed when the broker runs with a Turnstile
-    secret; otherwise it may be omitted (the body can be ``{}``).
+    The demo is gated behind a short contact form: ``name``, ``company`` and
+    ``email`` are required and ``consent`` (the visitor agreeing that their data
+    is processed to provide/support the test access) must be True -- otherwise no
+    demo is minted. ``marketing_consent`` is a **separate, optional** opt-in for
+    follow-up contact (kept apart to respect the DSGVO Kopplungsverbot: the demo
+    must not hinge on marketing consent). ``captcha_token`` stays optional (only
+    needed when a Turnstile secret is configured).
     """
 
     captcha_token: str | None = None
+    name: str = ""
+    company: str = ""
+    email: str = ""
+    consent: bool = False
+    marketing_consent: bool = False
 
 
 class TrialResponse(BaseModel):
@@ -303,6 +342,23 @@ class TrialResponse(BaseModel):
     trial_id: str
     url: str
     state: str
+
+
+class FeedbackRequest(BaseModel):
+    """Post-demo survey payload for POST /feedback (all fields optional).
+
+    ``trial_id`` (the demo the visitor just used) lets the operator correlate the
+    feedback with the earlier lead mail from the same session -- both carry it, so
+    no server-side join or storage is needed. Everything else is a survey answer.
+    """
+
+    trial_id: str = ""
+    role: str = ""
+    satisfaction: int | None = None
+    cbc_importance: int | None = None
+    ease: int | None = None
+    intent: str = ""
+    comment: str = ""
 
 
 @app.get("/health")
@@ -353,8 +409,11 @@ def admin_metrics(request: Request) -> dict[str, object]:
             "trials_started": snap.get("trials_started", 0),
             "trials_rejected_cap": snap.get("trials_rejected_cap", 0),
             "trials_rejected_ratelimit": snap.get("trials_rejected_ratelimit", 0),
+            "trials_rejected_gate": snap.get("trials_rejected_gate", 0),
             "trials_failed": snap.get("trials_failed", 0),
             "captcha_rejected": snap.get("captcha_rejected", 0),
+            "leads_relayed": snap.get("leads_relayed", 0),
+            "feedback_received": snap.get("feedback_received", 0),
             "reaped": snap.get("reaped", 0),
         },
     }
@@ -362,18 +421,33 @@ def admin_metrics(request: Request) -> dict[str, object]:
 
 @app.post("/trial", response_model=TrialResponse)
 def start_trial(req: TrialRequest, request: Request) -> TrialResponse:
-    """Provision one isolated demo instance and return its URL.
+    """Provision one isolated demo instance behind the contact gate.
 
-    Order: optional Captcha -> **authoritative concurrent cap** (real count of
-    live demos from the platform) -> per-IP + daily rate limit -> provision. On
-    a provisioning failure the rate-limit hit is refunded so a transient platform
-    error does not eat the visitor's quota. Limits return a friendly 429; the
-    concurrent cap is the one that makes "infinitely many instances" impossible.
+    Order: optional Captcha -> **contact gate** (name/company/e-mail + consent)
+    -> **authoritative concurrent cap** -> per-IP + daily rate limit -> **relay
+    the lead** -> provision. The lead is relayed *before* provisioning so every
+    demo that boots has a delivered lead; if the relay is configured but fails,
+    the trial is refused (503, rate-limit refunded) rather than silently dropping
+    the lead. On a local/dev broker without SMTP the relay is skipped. Limits
+    return 429; a missing field/consent returns 422.
     """
     remote_ip = request.client.host if request.client else "unknown"
     if not _verify_captcha(req.captcha_token or "", remote_ip=remote_ip):
         _metrics.incr("captcha_rejected")
         raise HTTPException(status_code=400, detail="captcha verification failed")
+
+    # Contact gate: a demo requires a lead. Validate BEFORE consuming any slot or
+    # rate-limit quota, so a malformed form never costs the visitor a real try.
+    name = req.name.strip()[:_MAX_NAME]
+    company = req.company.strip()[:_MAX_COMPANY]
+    email = req.email.strip()
+    if not name or not company or not _valid_email(email) or not req.consent:
+        _metrics.incr("trials_rejected_gate")
+        raise HTTPException(
+            status_code=422,
+            detail="Bitte Name, Firma, eine gültige E-Mail angeben und der "
+            "Verarbeitung für den Testzugang zustimmen.",
+        )
 
     # First reclaim any expired demos (e.g. abandoned tabs), so the active count
     # below reflects only genuinely live instances and freed slots are reusable.
@@ -398,6 +472,28 @@ def start_trial(req: TrialRequest, request: Request) -> TrialResponse:
         raise HTTPException(status_code=429, detail=reason)
 
     trial_id = new_trial_id()
+
+    # Relay the lead first: a booted demo must always have a delivered lead. A
+    # relay failure refunds the rate-limit hit and refuses the trial (no silent
+    # data loss). Skipped when no SMTP is configured (local/dev).
+    if _notifier.configured:
+        try:
+            _notifier.send_lead(
+                name=name,
+                company=company,
+                email=email,
+                marketing_consent=bool(req.marketing_consent),
+                trial_id=trial_id,
+            )
+        except Exception:  # noqa: BLE001 - undeliverable lead -> refuse, do not drop it
+            _guard.refund(remote_ip)
+            _metrics.incr("trials_failed")
+            raise HTTPException(
+                status_code=503,
+                detail="Testzugang konnte gerade nicht eingerichtet werden -- bitte erneut.",
+            ) from None
+        _metrics.incr("leads_relayed")
+
     try:
         instance: DemoInstance = _provisioner.create(trial_id=trial_id)
     except Exception:  # noqa: BLE001 - any provisioning failure refunds the rate-limit hit
@@ -407,3 +503,32 @@ def start_trial(req: TrialRequest, request: Request) -> TrialResponse:
 
     _metrics.incr("trials_started")
     return TrialResponse(trial_id=trial_id, url=instance.url, state=instance.state)
+
+
+@app.post("/feedback")
+def submit_feedback(req: FeedbackRequest) -> dict[str, str]:
+    """Relay one post-demo survey submission to the operator (best-effort).
+
+    Unlike the lead gate, feedback is a nice-to-have: it is **best-effort and
+    never fails the visitor**. Counted always; relayed by e-mail when SMTP is
+    configured, and a relay error is swallowed (the visitor still sees a thank
+    you). Stores nothing -- the mail is the record, correlated to the lead via
+    ``trial_id``.
+    """
+    _metrics.incr("feedback_received")
+    if _notifier.configured:
+        try:
+            _notifier.send_feedback(
+                trial_id=(req.trial_id.strip() or "unbekannt")[:64],
+                answers={
+                    "Rolle": req.role.strip()[:_MAX_NAME],
+                    "Gesamteindruck (1-5)": req.satisfaction,
+                    "CbC-Wichtigkeit (1-5)": req.cbc_importance,
+                    "Bedienbarkeit (1-5)": req.ease,
+                    "Einsatz-Absicht": req.intent.strip()[:_MAX_NAME],
+                    "Freitext": req.comment.strip()[:_MAX_COMMENT],
+                },
+            )
+        except Exception:  # noqa: BLE001 - feedback must never fail the visitor
+            pass
+    return {"status": "ok"}

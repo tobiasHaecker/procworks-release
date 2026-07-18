@@ -1,0 +1,208 @@
+/* SPDX-License-Identifier: BUSL-1.1 */
+
+/* ---------------------------------------------------------------------------
+   Geführte Tour -- Overlay, Spotlight und Popup (docs/Tutorial-Konzept.md).
+
+   Farben ausschliesslich ueber die CSS-Variablen aus styles.css, damit die
+   Tour in beiden Farbschemata (dunkel/hell) funktioniert. Diese Datei fasst
+   keine bestehende Regel an; sie wird zusaetzlich zu styles.css geladen.
+   --------------------------------------------------------------------------- */
+
+/* Wurzelknoten des Overlays. Selbst ohne Groesse -- die Kinder sind fixiert
+   positioniert, damit sie unabhaengig vom Seiten-Scroll sitzen. */
+#tour-root {
+  position: fixed;
+  inset: 0;
+  z-index: 900;          /* ueber der App, unter Modal (#modal-root) und Toasts */
+  pointer-events: none;  /* der Scrim entscheidet selbst, ob er Klicks nimmt */
+}
+
+/* --- Abdunklung mit Aussparung (Spotlight) -------------------------------- */
+
+.tour-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  /* Die Aussparung um den Anker setzt engine.js als clip-path per Inline-Style. */
+}
+
+/* Standard: die Anwendung bleibt neben dem Spotlight voll bedienbar.
+   Nur bei einem schreibenden ("simulate") Schritt blockt der Scrim Klicks,
+   damit ein Klick an die falsche Stelle die Aufzeichnung nicht entkoppelt. */
+.tour-scrim.blocking { pointer-events: auto; }
+
+/* Der pulsierende Ring um das hervorgehobene Bedienelement. */
+.tour-ring {
+  position: fixed;
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 0 0 4px var(--accent-soft);
+  pointer-events: none;
+  animation: tour-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes tour-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px var(--accent-soft); }
+  50%      { box-shadow: 0 0 0 9px var(--accent-soft); }
+}
+
+/* --- Popup ---------------------------------------------------------------- */
+
+.tour-pop {
+  position: fixed;
+  width: min(340px, calc(100vw - 24px));
+  background: var(--bg-elev2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px 16px 12px;
+  color: var(--txt);
+  pointer-events: auto;
+}
+
+/* Rueckfall, wenn kein Anker gefunden wurde: mittig statt am Element. */
+.tour-pop.centered {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.tour-pop-h { display: flex; align-items: flex-start; gap: 8px; }
+.tour-pop-h h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.35;
+  flex: 1;
+  outline: none;          /* Fokus liegt hier nur fuer Screenreader */
+}
+
+.tour-x {
+  background: none;
+  border: none;
+  color: var(--txt-dim);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.tour-x:hover { color: var(--txt); }
+
+.tour-body {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--txt-dim);
+}
+
+/* Die Handlungsaufforderung -- das Einzige, was der Nutzer wirklich tun soll. */
+.tour-hint {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 600;
+  color: var(--accent-txt);
+  background: var(--accent-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.tour-warn {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--amber);
+}
+
+.tour-doc { margin: 8px 0 0; font-size: 12px; }
+.tour-doc a { color: var(--accent); }
+
+.tour-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.tour-count { font-size: 12px; color: var(--txt-dim); }
+.tour-spacer { flex: 1; }
+
+/* --- Willkommens-Angebot (zentrales Modal, ohne Spotlight) ---------------- */
+
+.tour-offer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  padding: 16px;
+}
+
+.tour-offer {
+  width: min(440px, 100%);
+  background: var(--bg-elev2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px 22px 16px;
+}
+.tour-offer h2 { margin: 0 0 8px; font-size: 18px; }
+.tour-offer p { margin: 0 0 8px; font-size: 13px; line-height: 1.55; color: var(--txt-dim); }
+.tour-offer-note { color: var(--muted); font-size: 12px !important; }
+
+.tour-offer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* --- Abzeichen „es wird nichts gespeichert" (Topbar) ---------------------- */
+
+.tour-badge {
+  background: var(--amber-soft);
+  color: var(--amber);
+  border: 1px solid var(--amber);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* --- Karte „Geführte Tour" in der Hilfe-Sicht ----------------------------- */
+
+.tour-cards { display: flex; flex-wrap: wrap; gap: 10px; }
+.tour-card {
+  flex: 1 1 220px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--bg-elev);
+}
+.tour-card b { display: block; font-size: 14px; margin-bottom: 2px; }
+.tour-card span { display: block; font-size: 12px; color: var(--txt-dim); margin-bottom: 10px; }
+
+/* --- Mobil ---------------------------------------------------------------- */
+
+@media (max-width: 720px) {
+  /* Auf schmalen Geraeten sitzt das Popup als Bottom-Sheet ueber die volle
+     Breite -- ein an ein kleines Element geheftetes Kaertchen waere dort
+     entweder abgeschnitten oder wuerde den Anker selbst verdecken. */
+  .tour-pop,
+  .tour-pop.centered {
+    left: 8px !important;
+    right: 8px;
+    top: auto !important;
+    bottom: 8px;
+    width: auto;
+    transform: none;
+  }
+}
+
+/* --- Bewegungsreduktion --------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-ring { animation: none; }
+}

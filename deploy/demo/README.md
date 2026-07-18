@@ -237,7 +237,10 @@ curl -s https://broker.procworks.de/admin/metrics \
   "active": 2, "max_active": 5, "ttl_seconds": 7200, "uptime_seconds": 1834,
   "counters": {
     "trials_started": 2, "trials_rejected_cap": 1, "trials_rejected_ratelimit": 0,
-    "trials_failed": 0, "captcha_rejected": 0, "reaped": 0
+    "trials_rejected_gate": 3, "trials_failed": 0, "captcha_rejected": 0,
+    "leads_relayed": 2, "lead_relay_failed": 0,
+    "feedback_received": 1, "feedback_relayed": 1, "feedback_relay_failed": 0,
+    "reaped": 0
   }
 }
 ```
@@ -246,6 +249,15 @@ The counters are in-process and reset on a broker restart (best-effort, like the
 API's `metrics.py`); they never influence request handling. `active` +
 `trials_started` are what a cost view is built from — no fabricated euro figure.
 Point any dashboard/pinger at it, or scrape it into your metrics stack.
+
+**Watch `feedback_relay_failed`.** Feedback is best-effort — the visitor always
+gets a thank you — and the broker stores nothing, so a broken SMTP channel would
+discard every submission unnoticed. Unlike a lead (an undeliverable one answers
+503 and refuses the trial, see `lead_relay_failed`), a lost survey is invisible
+except through this counter and the matching `broker` log line (`fly logs`,
+metadata only — never the answers). Non-zero means feedback is being lost right
+now; check the `LEAD_SMTP_*` secrets first (e.g. after a mailbox password
+rotation).
 
 ### Bounding the number of instances (no Captcha required)
 

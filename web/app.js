@@ -328,7 +328,25 @@ function describeError(err) {
 // Web-Client
 // --------------------------------------------------------------------------
 
+/**
+ * Der einzige Weg, auf dem dieser Client die API erreicht.
+ *
+ * Genau deshalb sitzt hier der Sperrpunkt der gefuehrten Tour: Solange eine
+ * Sandkasten-Tour laeuft, beantwortet ``Tour.intercept`` jeden schreibenden
+ * Aufruf aus einer Aufzeichnung, und es findet KEIN fetch statt. Dadurch
+ * entstehen durch Tutorial-Eingaben keine dauerhaften Daten
+ * (docs/Tutorial-Konzept.md, §4). Ausserhalb der Tour ist der Aufruf ein No-op.
+ *
+ * @param {string} method HTTP-Methode.
+ * @param {string} path Pfad ab der API-Basis.
+ * @param {object} [body] Anfragekoerper (JSON).
+ * @returns {Promise<*>} Antwortkoerper; wirft bei Fehlern {status, detail}.
+ */
 async function request(method, path, body) {
+  if (typeof Tour !== "undefined") {
+    const simulated = Tour.intercept(method, path, body);
+    if (simulated) return simulated();
+  }
   let resp;
   try {
     resp = await fetch(state.apiBase + path, {
@@ -793,7 +811,11 @@ function renderGraph(schema, opts) {
       root.appendChild(svg("text", { class: "gcond", x: mx, y: (y1 + y2) / 2 - 6, "text-anchor": "middle" }, document.createTextNode(e.condition)));
     }
     if (opts.onPlus) {
-      const g = svg("g", { class: "gplus-wrap", style: "cursor:pointer", onClick: () => opts.onPlus(e.source) });
+      // data-tour/-src: Anker der gefuehrten Tour. Sie zeigt gezielt auf das
+      // "+" EINER bestimmten Kante, deshalb reist die Quellknoten-Id mit.
+      const g = svg("g", { class: "gplus-wrap", style: "cursor:pointer",
+        "data-tour": "model.plus", "data-tour-src": e.source,
+        onClick: () => opts.onPlus(e.source) });
       g.appendChild(svg("circle", { class: "gplus", cx: mx, cy: (y1 + y2) / 2 + 10, r: 10 }));
       g.appendChild(svg("text", { class: "gplus-txt", x: mx, y: (y1 + y2) / 2 + 14, "text-anchor": "middle" }, document.createTextNode("+")));
       root.appendChild(g);
@@ -881,7 +903,7 @@ function renderGraph(schema, opts) {
     renderNodeBadges(root, schema, node, p, opts);
   });
 
-  const wrap = el("div", { class: "canvas-wrap" }, root,
+  const wrap = el("div", { class: "canvas-wrap", "data-tour": "model.graph" }, root,
     el("div", { class: "canvas-hint" }, "Scrollen/Wischen: Verschieben \u00B7 Strg/Pinch: Zoom \u00B7 Ziehen: Verschieben"));
   attachPanZoom(wrap, root);
   return wrap;
@@ -1347,7 +1369,7 @@ function viewModel() {
         : null,
       libraryToggleButton(schema),
       draft
-        ? el("button", { class: "btn small green", onClick: releaseSchema }, "Freigeben")
+        ? el("button", { class: "btn small green", "data-tour": "model.release", onClick: releaseSchema }, "Freigeben")
         : el("button", { class: "btn small primary", onClick: () => { state.view = "run"; setActiveNav(); render(); } }, "Zur Ausf\u00FChrung"),
       draft && hasRole("modeler", "admin")
         ? el("button", { class: "btn small", onClick: startTestInstance, title: "Test-Instanz dieses Entwurfs starten und im 4-Quadranten-Cockpit durchspielen" }, "\u2697 Pr\u00FCfinstanz")
@@ -1452,6 +1474,7 @@ function bindingPalette(schema, draft) {
         : "zuerst links einen Schritt wählen";
   const tabBtn = (id, label) => el("button", {
     class: "pal-tab" + (tab === id ? " active" : ""),
+    "data-tour": "model.tab." + id,
     onClick: () => { state.paletteTab = id; render(); },
   }, label);
   const head = el("div", { class: "panel-h" },
@@ -2559,7 +2582,7 @@ function findingsPanel() {
       el("span", { class: "rule" }, f.rule),
       el("span", null, f.message + (f.node_id ? ` [${f.node_id}]` : "")))));
   }
-  return el("div", { class: "panel" },
+  return el("div", { class: "panel", "data-tour": "model.findings" },
     el("div", { class: "panel-h" }, el("h2", null, "Korrektheit"), el("span", { class: "sub" }, "live vom Kern")), body);
 }
 
@@ -3975,7 +3998,7 @@ async function viewMonitor() {
       el("tr", { class: r.i.id === state.instanceId ? "clickable selected" : "clickable", onClick: () => openInstanceFromMonitor(r.i.id) }, ...r.cells.map((c) => el("td", null, c))))
       : [el("tr", null, el("td", { colspan: 4 }, emptyState("Keine Instanzen. Starte eine in der Ausf\u00FChrungs-Sicht.")))])));
 
-  content.appendChild(el("div", { class: "panel" },
+  content.appendChild(el("div", { class: "panel", "data-tour": "monitor.instances" },
     el("div", { class: "panel-h" }, el("h2", null, "Aktive Instanzen"), el("span", { class: "sub" }, "Klick \u00F6ffnet Detail")),
     el("div", { class: "panel-b" }, tbl)));
 
@@ -4073,7 +4096,7 @@ async function viewAdmin() {
   // Oberflaeche fuehrt selbst KEIN pg_dump aus -- sie setzt nur einen
   // Ausloese-Marker; der Sicherungsdienst fuehrt sie kurz darauf aus.
   const backupsBody = el("div", { class: "panel-b" });
-  content.appendChild(el("div", { class: "panel" },
+  content.appendChild(el("div", { class: "panel", "data-tour": "admin.backups" },
     el("div", { class: "panel-h" },
       el("h2", null, "Sicherungen"),
       el("span", { class: "sub" }, "Datensicherung \u00B7 nur Ansicht")),
@@ -4085,7 +4108,7 @@ async function viewAdmin() {
   // Wiederholung, zugestellt oder als Dead-Letter gescheitert ist. Ein manueller
   // Versand stoesst faellige Eintraege erneut an (POST /admin/mail-outbox/dispatch).
   const mailBody = el("div", { class: "panel-b" });
-  content.appendChild(el("div", { class: "panel" },
+  content.appendChild(el("div", { class: "panel", "data-tour": "admin.mail" },
     el("div", { class: "panel-h" },
       el("h2", null, "E-Mail-Ausgang"),
       el("span", { class: "sub" }, "Benachrichtigungen · nur Ansicht")),
@@ -4094,7 +4117,7 @@ async function viewAdmin() {
 
   // Wartung: destruktiv, daher unter den Sicherungen. Nur Administratoren
   // duerfen zuruecksetzen oder Beispieldaten laden (POST /admin/reset).
-  content.appendChild(el("div", { class: "panel" },
+  content.appendChild(el("div", { class: "panel", "data-tour": "admin.maintenance" },
     el("div", { class: "panel-h" },
       el("h2", null, "Wartung"),
       el("span", { class: "sub" }, "Daten zur\u00FCcksetzen \u00B7 Beispiel laden")),
@@ -4440,7 +4463,7 @@ async function viewTasks() {
     });
     body.appendChild(table(["Aufgabe", "Prozess", "Fällig", "Berechtigte", ""], rows));
   }
-  content.appendChild(el("div", { class: "panel" },
+  content.appendChild(el("div", { class: "panel", "data-tour": "tasks.list" },
     el("div", { class: "panel-h" }, el("h2", null, "Offene Aufgaben"), el("span", { class: "sub" }, tasks.length + " Eintr\u00E4ge")),
     body));
 
@@ -4509,7 +4532,7 @@ async function absencePanel(agentId) {
     listBody.appendChild(table(["Zeitraum", "Notiz", "Status", ""], rows));
   }
 
-  return el("div", { class: "panel" },
+  return el("div", { class: "panel", "data-tour": "tasks.absence" },
     el("div", { class: "panel-h" },
       el("h2", null, "Abwesenheit / Vertretung"),
       el("span", { class: "sub" }, "Vertreter erh\u00E4lt Aufgaben w\u00E4hrend der Abwesenheit")),
@@ -5662,6 +5685,11 @@ function viewHelp() {
   const content = byId("content");
   clear(content);
 
+  // Gefuehrte Tour -- ganz oben, weil sie der schnellste Einstieg ist. Zeigt je
+  // Rolle des Angemeldeten eine Karte, inkl. Wiedereinstieg an der Stelle, an
+  // der eine abgebrochene Tour stehengeblieben ist.
+  content.appendChild(tourPanel());
+
   // Intro / principle.
   content.appendChild(el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "ProcWorks \u2013 Hilfe")),
@@ -5708,6 +5736,48 @@ function viewHelp() {
       el("ul", { style: "margin:4px 0;padding-left:18px;line-height:1.7" },
         el("li", null, el("a", { href: docUrl("README.md"), target: "_blank", rel: "noopener" }, "Dokumentations-\u00DCbersicht (nach Rolle)")),
         el("li", null, el("a", { href: DISCLAIMER_URL, target: "_blank", rel: "noopener" }, "Haftungsausschluss"))))));
+}
+
+/**
+ * Baut das Panel „Gefuehrte Tour" der Hilfe-Sicht.
+ *
+ * Listet alle Touren, die zur Rolle des Angemeldeten passen. Eine abgebrochene
+ * Tour bietet zusaetzlich das Fortsetzen an der gemerkten Stelle an; eine
+ * bereits durchlaufene laesst sich jederzeit erneut starten -- die Hilfe ist
+ * der dauerhafte Zugang, nachdem das automatische Angebot verstummt ist.
+ *
+ * @returns {HTMLElement} Das Panel (leer, falls keine Tour passt).
+ */
+function tourPanel() {
+  if (typeof Tour === "undefined") return el("div");
+  const tours = Tour.availableTours();
+  if (!tours.length) return el("div");
+  const cards = el("div", { class: "tour-cards" });
+  tours.forEach((tour) => {
+    const at = Tour.savedProgress(tour);
+    cards.appendChild(el("div", { class: "tour-card" },
+      el("b", null, tour.title),
+      el("span", null,
+        `${tour.subtitle} · ${tour.steps.length} Schritte` +
+        (Tour.isDone(tour) ? " · bereits gesehen" : "")),
+      el("div", { class: "row", style: "gap:6px" },
+        at
+          ? el("button", { class: "btn small primary", onClick: () => Tour.start(tour.id, { resume: true }) },
+              `Bei Schritt ${at + 1} fortsetzen`)
+          : null,
+        el("button", { class: at ? "btn small ghost" : "btn small primary",
+          onClick: () => Tour.start(tour.id, { resume: false }) },
+          at ? "Von vorn" : "Tour starten"))));
+  });
+  return el("div", { class: "panel" },
+    el("div", { class: "panel-h" },
+      el("h2", null, "Geführte Tour"),
+      el("span", { class: "sub" }, "Popups führen dich durch die wichtigsten Funktionen")),
+    el("div", { class: "panel-b" },
+      el("p", { class: "muted", style: "font-size:13px;margin:0 0 12px" },
+        "Die Modellierer-Tour arbeitet auf einem Beispielprozess in deinem Browser – ",
+        "es wird dabei nichts gespeichert. Abbrechen jederzeit mit Esc."),
+      cards));
 }
 
 // --------------------------------------------------------------------------
@@ -5986,8 +6056,14 @@ function scaleField(name) {
 // are POSTed cross-origin to the broker (which relays them by e-mail and stores
 // nothing); delivery is best-effort, so the visitor is always thanked, even if
 // the POST fails. Nothing here touches the correctness core.
+// sessionStorage key: set as soon as the survey has been shown once (by the
+// "Demo beenden" button or by the exit-intent hook below), so a visitor is
+// asked at most once per demo session and never nagged.
+const SURVEY_OFFERED_KEY = "demoSurveyOffered";
+
 function endDemoSurvey() {
   if (!state.demoFeedbackUrl) return;
+  sessionStorage.setItem(SURVEY_OFFERED_KEY, "1");
   const roleSel = el("select", { class: "input" },
     el("option", { value: "" }, "– bitte wählen –"),
     ...["Fachbereich / Prozessverantwortung", "IT / Entwicklung", "Beratung / Consulting",
@@ -6037,6 +6113,40 @@ function endDemoSurvey() {
       ["Es hilft uns, ProcWorks zu verbessern. Du kannst den Tab jetzt schließen."]);
     return true;
   }, "Absenden & beenden");
+}
+
+// Minimum time on the page before the exit-intent survey may appear. A visitor
+// who tabs away in the first minute has not seen enough to answer, and being
+// asked immediately reads as nagging.
+const SURVEY_MIN_DWELL_MS = 60000;
+
+// Offer the survey when the visitor *leaves* the tab, not only when they use
+// the "Demo beenden" button -- closing the window is otherwise the one exit
+// that yields no feedback at all.
+//
+// Deliberately hooked to ``visibilitychange`` rather than ``beforeunload``:
+// browsers forbid arbitrary UI (and any reliable async work) during unload, so
+// a survey shown there would either be suppressed or lose the answers. Here the
+// modal is opened while the tab is hidden and is simply *waiting* when the
+// visitor comes back. Someone who never returns is unreachable either way --
+// that case is a mail, which we deliberately do not send (contact data lives
+// only for the duration of the lead request; see deploy/demo/broker).
+//
+// Guarded so it fires at most once, only in the public demo (a feedback URL is
+// configured), only after a real dwell time, and never on top of an open modal
+// or a half-filled form (``userIsBusy``).
+function installExitIntentSurvey() {
+  if (!state.demoFeedbackUrl) return;
+  if (sessionStorage.getItem(SURVEY_OFFERED_KEY) === "1") return;
+  const armedAt = Date.now();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "hidden") return;
+    if (sessionStorage.getItem(SURVEY_OFFERED_KEY) === "1") return;
+    if (Date.now() - armedAt < SURVEY_MIN_DWELL_MS) return;
+    if (userIsBusy()) return;
+    if (typeof Tour !== "undefined" && Tour.running) return;   // Tour laeuft
+    endDemoSurvey();   // marks the session as offered
+  });
 }
 
 function mountDemoBanner() {
@@ -6155,7 +6265,31 @@ function render() {
   byId("view-sub").textContent = meta.sub;
   renderSchemaPicker();
   setActiveNav();
-  Promise.resolve(meta.fn()).catch((err) => { const d = describeError(err); toast("err", d.title, d.lines); });
+  renderTourBadge();
+  Promise.resolve(meta.fn())
+    .catch((err) => { const d = describeError(err); toast("err", d.title, d.lines); })
+    // Die Sichten bauen ihr DOM bei jedem Rendern komplett neu auf -- der Anker
+    // der laufenden Tour existiert danach nicht mehr und muss neu gesucht
+    // werden. Gekapselt, damit ein Fehler in der Tour nie die Sicht mitreisst.
+    .then(() => { if (typeof Tour !== "undefined") Tour.afterRender(); });
+}
+
+/**
+ * Zeigt in der Topbar das Abzeichen „Tutorial – es wird nichts gespeichert",
+ * solange die Tour im schreibfreien Sandkasten laeuft.
+ *
+ * Ehrlichkeit gegenueber dem Nutzer: Er arbeitet dort auf einem Beispielprozess
+ * und mit abgespielten Antworten -- das muss sichtbar sein, nicht versteckt.
+ */
+function renderTourBadge() {
+  const slot = byId("tour-badge-slot");
+  if (!slot) return;
+  clear(slot);
+  if (typeof Tour === "undefined" || !Tour.sandboxed) return;
+  slot.appendChild(el("span", {
+    class: "tour-badge",
+    title: "Im Tutorial verlaesst kein schreibender Aufruf den Browser.",
+  }, "Tutorial – es wird nichts gespeichert"));
 }
 
 // --------------------------------------------------------------------------
@@ -6331,6 +6465,14 @@ async function boot() {
       state.revision = res && typeof res.revision === "number" ? res.revision : 0;
     } catch (_e) { /* keep current baseline */ }
     startLiveUpdates();
+    // Erstkontakt: die zur Rolle passende gefuehrte Tour anbieten, sofern sie
+    // noch nicht erledigt oder dreimal verschoben wurde. In der oeffentlichen
+    // Demo greift derselbe Pfad, weil sich der Besucher dort automatisch
+    // anmeldet (docs/Tutorial-Konzept.md, §7).
+    if (typeof Tour !== "undefined") Tour.maybeOffer();
+    // Nur in der oeffentlichen Demo wirksam: Umfrage auch beim Verlassen des
+    // Tabs anbieten, nicht erst am "Demo beenden"-Knopf.
+    installExitIntentSurvey();
   } catch (err) {
     setConnected(false);
     const d = describeError(err);

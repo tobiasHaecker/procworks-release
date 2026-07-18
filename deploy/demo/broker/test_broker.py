@@ -460,9 +460,48 @@ def test_feedback_relays_and_is_best_effort(monkeypatch: pytest.MonkeyPatch) -> 
     assert resp.status_code == 200 and resp.json()["status"] == "ok"
     assert len(fake.feedback) == 1 and fake.feedback[0]["trial_id"] == "abc"
     assert broker._metrics.snapshot().get("feedback_received") == 1
+    assert broker._metrics.snapshot().get("feedback_relayed") == 1
     # A relay failure must NOT surface to the visitor.
     broker._notifier = _FakeNotifier(boom=True)
     assert client.post("/feedback", json={"trial_id": "xyz"}).status_code == 200
+
+
+def test_feedback_relay_failure_is_logged_and_counted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A swallowed relay error must still be visible -- log + counter, no answers.
+
+    Feedback is best-effort (the visitor always sees a thank you) and nothing is
+    stored, so a broken SMTP channel would discard every submission unnoticed.
+    The lead path cannot hide a failure (it answers 503); this one only surfaces
+    via the log line and ``feedback_relay_failed``.
+    """
+    client = _fresh_client(monkeypatch)
+    broker._notifier = _FakeNotifier(boom=True)
+    with caplog.at_level("ERROR", logger="broker"):
+        resp = client.post(
+            "/feedback",
+            json={"trial_id": "t42", "role": "IT", "satisfaction": 5, "comment": "geheim"},
+        )
+    assert resp.status_code == 200  # visitor is never bothered
+    snap = broker._metrics.snapshot()
+    assert snap.get("feedback_received") == 1
+    assert snap.get("feedback_relay_failed") == 1
+    assert snap.get("feedback_relayed") is None
+
+    text = caplog.text
+    assert "t42" in text  # the trial id makes the loss traceable
+    assert "geheim" not in text  # ... but never the visitor's answers
+
+
+def test_lead_relay_failure_is_logged_and_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An undeliverable lead is counted separately from other trial failures."""
+    client = _fresh_client(monkeypatch)
+    broker._notifier = _FakeNotifier(boom=True)
+    assert client.post("/trial", json=_LEAD).status_code == 503
+    snap = broker._metrics.snapshot()
+    assert snap.get("lead_relay_failed") == 1
+    assert snap.get("trials_started") is None
 
 
 # --- mailer: transport + formatting ----------------------------------------

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import os
 import threading
 import time
@@ -234,6 +235,10 @@ _metrics = _Metrics()
 #: (data minimisation). ``configured is False`` on a broker without SMTP (local
 #: dev) -> the relay is skipped, not enforced. See :mod:`mailer`.
 _notifier: LeadNotifier = create_lead_notifier()
+#: Broker log (uvicorn configures the handlers; ``fly logs`` shows the output).
+#: Only ever gets operational metadata -- never a visitor's contact details or
+#: survey answers, which stay in the relayed mail (data minimisation).
+_log = logging.getLogger("broker")
 
 #: Length caps for the contact-gate fields (defensive against oversized payloads).
 _MAX_NAME = 120
@@ -486,7 +491,9 @@ def start_trial(req: TrialRequest, request: Request) -> TrialResponse:
                 trial_id=trial_id,
             )
         except Exception:  # noqa: BLE001 - undeliverable lead -> refuse, do not drop it
+            _log.exception("lead relay failed for trial %s -- refusing the trial", trial_id)
             _guard.refund(remote_ip)
+            _metrics.incr("lead_relay_failed")
             _metrics.incr("trials_failed")
             raise HTTPException(
                 status_code=503,
@@ -514,12 +521,19 @@ def submit_feedback(req: FeedbackRequest) -> dict[str, str]:
     configured, and a relay error is swallowed (the visitor still sees a thank
     you). Stores nothing -- the mail is the record, correlated to the lead via
     ``trial_id``.
+
+    Swallowed is **not** silent: a relay failure is logged (metadata only, never
+    the answers) and counted as ``feedback_relay_failed`` on ``/admin/metrics``.
+    Otherwise broken SMTP would discard every submission unnoticed -- and since
+    nothing is stored, the feedback would be gone for good. The lead path cannot
+    hide this (it answers 503), this one can.
     """
     _metrics.incr("feedback_received")
+    trial_id = (req.trial_id.strip() or "unbekannt")[:64]
     if _notifier.configured:
         try:
             _notifier.send_feedback(
-                trial_id=(req.trial_id.strip() or "unbekannt")[:64],
+                trial_id=trial_id,
                 answers={
                     "Rolle": req.role.strip()[:_MAX_NAME],
                     "Gesamteindruck (1-5)": req.satisfaction,
@@ -530,5 +544,9 @@ def submit_feedback(req: FeedbackRequest) -> dict[str, str]:
                 },
             )
         except Exception:  # noqa: BLE001 - feedback must never fail the visitor
-            pass
+            # Metadata only: the trial id, never the visitor's answers.
+            _log.exception("feedback relay failed for trial %s -- submission lost", trial_id)
+            _metrics.incr("feedback_relay_failed")
+        else:
+            _metrics.incr("feedback_relayed")
     return {"status": "ok"}

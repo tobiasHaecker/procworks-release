@@ -76,6 +76,10 @@
   --shadow: 0 8px 30px rgba(30, 45, 80, .12);
 }
 * { box-sizing: border-box; }
+/* `text-size-adjust: 100%` verhindert die automatische Schriftvergroesserung,
+   die mobile Safari/Chrome sonst auf einzelne Textbloecke anwenden – sie wuerde
+   die sorgfaeltig abgestimmten Schriftgroessen unvorhersehbar aufblaehen. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 html, body { margin: 0; height: 100%; }
 body {
   font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
@@ -85,7 +89,13 @@ body {
 }
 
 /* ---- Layout ---- */
-.app { display: grid; grid-template-columns: 244px 1fr; height: 100vh; }
+/* Hoehe: `dvh` (dynamic viewport height) folgt dem tatsaechlich sichtbaren
+   Bereich, wenn mobile Browser ihre Adress-/Werkzeugleiste ein- und ausblenden.
+   `100vh` meint auf iOS die *grosse* Viewport-Hoehe – die App waere damit hoeher
+   als der sichtbare Bereich und ihr unteres Ende (Fusszeile der Schublade,
+   Seitenende) verschwaende dauerhaft hinter der Safari-Leiste. `vh` bleibt als
+   Rueckfall fuer Browser ohne `dvh` stehen. */
+.app { display: grid; grid-template-columns: 244px 1fr; height: 100vh; height: 100dvh; }
 .sidebar {
   background: var(--bg-elev); border-right: 1px solid var(--line);
   padding: 18px 14px; display: flex; flex-direction: column; gap: 6px;
@@ -693,7 +703,11 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
      ausserhalb des Bildschirms; `data-mobile-nav="open"` am <html> (app.js)
      schiebt sie ein. */
   .sidebar {
-    position: fixed; top: 0; left: 0; bottom: 0; z-index: 60;
+    position: fixed; top: 0; left: 0; z-index: 60;
+    /* Hoehe wie die App am sichtbaren Viewport ausrichten (siehe `.app`), statt
+       per `bottom: 0` am *grossen* Viewport – sonst liegt die Fusszeile der
+       Schublade (Theme-Schalter, Abmelden) unerreichbar hinter der Safari-Leiste. */
+    height: 100vh; height: 100dvh;
     width: min(84vw, 300px); overflow-y: auto;
     transform: translateX(-100%);
     transition: transform .22s ease;
@@ -735,6 +749,18 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 
   /* Inhalt: schmaleres Aussenmass, mehr Platz fuer die Aufgabenkarten. */
   .content { padding: 16px 14px 48px; }
+
+  /* Eingabefelder mindestens 16px: mobile Safari zoomt beim Antippen eines
+     Feldes automatisch hinein, sobald dessen Schrift kleiner als 16px ist – und
+     zoomt danach *nicht* wieder heraus. Die Seite bleibt dann vergroessert und
+     seitlich verschoben stehen, was die gesamte Ansicht verzerrt wirken laesst.
+     Gilt fuer alle Felder inkl. der Sidebar-Fusszeile (API/Token) und der
+     Prozessauswahl. Nur mobil – der Desktop behaelt seine kompakte Optik. */
+  input[type=text], input[type=number], input[type=password], input[type=date],
+  input[type=datetime-local], select, textarea,
+  .api-field input, .picker select {
+    font-size: 16px;
+  }
 
   /* Tabellen als gestapelte Karten. Jede Zeile wird zu einer Karte, die Zellen
      stapeln sich; die (visuell entfernte) Kopfzeile wird je Zelle ueber

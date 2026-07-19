@@ -12,6 +12,7 @@ import ast
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import app as broker
@@ -372,11 +373,15 @@ def test_metrics_counts_ratelimit_and_reaped(monkeypatch: pytest.MonkeyPatch) ->
 class _FakeNotifier:
     """Records relayed leads/feedback (or raises) in place of real SMTP."""
 
-    def __init__(self, *, configured: bool = True, boom: bool = False) -> None:
+    def __init__(
+        self, *, configured: bool = True, boom: bool = False, welcome_boom: bool = False
+    ) -> None:
         self._configured = configured
         self._boom = boom
+        self._welcome_boom = welcome_boom
         self.leads: list[dict] = []
         self.feedback: list[dict] = []
+        self.welcomes: list[dict] = []
 
     @property
     def configured(self) -> bool:
@@ -391,6 +396,11 @@ class _FakeNotifier:
         if self._boom:
             raise RuntimeError("smtp down")
         self.feedback.append(kw)
+
+    def send_welcome(self, **kw: object) -> None:
+        if self._boom or self._welcome_boom:
+            raise RuntimeError("smtp down")
+        self.welcomes.append(kw)
 
 
 def test_trial_gate_rejects_missing_or_invalid_contact(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -553,6 +563,170 @@ def test_notifier_send_feedback_lists_answers() -> None:
     notifier.send_feedback(trial_id="t9", answers={"Rolle": "IT", "Gesamteindruck (1-5)": 5})
     body = captured[0].get_content()  # type: ignore[attr-defined]
     assert "t9" in body and "Rolle: IT" in body and "Gesamteindruck (1-5): 5" in body
+
+
+# --- Willkommens-Mail an den Besucher --------------------------------------
+
+
+def _welcome_notifier() -> tuple[mailer.LeadNotifier, list]:
+    """A notifier writing into a list instead of SMTP; returns (notifier, sent)."""
+    sent: list = []
+
+    class _T:
+        def send(self, message: object) -> None:
+            sent.append(message)
+
+    return mailer.LeadNotifier(sender="hallo@procworks.de", recipient="ops@x", transport=_T()), sent
+
+
+def _welcome_parts(message) -> tuple[str, str]:  # type: ignore[no-untyped-def]
+    """Return (plain, html) bodies of a multipart/alternative welcome mail."""
+    plain = message.get_body(preferencelist=("plain",)).get_content()
+    rich = message.get_body(preferencelist=("html",)).get_content()
+    return plain, rich
+
+
+def test_welcome_mail_goes_to_visitor_with_link_and_validity() -> None:
+    """The visitor gets their own link plus when the instance disappears."""
+    notifier, sent = _welcome_notifier()
+    start = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc)
+    notifier.send_welcome(
+        name="Max Muster",
+        email="max@muster.de",
+        url="https://procworks-demo-t1.fly.dev",
+        ttl_seconds=7200,
+        marketing_consent=False,
+        started_at=start,
+    )
+    msg = sent[0]
+    assert msg["To"] == "max@muster.de"          # visitor, not the operator inbox
+    assert msg["Reply-To"] == "ops@x"            # "just reply" reaches a human
+    assert "Max" in msg["Subject"]
+    plain, rich = _welcome_parts(msg)
+    for body in (plain, rich):
+        assert "https://procworks-demo-t1.fly.dev" in body
+        assert "19.07.2026" in body and "2 Stunden" in body
+    assert msg.get_content_type() == "multipart/alternative"
+
+
+def test_welcome_mail_is_branded_html_without_remote_assets() -> None:
+    """The HTML part carries the ProcWorks look and loads nothing from outside.
+
+    Remote images are blocked by default in most clients, so an image-based
+    header would arrive as a grey box -- the design must survive without one.
+    """
+    notifier, sent = _welcome_notifier()
+    notifier.send_welcome(
+        name="Max", email="a@b.de", url="https://x.fly.dev", ttl_seconds=3600,
+        marketing_consent=False,
+    )
+    _, rich = _welcome_parts(sent[0])
+    assert mailer.BRAND["accent"] in rich and mailer.BRAND["bg"] in rich
+    assert "<img" not in rich                     # no remote assets, no tracking pixel
+    assert "<style" not in rich                   # every rule inlined (Gmail strips <style>)
+    assert 'role="presentation"' in rich          # table layout (Outlook has no flex/grid)
+
+
+def test_welcome_mail_html_is_well_formed() -> None:
+    """Guard: no inlined value may break out of a ``style="..."`` attribute.
+
+    Caught a real bug: the font stack carried double quotes ("Segoe UI"), which
+    terminated every style attribute it landed in and shredded the layout. The
+    parser check is the cheap way to keep that from coming back.
+    """
+    from html.parser import HTMLParser
+
+    notifier, sent = _welcome_notifier()
+    notifier.send_welcome(
+        name="Max", email="a@b.de", url="https://x.fly.dev", ttl_seconds=7200,
+        marketing_consent=True,
+    )
+    _, rich = _welcome_parts(sent[0])
+    assert '"Segoe UI"' not in rich          # would end the enclosing attribute
+    assert "font:" in rich                   # ...and the stack is actually inlined
+
+    seen: list[str] = []
+
+    class _P(HTMLParser):
+        def handle_starttag(self, tag: str, attrs: list) -> None:
+            seen.append(tag)
+            for key, value in attrs:
+                # A shredded attribute shows up as junk keys like `system-ui`.
+                assert key.isascii() and " " not in key, f"broken attribute: {key}={value!r}"
+
+    _P().feed(rich)
+    assert seen.count("table") >= 5 and "a" in seen
+
+
+def test_welcome_mail_promo_block_requires_marketing_consent() -> None:
+    """Advertising rides on the OPTIONAL opt-in, never on the mandatory consent.
+
+    The contact form promises not to couple the demo to marketing consent
+    (Kopplungsverbot), so the soliciting block must be absent without it -- while
+    the link + validity, which the visitor asked for, are always there.
+    """
+    notifier, sent = _welcome_notifier()
+    for consent in (False, True):
+        notifier.send_welcome(
+            name="Max", email="a@b.de", url="https://x.fly.dev", ttl_seconds=3600,
+            marketing_consent=consent,
+        )
+    plain_off, html_off = _welcome_parts(sent[0])
+    plain_on, html_on = _welcome_parts(sent[1])
+    assert "30 Minuten" not in plain_off and "30 Minuten" not in html_off
+    assert "30 Minuten" in plain_on and "30 Minuten" in html_on
+    assert "Widerspruch" in plain_on and "Widerspruch" in html_on  # objection route
+    for body in (plain_off, html_off):            # the transactional core stays
+        assert "https://x.fly.dev" in body
+
+
+def test_welcome_mail_ttl_phrases() -> None:
+    """The lifetime reads as a human phrase, including the no-reaping case."""
+    assert mailer._humanize_duration(3600) == "1 Stunde"
+    assert mailer._humanize_duration(7200) == "2 Stunden"
+    assert mailer._humanize_duration(5400) == "90 Minuten"
+    assert mailer._humanize_duration(0) == "unbegrenzt"
+
+
+def test_welcome_mail_escapes_visitor_input() -> None:
+    """A name from the form is untrusted input and must not inject markup."""
+    notifier, sent = _welcome_notifier()
+    notifier.send_welcome(
+        name="<script>alert(1)</script> Max", email="a@b.de",
+        url="https://x.fly.dev", ttl_seconds=3600, marketing_consent=False,
+    )
+    _, rich = _welcome_parts(sent[0])
+    assert "<script>" not in rich
+    assert "&lt;script&gt;" in rich
+
+
+def test_trial_sends_welcome_mail_after_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A successful trial mails the visitor their link with the configured TTL."""
+    client = _fresh_client(monkeypatch)
+    fake = _FakeNotifier()
+    broker._notifier = fake
+    resp = client.post("/trial", json=_LEAD)
+    assert resp.status_code == 200
+    assert len(fake.welcomes) == 1
+    welcome = fake.welcomes[0]
+    assert welcome["email"] == "max@muster.de"
+    assert welcome["url"] == resp.json()["url"]
+    assert welcome["ttl_seconds"] == broker._TTL_SECONDS
+    assert broker._metrics.snapshot().get("welcome_mails_sent") == 1
+
+
+def test_trial_survives_failing_welcome_mail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Best-effort: an undeliverable welcome mail never breaks a running demo.
+
+    The opposite of the lead relay (fail-closed) -- here the demo already exists
+    and the browser is being redirected into it.
+    """
+    client = _fresh_client(monkeypatch)
+    broker._notifier = _FakeNotifier(welcome_boom=True)
+    resp = client.post("/trial", json=_LEAD)
+    assert resp.status_code == 200
+    assert len(broker._provisioner.list_ids()) == 1   # demo lives on
+    assert broker._metrics.snapshot().get("welcome_mail_failed") == 1
 
 
 def test_dockerfile_copies_every_runtime_module_app_imports() -> None:

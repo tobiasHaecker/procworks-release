@@ -26,7 +26,7 @@ Die Stufen erzaehlen den Bogen der Modellierer-Tour:
 Stufe Zustand                                           Ergebnis
 ===== ================================================= ======================
 0     zwei fertig verdrahtete Schritte                  korrekt
-1     nach dem Einfuegen von "Antragsteller informieren" korrekt
+1     nach dem Einfuegen von "Resturlaub pruefen"          korrekt
 --    Versuch, dort "Urlaubstage" **lesend** zu binden  **abgelehnt (D1)**
 2     nach dem Binden der Rolle                         korrekt
 ===== ================================================= ======================
@@ -70,7 +70,7 @@ ORG_ID = "tour-org"
 #: Beschriftungen der Knoten, auf die sich die Tour-Schritte beziehen.
 LABEL_ERFASSEN = "Antrag erfassen"
 LABEL_PRUEFEN = "Antrag prüfen"
-LABEL_INFORMIEREN = "Antragsteller informieren"
+LABEL_RESTURLAUB = "Resturlaub prüfen"
 
 #: Zielpfad der abgelegten Schnappschuesse (relativ zum Repo-Stamm).
 FIXTURE_PATH = Path(__file__).resolve().parents[2] / "web" / "tour" / "fixtures.js"
@@ -127,14 +127,23 @@ def build_stages() -> list[ProcessSchema]:
     s = ops.assign_staff_rule(s, pruefen, _role("teamleitung"))
     stage0 = s
 
-    # Stufe 1: der Nutzer fuegt einen Schritt ein -- bewusst gleich hinter dem
+    # Stufe 1: der Nutzer fuegt "Resturlaub pruefen" ein -- gleich hinter dem
     # Start und damit VOR dem Schreiber der Urlaubstage. Das legt die Buehne fuer
     # die Ablehnung in build_rejection().
-    stage1 = ops.serial_insert(stage0, LABEL_INFORMIEREN, after_node_id="start")
-    informieren = _nid(stage1, LABEL_INFORMIEREN)
+    #
+    # Die Beschriftung ist mit Bedacht gewaehlt: Der Schritt muss *echte Arbeit
+    # einer Sachbearbeiterin* sein, damit das spaetere Binden der Rolle fachlich
+    # einleuchtet -- ein reiner Benachrichtigungsschritt tat das nicht (ein
+    # unbeteiligter Tester erwartete zu Recht, "dass die Sachbearbeiterin auch
+    # eine Sache bearbeiten muss"). Zugleich *braucht* dieser Schritt die
+    # beantragten Urlaubstage, die erst danach erfasst werden -- damit erklaert
+    # sich die D1-Ablehnung aus der Fachlichkeit selbst, statt konstruiert zu
+    # wirken.
+    stage1 = ops.serial_insert(stage0, LABEL_RESTURLAUB, after_node_id="start")
+    resturlaub = _nid(stage1, LABEL_RESTURLAUB)
 
     # Stufe 2: Bearbeiter binden (Z-Regeln) -- das ist zulaessig und geht durch.
-    stage2 = ops.assign_staff_rule(stage1, informieren, _role("sachbearbeiter"))
+    stage2 = ops.assign_staff_rule(stage1, resturlaub, _role("sachbearbeiter"))
 
     return [stage0, stage1, stage2]
 
@@ -142,7 +151,7 @@ def build_stages() -> list[ProcessSchema]:
 def build_rejection() -> list[dict[str, Any]]:
     """Faehrt die **abgelehnte** Operation der Tour nach und liefert ihre Befunde.
 
-    Der Nutzer versucht, an "Antragsteller informieren" (Stufe 1, gleich hinter
+    Der Nutzer versucht, an "Resturlaub pruefen" (Stufe 1, gleich hinter
     dem Start) das Datenelement *Urlaubstage* **lesend** zu binden. Auf dem Pfad
     dorthin hat es noch niemand geschrieben, also weist der Kern die Operation
     zurueck (D1) -- das Modell bleibt unveraendert gueltig.
@@ -155,9 +164,9 @@ def build_rejection() -> list[dict[str, Any]]:
     """
 
     stage1 = build_stages()[1]
-    informieren = _nid(stage1, LABEL_INFORMIEREN)
+    resturlaub = _nid(stage1, LABEL_RESTURLAUB)
     try:
-        ops.connect_data(stage1, informieren, "tage", AccessMode.READ)
+        ops.connect_data(stage1, resturlaub, "tage", AccessMode.READ)
     except CorrectnessError as exc:
         return [json.loads(f.model_dump_json()) for f in exc.findings]
     raise AssertionError(

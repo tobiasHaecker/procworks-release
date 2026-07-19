@@ -1368,6 +1368,13 @@ function viewModel() {
             title: "Dieses Schema als wiederverwendbare Vorlage speichern" }, "Als Vorlage")
         : null,
       libraryToggleButton(schema),
+      // Beim freigegebenen Schema fehlte in der Kopfzeile jeder Weg zurueck ins
+      // Bearbeiten -- dort stand nur \u201EZur Ausfuehrung". Der Revisions-Knopf
+      // steht deshalb daneben (dieselbe Operation wie im Panel unten).
+      !draft && hasRole("modeler", "admin")
+        ? el("button", { class: "btn small ghost", onClick: newRevision,
+            title: "Bearbeitbares ENTWURF-Duplikat dieser Revision anlegen" }, "Neue Revision")
+        : null,
       draft
         ? el("button", { class: "btn small green", "data-tour": "model.release", onClick: releaseSchema }, "Freigeben")
         : el("button", { class: "btn small primary", onClick: () => { state.view = "run"; setActiveNav(); render(); } }, "Zur Ausf\u00FChrung"),
@@ -2088,6 +2095,30 @@ function emptyBranchJoin(schema, splitId) {
   return null;
 }
 
+/**
+ * Knopf „Neue Revision erstellen" fuer ein freigegebenes Schema.
+ *
+ * Steht dort, wo der Nutzer auf die Wand laeuft (Knoten-Inspektor), nicht nur
+ * im Panel „Schema-Evolution" ganz unten in der rechten Spalte: Der Hinweis
+ * „Bearbeiten erst in einer neuen Revision moeglich" nannte bisher die Loesung,
+ * ohne sie anzubieten -- man musste sie woanders suchen.
+ *
+ * Loest keine eigene Logik aus, sondern ruft dieselbe Operation wie das Panel
+ * (``newRevision`` -> ``POST /schemas/{id}/revision``). Ohne Modellierer-/
+ * Admin-Rolle bleibt nur der erklaerende Text, weil der Aufruf sonst ohnehin
+ * abgelehnt wuerde.
+ *
+ * @returns {HTMLElement} Der Knopf, oder ein leeres Element ohne Berechtigung.
+ */
+function newRevisionAction() {
+  if (!hasRole("modeler", "admin")) return el("div");
+  return el("div", { class: "row", style: "gap:8px;margin-top:10px" },
+    el("button", {
+      class: "btn small primary", onClick: newRevision,
+      title: "Bearbeitbares ENTWURF-Duplikat dieser Revision anlegen",
+    }, "Neue Revision erstellen"));
+}
+
 function nodeInspectorPanel() {
   const schema = state.schema;
   const draft = isDraft(schema);
@@ -2099,6 +2130,7 @@ function nodeInspectorPanel() {
       draft
         ? "Klicke einen Knoten an, um ihn umzubenennen oder zu entfernen."
         : "Klicke einen Knoten an, um zu ihm zu scrollen. Bearbeiten ist nur im Entwurf m\u00F6glich."));
+    if (!draft) body.appendChild(newRevisionAction());
     return el("div", { class: "panel" },
       el("div", { class: "panel-h" }, el("h2", null, "Knoten")), body);
   }
@@ -2110,7 +2142,8 @@ function nodeInspectorPanel() {
   const renamable = node.type === NODE_TYPE.ACTIVITY || node.type === NODE_TYPE.SUBPROCESS;
   if (!draft) {
     body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
-      "Schema ist freigegeben \u2013 Bearbeiten erst in einer neuen Revision m\u00F6glich."));
+      "Schema ist freigegeben \u2013 zum Bearbeiten eine neue Revision anlegen (Knoten-IDs bleiben erhalten)."));
+    body.appendChild(newRevisionAction());
   } else if (renamable) {
     const input = el("input", { type: "text", value: node.label || "" });
     body.appendChild(el("label", { class: "field" }, "Bezeichnung", input));
@@ -2592,7 +2625,7 @@ function revisionPanel() {
   return el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "Schema-Evolution")),
     el("div", { class: "panel-b row" },
-      el("span", { class: "muted", style: "font-size:12px;flex:1" }, "Eine neue Revision erzeugt ein bearbeitbares ENTWURF-Duplikat (IDs bleiben erhalten)."),
+      el("span", { class: "muted", style: "font-size:12px;flex:1" }, "Eine neue Revision erzeugt ein bearbeitbares ENTWURF-Duplikat unter neuer Schema-ID; die Knoten-IDs bleiben erhalten, damit laufende Instanzen migrierbar bleiben."),
       el("button", { class: "btn small", onClick: newRevision }, "Neue Revision")));
 }
 
@@ -6250,7 +6283,36 @@ async function setToken(token) {
   await boot();
 }
 
+// Laeuft gerade eine Sichtfunktion? Und wurde waehrenddessen erneut gerendert?
+// Siehe render() -- diese beiden Merker verhindern das Ueberlappen zweier
+// Renderlaeufe.
+let renderBusy = false;
+let renderQueued = false;
+
+/**
+ * Zeichnet die aktuelle Sicht neu.
+ *
+ * **Renderlaeufe ueberlappen sich nie.** Die Sichtfunktionen sind asynchron und
+ * folgen alle demselben Muster: erst ``clear(content)``, dann ``await api.get``,
+ * dann anhaengen. Starten zwei Laeufe kurz nacheinander, leert der zweite den
+ * Inhalt, waehrend der erste noch auf die API wartet -- und danach haengen
+ * *beide* ihre Panels an. Sichtbar wurde das als **doppelte Bereiche** in „Meine
+ * Aufgaben" (zweimal „Offene Aufgaben", zweimal „Abwesenheit").
+ *
+ * Ausloeser gibt es auf den Laufzeit-Sichten reichlich, und sie treffen sich
+ * genau beim Erledigen einer Aufgabe: der Klick-Callback, der Revisions-Poll
+ * (das Erledigen erhoeht die Revision), der Zeit-Tick und -- waehrend des
+ * Tutorials -- der Tour-Tick, der den Schritt weiterschaltet. Deshalb fiel es im
+ * Tutorial auf; der Fehler ist aber nicht tutorial-spezifisch.
+ *
+ * Statt jede Sicht einzeln abzusichern, werden die Laeufe hier **zusammen-
+ * gefasst**: waehrend einer laeuft, wird ein weiterer nur vorgemerkt und danach
+ * genau einmal nachgeholt. Der zuletzt gewuenschte Zustand wird also immer
+ * gezeichnet, nur eben nacheinander statt verschraenkt.
+ */
 function render() {
+  if (renderBusy) { renderQueued = true; return; }
+  renderBusy = true;
   // Guard against a stale/unknown persisted view (e.g. after a rename) so the
   // dispatch below never dereferences an undefined entry.
   if (!VIEW_META[state.view]) state.view = "model";
@@ -6271,7 +6333,15 @@ function render() {
     // Die Sichten bauen ihr DOM bei jedem Rendern komplett neu auf -- der Anker
     // der laufenden Tour existiert danach nicht mehr und muss neu gesucht
     // werden. Gekapselt, damit ein Fehler in der Tour nie die Sicht mitreisst.
-    .then(() => { if (typeof Tour !== "undefined") Tour.afterRender(); });
+    .then(() => { if (typeof Tour !== "undefined") Tour.afterRender(); })
+    // Erst hier ist die Sicht fertig aufgebaut. Ein waehrenddessen vorgemerkter
+    // Lauf wird jetzt nachgeholt -- ``finally``, damit ein Fehler das Rendern
+    // nicht dauerhaft blockiert (renderBusy bliebe sonst true).
+    .catch(() => { /* Tour-Fehler: die Sicht steht, weiter geht es trotzdem */ })
+    .finally(() => {
+      renderBusy = false;
+      if (renderQueued) { renderQueued = false; render(); }
+    });
 }
 
 /**

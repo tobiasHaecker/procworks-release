@@ -462,6 +462,30 @@ const Tour = (() => {
   }
 
   /**
+   * Prüft, ob der Fokus in einem Eingabeelement steht, das die Tasten selbst
+   * braucht.
+   *
+   * Hintergrund: ``onKey`` läuft in der Capture-Phase und nimmt Esc und die
+   * Pfeiltasten weg, *bevor* das fokussierte Element sie sieht. Genau diese
+   * Tasten bedienen aber ein Datums-/Zeitfeld -- die Pfeile wechseln zwischen
+   * Tag, Monat und Jahr und zählen den Wert hoch, Esc schließt den Kalender.
+   * Ohne diese Ausnahme ließ sich das Abwesenheits-Datum bei laufender Tour
+   * nicht auswählen: jeder Pfeiltastendruck blätterte die Tour weiter.
+   *
+   * Deshalb dieselbe Regel wie beim offenen Dialog: Wer tippt, besitzt die
+   * Tastatur. Die Tour bleibt per Maus vollständig bedienbar (Zurück/Weiter
+   * im Popup, „×“ beendet), es geht also kein Bedienweg verloren.
+   *
+   * @param {EventTarget|null} target Ziel des Tastenereignisses.
+   * @returns {boolean} true, wenn die Tour die Taste durchlassen muss.
+   */
+  function typingInField(target) {
+    if (!target || target.nodeType !== 1) return false;
+    if (target.isContentEditable) return true;
+    return ["INPUT", "SELECT", "TEXTAREA"].indexOf(target.tagName) !== -1;
+  }
+
+  /**
    * Reagiert auf Tastatur: Esc beendet, Pfeiltasten blättern.
    *
    * Läuft in der Capture-Phase, damit Esc die Tour beendet, bevor die
@@ -473,6 +497,8 @@ const Tour = (() => {
     if (!t.tour) return;
     // In einem geöffneten Dialog gehört die Tastatur dem Dialog.
     if (byId("modal-root").children.length) return;
+    // Ebenso in einem Eingabefeld (Datum, Auswahl, Text) -- siehe typingInField.
+    if (typingInField(e.target)) return;
     if (e.key === "Escape") { e.stopPropagation(); stop(); }
     else if (e.key === "ArrowRight") { e.stopPropagation(); next(); }
     else if (e.key === "ArrowLeft") { e.stopPropagation(); prev(); }
@@ -521,9 +547,20 @@ const Tour = (() => {
     // die falsche Stelle würde die Aufzeichnung und das Gesehene auseinander-
     // laufen lassen. Sonst bleibt die Anwendung voll bedienbar.
     const blocking = step.action === "simulate";
+    // Manche Schritte brauchen mehr als eine Stelle: Der Ablehnungs-Schritt
+    // bittet zuerst darum, den neuen Schritt im Graph zu wählen, und erst dann
+    // die Bindung im Tab zu setzen. Der Anker kann aber nur EINE Stelle zeigen
+    // -- ohne die Zusatzbereiche läge der Graph unter dem blockenden Scrim und
+    // der Schritt liesse sich gar nicht auswählen. ``step.also`` nennt daher
+    // weitere Bereiche, die frei bedienbar bleiben.
+    const rects = rect ? [rect] : [];
+    (step.also || []).forEach((sel) => {
+      const extra = document.querySelector(sel);
+      if (extra) rects.push(extra.getBoundingClientRect());
+    });
     root.appendChild(el("div", {
       class: "tour-scrim" + (blocking ? " blocking" : ""),
-      style: rect ? cutoutStyle(rect) : "",
+      style: rects.length ? cutoutStyle(rects) : "",
     }));
     if (rect) {
       root.appendChild(el("div", {
@@ -537,20 +574,29 @@ const Tour = (() => {
   }
 
   /**
-   * Erzeugt die Aussparung im Abdunkel-Overlay um den Anker herum.
+   * Erzeugt die Aussparungen im Abdunkel-Overlay (eine je Bereich).
    *
-   * @param {DOMRect} r Bildschirmrechteck des Ankers.
+   * Ein ``clip-path: polygon`` kennt keine getrennten Teilpfade. Mehrere Löcher
+   * entstehen deshalb über „Brücken“: Nach jedem Loch kehrt der Pfad zum
+   * Ursprung zurück und läuft von dort ins nächste. Weil jedes Loch entgegen
+   * dem Umlaufsinn des Außenrechtecks umrundet wird, hebt es sich nach der
+   * nonzero-Regel heraus; die Brücken selbst sind entartet (Hin- und Rückweg
+   * auf derselben Linie) und damit unsichtbar.
+   *
+   * @param {DOMRect[]} rects Bildschirmrechtecke der freizulassenden Bereiche.
    * @returns {string} Inline-Style mit der clip-path-Aussparung.
    */
-  function cutoutStyle(r) {
+  function cutoutStyle(rects) {
     const pad = 6;
-    const x1 = Math.max(0, r.left - pad), y1 = Math.max(0, r.top - pad);
-    const x2 = r.right + pad, y2 = r.bottom + pad;
-    // Außenrechteck im Uhrzeigersinn, Aussparung gegen den Uhrzeigersinn
-    // (evenodd-Verhalten von clip-path bei einem Pfad mit Rücksprung).
+    const holes = rects.map((r) => {
+      const x1 = Math.max(0, r.left - pad), y1 = Math.max(0, r.top - pad);
+      const x2 = r.right + pad, y2 = r.bottom + pad;
+      // Gegen den Uhrzeigersinn, das Außenrechteck läuft im Uhrzeigersinn.
+      return `${x1}px ${y1}px, ${x1}px ${y2}px, ${x2}px ${y2}px, ` +
+             `${x2}px ${y1}px, ${x1}px ${y1}px, 0 0`;
+    });
     return "clip-path: polygon(" +
-      "0 0, 100% 0, 100% 100%, 0 100%, 0 0, " +
-      `${x1}px ${y1}px, ${x1}px ${y2}px, ${x2}px ${y2}px, ${x2}px ${y1}px, ${x1}px ${y1}px)`;
+      "0 0, 100% 0, 100% 100%, 0 100%, 0 0, " + holes.join(", ") + ")";
   }
 
   /**

@@ -68,6 +68,13 @@ API (both no-ops unless set, no correctness impact):
 - **`landing/trial-button.html`** — self-contained "Start test version" snippet
   for the marketing site (Turnstile widget → POST to broker → redirect to the
   visitor's demo URL). Paste into `site/`; set the broker URL + Turnstile sitekey.
+  Wichtig: Der Baustein leitet **nicht sofort** weiter, sondern pollt zuerst
+  `<demo-url>/health` (`waitUntilReady`). Der Broker antwortet, sobald die
+  Machine *erzeugt* ist ("starting") — die frisch zugeteilte Shared-IP ist dann
+  oft noch nicht durchgeroutet, und eine sofortige Weiterleitung lieferte eine
+  halb geladene, weisse Seite, die erst ein Reload heilte. Nach ~60 s wird
+  trotzdem weitergeleitet (nie eine Sackgasse). Wer die Datei ändert, muss die
+  Kopie in `site/index.html` (gitignored, manuelles Deployment) mitziehen.
 - **`reaper/reaper.py`** — idempotent CLI that destroys expired/orphaned demo
   **apps** (hard-TTL backstop on top of the platform's auto-stop). The same
   sweep is also reachable as `POST /admin/reap` on the broker, so a scheduler
@@ -146,6 +153,43 @@ that boots has a delivered lead; if SMTP is configured but the relay fails, the
 trial is refused (503) rather than silently dropping the lead. Configure the
 relay via the `LEAD_SMTP_*` / `LEAD_MAIL_TO` secrets (see `broker/fly.toml`);
 without SMTP the relay is skipped (local/dev).
+
+### Welcome mail to the visitor
+
+After a demo is provisioned the broker mails the **visitor** their own link plus
+**how long the instance is kept** (`mailer.LeadNotifier.send_welcome`), so
+closing the tab is no longer a dead end. It is a designed HTML mail in the
+ProcWorks look (dark brand palette from `site/styles.css`, table layout, inline
+styles, **no images** — a remote logo would be blocked by default and arrive as
+a grey box) with a `text/plain` alternative for text-only clients and spam
+scoring. Sender is `LEAD_MAIL_FROM`, `Reply-To` is `LEAD_MAIL_TO`.
+
+- **Validity comes from `DEMO_TTL_SECONDS`** — the mail names both the deadline
+  (German local time, zone spelled out) and the duration. Raise the TTL to widen
+  the window in which the mailed link still works; the mail follows automatically.
+- **Best-effort, sent last.** By then the demo runs and the browser is already
+  being redirected into it, so a failing SMTP connection is logged and counted
+  (`welcome_mail_failed`) but never turns a working trial into a 503. That is the
+  deliberate opposite of the lead relay, which is fail-closed.
+- **Advertising only with the optional opt-in.** The mandatory consent covers
+  providing/supporting the test access (Art. 6 (1) (b)) — that carries the link,
+  the validity and the getting-started hints. The soliciting block (offer of a
+  30-minute session) renders **only** when `marketing_consent` was ticked
+  (Art. 6 (1) (a)) and names the objection route, because the form promises not
+  to couple the demo to it (Kopplungsverbot).
+- Switches: `DEMO_WELCOME_MAIL=0` disables it; `DEMO_SITE_URL` sets the footer
+  link base.
+
+Preview the design without sending anything:
+
+```bash
+cd deploy/demo/broker && python -c "
+import mailer
+from datetime import datetime, timezone
+print(mailer._welcome_html(first_name='Max', url='https://demo.example',
+  expiry=mailer._format_expiry(datetime.now(timezone.utc)), ttl_phrase='2 Stunden',
+  site_url='https://procworks.de', marketing_consent=True))" > /tmp/mail.html
+```
 
 When the visitor clicks **"Demo beenden"** in the demo banner, the SPA shows a
 **2-minute survey** and POSTs it to the broker's `/feedback` (relayed by e-mail

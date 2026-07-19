@@ -223,6 +223,17 @@ _MAX_ACTIVE = int(os.environ.get("DEMO_MAX_ACTIVE", "20"))
 #: demo -- e.g. a visitor who just closed the tab -- is cleaned up when the next
 #: visitor needs a slot. 0 disables reaping. Default two hours.
 _TTL_SECONDS = int(os.environ.get("DEMO_TTL_SECONDS", str(2 * 3600)))
+#: Send the visitor a welcome mail with their demo link + validity (default on
+#: wherever the SMTP relay is configured at all). Set ``DEMO_WELCOME_MAIL=0`` to
+#: run the gate without ever mailing the visitor.
+_WELCOME_MAIL = os.environ.get("DEMO_WELCOME_MAIL", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+#: Marketing site base used for the footer links of that mail (no trailing slash).
+_SITE_URL = os.environ.get("DEMO_SITE_URL", "https://procworks.de").rstrip("/")
 _guard = _AbuseGuard(
     max_per_day=int(os.environ.get("DEMO_MAX_PER_DAY", "500")),
     max_per_ip=int(os.environ.get("DEMO_MAX_PER_IP", "3")),
@@ -509,6 +520,27 @@ def start_trial(req: TrialRequest, request: Request) -> TrialResponse:
         raise HTTPException(status_code=503, detail="demo could not be started, try again") from None
 
     _metrics.incr("trials_started")
+
+    # Welcome mail to the VISITOR: their own link plus how long it is kept, so
+    # they can come back after closing the tab. Strictly best-effort and sent
+    # LAST -- the demo already runs and the browser is being redirected into it,
+    # so a dead SMTP connection must never turn a working trial into a 503.
+    # (The lead relay above is the opposite: fail-closed on purpose.)
+    if _notifier.configured and _WELCOME_MAIL:
+        try:
+            _notifier.send_welcome(
+                name=name,
+                email=email,
+                url=instance.url,
+                ttl_seconds=_TTL_SECONDS,
+                marketing_consent=bool(req.marketing_consent),
+                site_url=_SITE_URL,
+            )
+            _metrics.incr("welcome_mails_sent")
+        except Exception:  # noqa: BLE001 - best-effort: never fail a running demo
+            _log.exception("welcome mail failed for trial %s -- demo runs anyway", trial_id)
+            _metrics.incr("welcome_mail_failed")
+
     return TrialResponse(trial_id=trial_id, url=instance.url, state=instance.state)
 
 

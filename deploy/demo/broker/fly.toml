@@ -16,9 +16,12 @@
 #   fly secrets set DEMO_ADMIN_TOKEN=... -a procworks-demo-broker
 #
 # Lead + feedback relay (the contact gate + post-demo survey mail every lead and
-# feedback to you and store NOTHING). Set the SMTP secrets + recipient; without
-# LEAD_SMTP_HOST the relay is skipped (a lead would then be undeliverable and the
-# trial refused with 503, so configure it for the gated flow):
+# feedback to you and store NOTHING). The same SMTP settings also carry the
+# WELCOME MAIL to the visitor (demo link + validity); LEAD_MAIL_FROM is its
+# sender and LEAD_MAIL_TO its Reply-To, so use a sender the visitor should see.
+# Set the SMTP secrets + recipient; without LEAD_SMTP_HOST the relay is skipped
+# (a lead would then be undeliverable and the trial refused with 503, so
+# configure it for the gated flow):
 #   fly secrets set LEAD_SMTP_HOST=... LEAD_SMTP_USER=... LEAD_SMTP_PASSWORD=... \
 #                   LEAD_MAIL_FROM=... LEAD_MAIL_TO=... -a procworks-demo-broker
 # (LEAD_SMTP_PORT default 587, LEAD_SMTP_STARTTLS default on.)
@@ -45,8 +48,15 @@ primary_region = "fra"
   DEMO_MAX_PER_IP = "3"
   DEMO_IP_WINDOW_SECONDS = "3600"
   # Hard lifetime per demo; the broker reaps older instances on each /trial, so
-  # an abandoned tab is cleaned up when the next visitor needs a slot.
+  # an abandoned tab is cleaned up when the next visitor needs a slot. This value
+  # is ALSO what the visitor's welcome mail promises ("verfuegbar bis ..."), so
+  # raising it lengthens the window in which the mailed link still works.
   DEMO_TTL_SECONDS = "7200"
+  # Welcome mail to the visitor (their demo link + how long it is kept). On by
+  # default wherever the SMTP relay is configured; "0" disables it.
+  DEMO_WELCOME_MAIL = "1"
+  # Base URL for the footer links of that mail (Impressum/Datenschutz).
+  DEMO_SITE_URL = "https://procworks.de"
   # CAPTCHA_SECRET intentionally unset -> no Captcha (rate limits + active cap).
 
 [http_service]

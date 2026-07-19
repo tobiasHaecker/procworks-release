@@ -104,6 +104,35 @@
       if (first) first.focus();
     });
 
+    // Wait until the freshly provisioned demo actually answers, then redirect.
+    //
+    // Why: the broker returns the URL as soon as the Machine is *created* (state
+    // "starting"). At that moment the just-allocated shared IP is often not
+    // routed yet and the container is not listening, so an immediate redirect
+    // yields a half-served page (HTML without app.js/styles.css) -- the blank
+    // page that only a reload fixes. A GET on the demo's /health (CORS is open
+    // there) is the simplest real readiness proof.
+    //
+    // Never a dead end: after ATTEMPTS tries (~60 s) redirect anyway -- worst
+    // case the visitor lands exactly where they used to.
+    function waitUntilReady(url, done) {
+      var ATTEMPTS = 40;
+      var DELAY_MS = 1500;
+      var tries = 0;
+      (function poll() {
+        tries += 1;
+        fetch(url + "/health", { cache: "no-store" })
+          .then(function (r) {
+            if (r.ok) { done(); return; }
+            throw new Error("not ready");
+          })
+          .catch(function () {
+            if (tries >= ATTEMPTS) { done(); return; }
+            setTimeout(poll, DELAY_MS);
+          });
+      })();
+    }
+
     // Send the lead + provision the demo. `captcha_token` is null when Captcha is
     // off; the broker's _verify_captcha then passes (no CAPTCHA_SECRET).
     function startTrial() {
@@ -130,8 +159,11 @@
           return r.json();
         })
         .then(function (payload) {
-          status.textContent = "Bereit! Du wirst weitergeleitet …";
-          window.location.href = payload.url;
+          status.textContent = "Fast fertig – deine Demo startet …";
+          waitUntilReady(payload.url, function () {
+            status.textContent = "Bereit! Du wirst weitergeleitet …";
+            window.location.href = payload.url;
+          });
         })
         .catch(function (e) { fail(e.message); });
     }

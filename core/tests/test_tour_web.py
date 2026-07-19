@@ -129,6 +129,104 @@ def test_tour_writes_nothing(app_js: str) -> None:
     assert guard < call, "Der Sandkasten-Sperrpunkt steht HINTER dem fetch"
 
 
+def test_tour_insert_label_matches_fixture(tours_js: str) -> None:
+    """``TOUR_NEW_STEP_LABEL`` und die Beschriftung in der Konserve sind gleich.
+
+    Eine stille Kopplung ueber zwei Sprachen hinweg: ``engine.js`` sucht den
+    aufgezeichneten Knoten **ueber seine Beschriftung**, um ihn auf den vom
+    Nutzer getippten Text umzubenennen (``applyLabel``). Weichen die beiden
+    Konstanten voneinander ab, findet die Engine nichts -- der Nutzer tippt eine
+    Bezeichnung ein und der Knoten heisst danach weiter wie in der Konserve.
+    Kein Fehler, keine Meldung, nur ein verwirrender Widerspruch.
+    """
+
+    from tour_fixture_build import LABEL_RESTURLAUB
+
+    found = re.search(r"const TOUR_NEW_STEP_LABEL = \"([^\"]+)\"", tours_js)
+    assert found, "TOUR_NEW_STEP_LABEL nicht in tours.js gefunden"
+    assert found.group(1) == LABEL_RESTURLAUB, (
+        f"tours.js sagt „{found.group(1)}\", die Konserve „{LABEL_RESTURLAUB}\" -- "
+        "die Umbenennung des eingefuegten Schritts greift dann nicht mehr"
+    )
+
+
+def test_simulate_steps_reach_every_element_they_ask_for(tours_js: str) -> None:
+    """Ein „simulate"-Schritt muss jede Stelle freilassen, zu der er auffordert.
+
+    Bei ``action: "simulate"`` blockt der Scrim **alles ausserhalb der
+    Aussparung**, und die Aussparung kennt nur den einen ``anchor``. Fordert der
+    Hinweistext zusaetzlich dazu auf, im Kontrollfluss einen Schritt zu waehlen
+    („waehle links den neuen Schritt"), liegt der Graph unter dem Scrim -- der
+    Klick kommt nie an, und der Schritt laesst sich nicht abschliessen. Genau so
+    war der Ablehnungs-Schritt der Modellierer-Tour blockiert.
+
+    Der Ausweg ist ``also``: weitere Bereiche, die bedienbar bleiben. Dieser
+    Waechter prueft, dass jeder simulate-Schritt, dessen Hinweis auf die Auswahl
+    im Graph zeigt, den Graph auch tatsaechlich freilaesst.
+    """
+
+    steps = re.findall(r"\{\s*id: \"[^\"]+\".*?\n      \}", tours_js, re.S)
+    assert steps, "Keine Schritte in tours.js gefunden -- Waechter angleichen"
+
+    checked = 0
+    for step in steps:
+        if 'action: "simulate"' not in step:
+            continue
+        hint = re.search(r"hint: \"([^\"]*)\"", step)
+        if not hint:
+            continue
+        # Formulierungen, die eine Auswahl im Kontrollfluss verlangen.
+        wants_graph = any(
+            phrase in hint.group(1).lower()
+            for phrase in ("links den", "im graph", "waehle den schritt", "wähle den schritt")
+        )
+        # ... oder ein Bindungsziel, das ohne gewaehlten Knoten gar nicht existiert.
+        wants_graph = wants_graph or "an den neuen schritt" in hint.group(1).lower()
+        if not wants_graph:
+            continue
+        checked += 1
+        step_id = re.search(r"id: \"([^\"]+)\"", step)
+        assert "model.graph" in step, (
+            f"Schritt „{step_id.group(1) if step_id else '?'}\" fordert zur Auswahl im "
+            "Kontrollfluss auf, laesst ihn aber nicht frei (also: "
+            "['[data-tour=\"model.graph\"]'] fehlt) -- der Scrim schluckt den Klick"
+        )
+    assert checked, "Kein passender simulate-Schritt gefunden -- Waechter angleichen"
+
+
+def test_tour_keyboard_defers_to_input_fields() -> None:
+    """Die Tour nimmt einem fokussierten Eingabefeld die Tasten nicht weg.
+
+    ``onKey`` laeuft in der Capture-Phase und verbraucht Esc sowie die
+    Pfeiltasten, bevor das fokussierte Element sie sieht. Genau diese Tasten
+    bedienen ein ``<input type="date">``: die Pfeile wechseln zwischen Tag,
+    Monat und Jahr, Esc schliesst den Kalender. Ohne die Ausnahme liess sich
+    das Abwesenheits-Datum bei laufender Tour nicht auswaehlen -- jeder
+    Pfeiltastendruck blaetterte stattdessen die Tour weiter.
+
+    Geprueft wird die Reihenfolge: die Feld-Ausnahme muss VOR dem ersten
+    ``stopPropagation`` stehen, sonst ist die Taste schon verbraucht.
+    """
+
+    src = _read(TOUR / "engine.js")
+    body = re.search(r"function onKey\(.*?\n  \}", src, re.S)
+    assert body, "onKey() nicht in engine.js gefunden"
+    # Kommentare raus: ein blosser Hinweis auf typingInField im Fliesstext
+    # wuerde den Waechter sonst zufrieden stellen, obwohl der Aufruf fehlt.
+    handler = re.sub(r"//[^\n]*", "", body.group(0))
+    guard = handler.find("typingInField(")
+    consumed = handler.find("stopPropagation")
+    assert guard != -1, "Die Ausnahme fuer fokussierte Eingabefelder fehlt in onKey()"
+    assert consumed != -1, "onKey() verbraucht keine Taste mehr -- Waechter angleichen"
+    assert guard < consumed, "Die Feld-Ausnahme steht HINTER dem Tastenverbrauch"
+
+    # Die Ausnahme muss alle Eingabearten abdecken, nicht nur das Datumsfeld.
+    checker = re.search(r"function typingInField\(.*?\n  \}", src, re.S)
+    assert checker, "typingInField() nicht gefunden"
+    for tag in ("INPUT", "SELECT", "TEXTAREA", "isContentEditable"):
+        assert tag in checker.group(0), f"typingInField() beruecksichtigt {tag} nicht"
+
+
 def test_tour_files_never_call_the_api_directly() -> None:
     """Die Tour-Dateien umgehen ``request()`` nicht.
 

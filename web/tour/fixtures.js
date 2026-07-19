@@ -269,7 +269,7 @@ const TOUR_FIXTURES = {
           },
           "act_4": {
             "id": "act_4",
-            "label": "Antragsteller informieren",
+            "label": "Resturlaub prüfen",
             "type": "ACTIVITY",
             "value_class": null
           },
@@ -440,7 +440,7 @@ const TOUR_FIXTURES = {
           },
           "act_4": {
             "id": "act_4",
-            "label": "Antragsteller informieren",
+            "label": "Resturlaub prüfen",
             "type": "ACTIVITY",
             "value_class": null
           },

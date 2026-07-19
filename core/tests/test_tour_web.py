@@ -129,6 +129,80 @@ def test_tour_writes_nothing(app_js: str) -> None:
     assert guard < call, "Der Sandkasten-Sperrpunkt steht HINTER dem fetch"
 
 
+def test_tour_popup_keeps_its_buttons_reachable() -> None:
+    """Das Popup passt immer ins Fenster -- sonst ist die Tour nicht beendbar.
+
+    Ohne Hoehendeckel wuchs das Popup bei langem Text (oder niedrigem Fenster)
+    ueber den unteren Rand hinaus, und genau dort sitzt die Fusszeile mit
+    „Weiter"/„Ueberspringen". Die Platzierung in ``engine.js`` kann das nicht
+    auffangen: Ist das Popup hoeher als das Fenster, hat ihre Klemmung
+    ``min(top, innerHeight - h - pad)`` keinen gueltigen Wert mehr.
+
+    Drei Zusagen, die zusammen wirken muessen -- faellt eine weg, ist der
+    Schritt wieder eine Sackgasse.
+    """
+
+    css = _read(TOUR / "tour.css")
+    engine = _read(TOUR / "engine.js")
+
+    pop = re.search(r"\.tour-pop \{(.*?)\}", css, re.S)
+    assert pop, ".tour-pop nicht in tour.css gefunden -- Waechter angleichen"
+    rules = pop.group(1)
+    assert "max-height" in rules, "Das Popup hat keinen Hoehendeckel"
+    assert "dvh" in rules, "Hoehendeckel ohne dvh -- auf iOS liegt das Ende hinter der Leiste"
+    assert "flex-direction: column" in rules, "Ohne Spaltenfluss rollt der Textteil nicht"
+
+    # Der veraenderliche Teil rollt, Kopf und Fusszeile nicht.
+    body_rule = re.search(r"\.tour-pop-b \{(.*?)\}", css, re.S)
+    assert body_rule and "overflow-y: auto" in body_rule.group(1), (
+        "Der Textteil des Popups rollt nicht"
+    )
+    assert "min-height: 0" in body_rule.group(1), (
+        "Ohne min-height:0 schrumpft der Flex-Bereich nicht -- der Deckel wirkt nicht"
+    )
+    assert re.search(r"\.tour-pop-h,\s*\n\.tour-foot \{ flex: none", css), (
+        "Kopf/Fusszeile duerfen nicht mitschrumpfen, sonst verschwinden die Knoepfe"
+    )
+
+    # ... und das Markup liefert diesen Behaelter ueberhaupt.
+    assert 'class: "tour-pop-b"' in engine, (
+        "popup() umschliesst Text/Hinweis nicht mit .tour-pop-b -- dann rollt das "
+        "ganze Popup inklusive Fusszeile aus dem Bild"
+    )
+
+
+def test_tour_popup_keeps_clear_of_the_demo_banner() -> None:
+    """Der Demo-Banner darf das Popup nicht verdecken.
+
+    ``#demo-banner`` klebt am unteren Rand und traegt denselben ``z-index`` wie
+    das Tour-Overlay -- weil er spaeter ins DOM kommt, malt er darueber. Genau
+    dort sass die Fusszeile mit „Weiter", der Schritt war nicht abschliessbar.
+
+    Geloest wird das nicht ueber die Stapelreihenfolge (dann verdeckte das Popup
+    die Rollen-Umschaltung), sondern indem der Platz freigehalten wird: engine.js
+    misst den Banner und reicht die Hoehe als ``--tour-bottom-inset`` weiter.
+    Alle drei Platzierungsarten muessen sie beruecksichtigen.
+    """
+
+    css = _read(TOUR / "tour.css")
+    engine = _read(TOUR / "engine.js")
+
+    assert "function bottomInset()" in engine, "Die Banner-Messung fehlt"
+    assert '"demo-banner"' in engine, "bottomInset() misst nicht den Demo-Banner"
+    assert "--tour-bottom-inset" in engine, "Die gemessene Hoehe erreicht das Stylesheet nicht"
+    assert re.search(r"usableBottom\s*=\s*window\.innerHeight\s*-\s*inset", engine), (
+        "position() rechnet den belegten Rand nicht heraus"
+    )
+
+    # Angeheftet, mittig und mobil -- jede Variante muss den Rand freihalten.
+    for rule, why in [
+        (r"\.tour-pop \{[^}]*?--tour-bottom-inset", "der Hoehendeckel"),
+        (r"\.tour-pop\.centered \{[^}]*?--tour-bottom-inset", "das mittige Popup"),
+        (r"bottom: calc\(8px \+ var\(--tour-bottom-inset", "das mobile Bottom-Sheet"),
+    ]:
+        assert re.search(rule, css, re.S), f"{why} beruecksichtigt den Demo-Banner nicht"
+
+
 def test_tour_insert_label_matches_fixture(tours_js: str) -> None:
     """``TOUR_NEW_STEP_LABEL`` und die Beschriftung in der Konserve sind gleich.
 

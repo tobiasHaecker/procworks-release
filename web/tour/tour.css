@@ -51,6 +51,21 @@
 .tour-pop {
   position: fixed;
   width: min(340px, calc(100vw - 24px));
+  /* Hoehe deckeln und in Kopf / rollbaren Text / Fusszeile teilen. Ohne den
+     Deckel wuchs das Popup ueber den Fensterrand hinaus, sobald der Text laenger
+     oder das Fenster niedriger war -- und die Fusszeile mit „Weiter" lag genau
+     dort unten, also unerreichbar. Die Platzierung in engine.js konnte das nicht
+     auffangen: Ist das Popup hoeher als das Fenster, hat ihre Klemmung
+     min(top, innerHeight - h - pad) keinen gueltigen Wert mehr.
+     dvh als zweite Angabe wegen iOS (vh meint dort die GROSSE Viewporthoehe,
+     das Ende laege sonst hinter der Safari-Leiste). */
+  /* --tour-bottom-inset: was unten fest belegt ist (Demo-Banner). engine.js
+     misst es bei jedem Zeichnen; ohne Banner ist es 0 und die Regel entspricht
+     exakt der vorherigen. */
+  max-height: calc(100vh - 24px - var(--tour-bottom-inset, 0px));
+  max-height: calc(100dvh - 24px - var(--tour-bottom-inset, 0px));
+  display: flex;
+  flex-direction: column;
   background: var(--bg-elev2);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -60,10 +75,23 @@
   pointer-events: auto;
 }
 
-/* Rueckfall, wenn kein Anker gefunden wurde: mittig statt am Element. */
+/* Kopf und Fusszeile behalten ihre Hoehe, nur der Textteil rollt. So bleiben
+   Titel und Bedienknoepfe IMMER sichtbar, egal wie lang der Schritt ist. */
+.tour-pop-h,
+.tour-foot { flex: none; }
+.tour-pop-b {
+  overflow-y: auto;
+  min-height: 0;   /* ohne dies schrumpft ein Flex-Kind nicht unter seinen Inhalt */
+  overscroll-behavior: contain;
+}
+
+/* Rueckfall, wenn kein Anker gefunden wurde: mittig statt am Element.
+   Der Mittelpunkt bezieht sich auf den FREIEN Bereich -- ein unten stehender
+   Demo-Banner schiebt das Popup entsprechend nach oben, statt darunter zu
+   geraten (dieses Popup laeuft nicht durch position()). */
 .tour-pop.centered {
   left: 50%;
-  top: 50%;
+  top: calc(50% - var(--tour-bottom-inset, 0px) / 2);
   transform: translate(-50%, -50%);
 }
 
@@ -195,7 +223,8 @@
     left: 8px !important;
     right: 8px;
     top: auto !important;
-    bottom: 8px;
+    /* ueber dem Demo-Banner bleiben, sonst verdeckt er das Bottom-Sheet ganz */
+    bottom: calc(8px + var(--tour-bottom-inset, 0px));
     width: auto;
     transform: none;
   }

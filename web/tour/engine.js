@@ -542,6 +542,10 @@ const Tour = (() => {
 
     clear(root);
     document.documentElement.setAttribute("data-tour-active", "1");
+    // Vom unteren Rand belegter Platz (Demo-Banner). Hier gesetzt statt in
+    // position(), weil das mittige Popup ohne Anker gar nicht dort vorbeikommt --
+    // es braucht die Zahl aber genauso, sonst rutscht es hinter den Banner.
+    document.documentElement.style.setProperty("--tour-bottom-inset", `${bottomInset()}px`);
     const rect = anchor ? anchor.getBoundingClientRect() : null;
     // Bei „simulate“ blockt der Scrim Klicks außerhalb des Ankers: Ein Klick an
     // die falsche Stelle würde die Aufzeichnung und das Gesehene auseinander-
@@ -634,15 +638,19 @@ const Tour = (() => {
           class: "tour-x", type: "button", title: "Tour beenden (Esc)",
           "aria-label": "Tour beenden", onClick: () => stop(),
         }, "×")),
-      el("p", { class: "tour-body" }, step.body),
-      step.hint ? el("p", { class: "tour-hint" }, step.hint) : null,
-      missing ? el("p", { class: "tour-warn" },
-        "Das zugehörige Element ist gerade nicht sichtbar.") : null,
-      step.doc
-        ? el("p", { class: "tour-doc" },
-            el("a", { href: docUrl(step.doc), target: "_blank", rel: "noopener" },
-              "Ausführlich nachlesen"))
-        : null,
+      // Der veränderliche Teil sitzt in einem eigenen Behälter, damit NUR er
+      // rollt (tour.css). Kopf und Fusszeile bleiben dadurch immer sichtbar --
+      // sonst rutschte „Weiter“ bei langem Text aus dem Fenster.
+      el("div", { class: "tour-pop-b" },
+        el("p", { class: "tour-body" }, step.body),
+        step.hint ? el("p", { class: "tour-hint" }, step.hint) : null,
+        missing ? el("p", { class: "tour-warn" },
+          "Das zugehörige Element ist gerade nicht sichtbar.") : null,
+        step.doc
+          ? el("p", { class: "tour-doc" },
+              el("a", { href: docUrl(step.doc), target: "_blank", rel: "noopener" },
+                "Ausführlich nachlesen"))
+          : null),
       el("div", { class: "tour-foot" },
         el("span", { class: "tour-count" }, `${t.index + 1} von ${total}`),
         el("span", { class: "tour-spacer" }),
@@ -678,17 +686,53 @@ const Tour = (() => {
    * @param {DOMRect} r Ankerrechteck.
    * @param {string} [placement] Wunschseite ("top"/"bottom").
    */
+  /**
+   * Höhe des unten fest stehenden Demo-Banners (0, wenn keiner da ist).
+   *
+   * Der Banner der öffentlichen Demo (``#demo-banner``) klebt am unteren Rand
+   * und trägt denselben ``z-index`` wie das Tour-Overlay -- weil er später ins
+   * DOM kommt, malt er darüber. Genau dort sass die Fusszeile des Popups mit
+   * „Weiter“, der Schritt war dadurch nicht abschliessbar.
+   *
+   * Statt an der Stapelreihenfolge zu drehen (dann läge das Popup zwar oben,
+   * verdeckte aber die Rollen-Umschaltung), wird der Platz **freigehalten**:
+   * Das Popup endet oberhalb des Banners, beide sind gleichzeitig bedienbar.
+   *
+   * @returns {number} Belegte Höhe am unteren Rand in Pixeln, inkl. Abstand.
+   */
+  function bottomInset() {
+    const banner = byId("demo-banner");
+    if (!banner) return 0;
+    const r = banner.getBoundingClientRect();
+    if (!r.height) return 0;                       // ausgeblendet -> kein Platzbedarf
+    return Math.max(0, window.innerHeight - r.top + 8);
+  }
+
+  /**
+   * Platziert das Popup am Anker -- bevorzugt darunter, bei Platzmangel darüber.
+   *
+   * Der nutzbare Bereich endet über dem Demo-Banner (siehe :func:`bottomInset`);
+   * dieselbe Zahl bekommt auch das Stylesheet als ``--tour-bottom-inset``, damit
+   * der Höhendeckel des Popups den Banner mit einrechnet.
+   *
+   * @param {HTMLElement} box Das Popup.
+   * @param {DOMRect} r Ankerrechteck.
+   * @param {string} placement "top" erzwingt oberhalb, sonst automatisch.
+   */
   function position(box, r, placement) {
     box.style.visibility = "hidden";
     requestAnimationFrame(() => {
       const pad = 12;
+      const inset = bottomInset();
+      document.documentElement.style.setProperty("--tour-bottom-inset", `${inset}px`);
+      const usableBottom = window.innerHeight - inset;
       const w = box.offsetWidth, h = box.offsetHeight;
-      const below = window.innerHeight - r.bottom;
+      const below = usableBottom - r.bottom;
       const wantTop = placement === "top" || (below < h + pad && r.top > h + pad);
       let top = wantTop ? r.top - h - pad : r.bottom + pad;
       let left = r.left + r.width / 2 - w / 2;
       left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
-      top = Math.max(pad, Math.min(top, window.innerHeight - h - pad));
+      top = Math.max(pad, Math.min(top, usableBottom - h - pad));
       box.style.left = `${left}px`;
       box.style.top = `${top}px`;
       box.style.visibility = "visible";

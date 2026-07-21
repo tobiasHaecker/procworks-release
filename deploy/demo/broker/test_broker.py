@@ -765,3 +765,50 @@ def test_dockerfile_copies_every_runtime_module_app_imports() -> None:
 
     missing = needed - copied
     assert not missing, f"Dockerfile kopiert nicht: {sorted(missing)} (COPY in Dockerfile ergaenzen)"
+
+
+def test_welcome_mail_bounds_the_link_promise_by_the_real_ttl() -> None:
+    """Die Mail verspricht den Link genau so lange, wie er wirklich lebt.
+
+    Der Link stirbt noch am selben Nachmittag. Stuende in der Mail ein
+    unbefristetes "kommen Sie jederzeit zurueck", waere das die eine Zusage,
+    die der Besucher garantiert einloest -- und dann auf eine geloeschte
+    Umgebung trifft. Die Dauer muss deshalb an drei Stellen stehen und ueberall
+    aus ``ttl_seconds`` abgeleitet sein, nicht hartkodiert: Betreff (der Teil,
+    den man im Postfach ueberfliegt), Einstieg und Gueltigkeitsblock.
+    """
+    notifier, sent = _welcome_notifier()
+    notifier.send_welcome(
+        name="Max", email="a@b.de", url="https://x.fly.dev",
+        ttl_seconds=7200, marketing_consent=False,
+    )
+    plain, rich = _welcome_parts(sent[0])
+
+    assert "2 Stunden" in str(sent[0]["Subject"]), "Der Betreff nennt die Laufzeit nicht"
+    assert "2 Stunden" in plain and "2 Stunden" in rich
+
+    # Das Versprechen darf nirgends unbefristet stehen: jedes "jederzeit" muss
+    # in Sichtweite einer Befristung stehen.
+    for body in (plain, rich):
+        for pos in _all_positions(body, "jederzeit"):
+            window = body[max(0, pos - 220):pos + 220]
+            assert "Stunden" in window or "Minuten" in window, (
+                "Ein unbefristetes „jederzeit\" verspricht mehr, als die Demo haelt"
+            )
+
+
+def test_welcome_subject_follows_a_changed_ttl() -> None:
+    """Eine geaenderte Laufzeit schlaegt bis in den Betreff durch."""
+    assert "90 Minuten" in mailer._welcome_subject("Max", "90 Minuten")
+    assert "unbegrenzt" in mailer._welcome_subject("", "unbegrenzt")
+    # Reines ASCII -- sonst steht mitten im Betreff ein RFC-2047-Wortstueck.
+    assert mailer._welcome_subject("Max", "2 Stunden").isascii()
+
+
+def _all_positions(haystack: str, needle: str) -> list[int]:
+    """Alle Fundstellen von ``needle`` (der Waechter prueft jede einzeln)."""
+    out, start = [], 0
+    while (pos := haystack.find(needle, start)) != -1:
+        out.append(pos)
+        start = pos + 1
+    return out

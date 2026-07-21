@@ -903,7 +903,23 @@ function renderGraph(schema, opts) {
     renderNodeBadges(root, schema, node, p, opts);
   });
 
-  const wrap = el("div", { class: "canvas-wrap", "data-tour": "model.graph" }, root,
+  // Einpassen-Knopf oben rechts **im** Canvas (nicht im Panel-Kopf): so steht er
+  // in jeder Sicht zur Verfuegung, die einen Kontrollfluss zeichnet -- auch in
+  // Ausfuehrung/Monitoring, wo es keinen Panel-Kopf mit Knoepfen gibt. Er holt
+  // ein verschobenes/gezoomtes Modell wieder vollstaendig ins Bild; derselbe
+  // Weg wie der Doppelklick mit der mittleren Maustaste (siehe attachPanZoom).
+  const fitBtn = el("button", {
+    class: "canvas-fit",
+    type: "button",
+    title: "Modell einpassen (auch: Doppelklick mit der mittleren Maustaste)",
+    "aria-label": "Modell in die Ansicht einpassen",
+    onClick: (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (wrap._panzoom) wrap._panzoom.fitToView();
+    },
+  }, "\u2922 Einpassen");
+  const wrap = el("div", { class: "canvas-wrap", "data-tour": "model.graph" }, root, fitBtn,
     el("div", { class: "canvas-hint" }, "Scrollen/Wischen: Verschieben \u00B7 Strg/Pinch: Zoom \u00B7 Ziehen: Verschieben"));
   attachPanZoom(wrap, root);
   return wrap;
@@ -1127,7 +1143,52 @@ function attachPanZoom(wrap, svgEl) {
     dragging = false;
   }, true);
 
+  // Doppelklick mit der **mittleren** Maustaste rueckt das ganze Modell wieder
+  // ins Bild -- die Tastatur-lose Notbremse, wenn man sich beim Verschieben
+  // verloren hat. Zwei Dinge sind hier wichtig:
+  //  * Der Browser (Windows/Linux) startet auf `mousedown` mit der mittleren
+  //    Taste den Autoscroll-Modus; ohne `preventDefault` klebt danach ein
+  //    Scroll-Anker am Zeiger.
+  //  * Ein echter `dblclick` feuert nur fuer die linke Taste, deshalb zaehlen
+  //    wir die mittleren Klicks selbst (Doppelklick-Fenster wie im System
+  //    ueblich ~400 ms; ein zu langsamer zweiter Klick zaehlt als neuer
+  //    erster, nicht als halber Doppelklick).
+  const MIDDLE_DBL_MS = 400;
+  let midClicks = 0, midAt = 0;
+  wrap.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); });
+  wrap.addEventListener("auxclick", (e) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    const now = Date.now();
+    midClicks = now - midAt <= MIDDLE_DBL_MS ? midClicks + 1 : 1;
+    midAt = now;
+    if (midClicks >= 2) { midClicks = 0; fitToView(); }
+  });
+
+  // Setzt Zoom und Verschiebung so, dass das **gesamte** Modell sichtbar und
+  // zentriert im Fenster liegt. Bezugsrahmen ist die viewBox des SVG (sie kann
+  // fuer die Datenherkunft-Boegen nach oben erweitert sein, also einen
+  // negativen Ursprung haben) plus ein kleiner Rand. Kleine Modelle werden
+  // **nicht** ueber ihre natuerliche Groesse hinaus vergroessert (Deckel 1),
+  // sonst wirkt ein Zwei-Knoten-Prozess nach dem Einpassen aufgeblasen.
+  function fitToView() {
+    const vb = svgEl.viewBox && svgEl.viewBox.baseVal;
+    const bx = vb && vb.width ? vb.x : 0;
+    const by = vb && vb.width ? vb.y : 0;
+    const bw = vb && vb.width ? vb.width : svgEl.clientWidth;
+    const bh = vb && vb.height ? vb.height : svgEl.clientHeight;
+    const vw = wrap.clientWidth, vh = wrap.clientHeight;
+    if (!bw || !bh || !vw || !vh) return;
+    const MARGIN = 16;
+    const fit = Math.min((vw - MARGIN * 2) / bw, (vh - MARGIN * 2) / bh);
+    scale = Math.min(MAX, Math.max(MIN, Math.min(1, fit)));
+    tx = (vw - bw * scale) / 2 - bx * scale;
+    ty = (vh - bh * scale) / 2 - by * scale;
+    apply();
+  }
+
   wrap._panzoom = {
+    fitToView,
     centerOn(pos) {
       // Die viewBox kann fuer die Datenherkunft-Boegen nach oben erweitert
       // sein (negativer viewBox-Ursprung); der Knoten liegt dann um |vbY|
@@ -1493,7 +1554,9 @@ function bindingPalette(schema, draft) {
   const tabs = el("div", { class: "pal-tabs" }, tabBtn("data", "Datenelemente"), tabBtn("res", "Ressourcen"));
   const body = el("div", { class: "panel-b pal-body" },
     tab === "res" ? resourcePaletteTab(schema, draft, target) : dataPaletteTab(schema, draft, target));
-  return el("div", { class: "panel pal-panel" }, head, tabs, body);
+  // data-tour: Die Tour muss die GANZE Palette freilassen koennen -- der Tab
+  // allein reicht nicht, die Bindung passiert ueber das ⊕ im Koerper darunter.
+  return el("div", { class: "panel pal-panel", "data-tour": "model.palette" }, head, tabs, body);
 }
 
 // Aktueller Bindungsziel-Knoten: der gewaehlte Schritt, sofern Entwurf UND eine

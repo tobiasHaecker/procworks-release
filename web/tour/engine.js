@@ -47,9 +47,32 @@ const Tour = (() => {
     saved: null,       // gesicherter App-Zustand, für das Ende der Tour
     timer: null,       // Intervall für Fortschritt/Neupositionierung
     anchorSince: 0,    // seit wann wird der Anker des Schritts vermisst?
+    painted: null,     // zuletzt gezeichnetes Overlay (siehe paint())
   };
 
   // --- Merker (localStorage) ----------------------------------------------
+
+  /**
+   * Präfix der Merker des **angemeldeten** Nutzers.
+   *
+   * Die Merker hängen am Browser, das Konto wechselt aber darin: Ohne diesen
+   * Zusatz erbte der nächste Nutzer den Stand seines Vorgängers. Zwei Personen
+   * derselben Rolle (in der Demo etwa Erika und Tom, beide Bearbeiter) teilen
+   * sich denselben Tour-Schlüssel -- hatte die eine die Tour gesehen oder
+   * abgelehnt, bekam die andere nie ein Angebot. Auf gemeinsam genutzten
+   * Rechnern gilt dasselbe.
+   *
+   * Ohne Anmeldung (offener Modus) bleibt es beim bisherigen, browserweiten
+   * Schlüssel -- dort gibt es kein Konto, an dem sich etwas festmachen liesse.
+   *
+   * @returns {string} Präfix inklusive Trennzeichen (oder "").
+   */
+  function who() {
+    try {
+      const subject = state.principal && state.principal.subject;
+      return subject ? `${subject}.` : "";
+    } catch (_e) { return ""; }
+  }
 
   /**
    * Liest einen Merker der Tour aus dem localStorage.
@@ -58,7 +81,7 @@ const Tour = (() => {
    * @returns {string|null} Wert oder null.
    */
   function mark(key) {
-    try { return localStorage.getItem(LS + key); } catch (_e) { return null; }
+    try { return localStorage.getItem(LS + who() + key); } catch (_e) { return null; }
   }
 
   /**
@@ -70,7 +93,7 @@ const Tour = (() => {
    * @param {string} value Zu speichernder Wert.
    */
   function setMark(key, value) {
-    try { localStorage.setItem(LS + key, value); } catch (_e) { /* egal */ }
+    try { localStorage.setItem(LS + who() + key, value); } catch (_e) { /* egal */ }
   }
 
   /** @returns {boolean} true, wenn die Tour in dieser Fassung erledigt ist. */
@@ -195,6 +218,7 @@ const Tour = (() => {
     t.stage = 0;
     t.rejected = false;
     t.anchorSince = 0;
+    t.painted = null;
 
     if (tour.sandbox) enterSandbox();
 
@@ -229,6 +253,7 @@ const Tour = (() => {
     document.removeEventListener("keydown", onKey, true);
     t.tour = null;
     t.index = 0;
+    t.painted = null;
     clear(byId("tour-root"));
     document.documentElement.removeAttribute("data-tour-active");
 
@@ -523,24 +548,40 @@ const Tour = (() => {
    * sonst läge der Scrim über dem Dialog, den der Nutzer gerade ausfüllen soll.
    * Fehlt der Anker länger als ANCHOR_TIMEOUT_MS, rutscht das Popup mittig und
    * bietet das Überspringen an, statt die Tour scheitern zu lassen.
+   *
+   * **Wichtig -- wird im Takt von TICK_MS aufgerufen.** Solange derselbe
+   * Schritt gezeichnet bleibt, wird das Overlay deshalb NICHT neu gebaut,
+   * sondern nur nachgeführt (Aussparung, Ring, Popup-Position). Ein Neubau je
+   * Takt hatte zwei sichtbare Folgen: Der Ring startete seine Puls-Animation
+   * jedes Mal von vorn (Flackern), und weil auch die Fusszeile neue Knöpfe
+   * bekam, lagen ``mousedown`` und ``mouseup`` auf verschiedenen Elementen --
+   * „Weiter“/„Zurück“ lösten dadurch oft gar kein ``click`` aus. Ein Neubau
+   * findet nur statt, wenn sich Schritt, Anker-Verfügbarkeit oder
+   * Blockier-Modus ändern (:func:`paintKey`).
    */
   function paint() {
     const step = current();
     const root = byId("tour-root");
     if (!step || !root) return;
-    if (byId("modal-root").children.length) { clear(root); return; }
+    if (byId("modal-root").children.length) { clear(root); t.painted = null; return; }
 
     const anchor = step.anchor ? document.querySelector(step.anchor) : null;
     let missing = false;
     if (step.anchor && !anchor) {
       if (!t.anchorSince) t.anchorSince = Date.now();
-      if (Date.now() - t.anchorSince < ANCHOR_TIMEOUT_MS) { clear(root); return; }
+      if (Date.now() - t.anchorSince < ANCHOR_TIMEOUT_MS) {
+        clear(root);
+        t.painted = null;
+        return;
+      }
       missing = true;
     } else {
       t.anchorSince = 0;
     }
 
-    clear(root);
+    const key = paintKey(step, anchor, missing);
+    const reuse = !!(t.painted && t.painted.key === key && t.painted.pop.isConnected);
+    if (!reuse) clear(root);
     document.documentElement.setAttribute("data-tour-active", "1");
     // Vom unteren Rand belegter Platz (Demo-Banner). Hier gesetzt statt in
     // position(), weil das mittige Popup ohne Anker gar nicht dort vorbeikommt --
@@ -562,19 +603,107 @@ const Tour = (() => {
       const extra = document.querySelector(sel);
       if (extra) rects.push(extra.getBoundingClientRect());
     });
-    root.appendChild(el("div", {
-      class: "tour-scrim" + (blocking ? " blocking" : ""),
-      style: rects.length ? cutoutStyle(rects) : "",
-    }));
-    if (rect) {
-      root.appendChild(el("div", {
-        class: "tour-ring",
-        style: `left:${rect.left - 6}px;top:${rect.top - 6}px;` +
-               `width:${rect.width + 12}px;height:${rect.height + 12}px`,
-      }));
-      scrollAnchorIntoView(anchor, rect);
+    const scrimStyle = rects.length ? cutoutStyle(rects) : "";
+    const ringStyle = rect
+      ? `left:${rect.left - 6}px;top:${rect.top - 6}px;` +
+        `width:${rect.width + 12}px;height:${rect.height + 12}px`
+      : "";
+
+    if (reuse) {
+      // Nur nachführen: dieselben Knoten behalten, damit Ring-Animation und
+      // Klick-Ziele erhalten bleiben.
+      t.painted.scrim.setAttribute("style", scrimStyle);
+      if (t.painted.ring) t.painted.ring.setAttribute("style", ringStyle);
+      if (rect) position(t.painted.pop, rect, step.placement, true);
+      return;
     }
-    root.appendChild(popup(step, rect, missing));
+
+    const scrim = el("div", {
+      class: "tour-scrim" + (blocking ? " blocking" : ""),
+      style: scrimStyle,
+    });
+    if (blocking) makeScrimScrollable(scrim);
+    root.appendChild(scrim);
+    let ring = null;
+    if (rect) {
+      ring = el("div", { class: "tour-ring", style: ringStyle });
+      root.appendChild(ring);
+    }
+    scrollTargetsIntoView(rects);
+    const pop = popup(step, rect, missing);
+    root.appendChild(pop);
+    t.painted = { key, scrim, ring, pop };
+  }
+
+  /**
+   * Lässt den blockenden Scrim Rollbewegungen durch.
+   *
+   * Der Scrim nimmt bei ``simulate`` Zeigerereignisse an (er soll Fehlklicks
+   * abfangen) und liegt als ``position: fixed``-Kind von ``<body>`` über allem.
+   * Damit landet auch jedes Mausrad-/Wischereignis bei ihm -- und der Browser
+   * rollt daraufhin seinen rollbaren Vorfahren, also das Dokument. Das Dokument
+   * rollt in dieser Anwendung aber gar nicht: Gerollt wird ``.main``
+   * (``styles.css``). Ergebnis: Die Seite stand fest, und ein Zielbereich
+   * oberhalb des Sichtfensters -- etwa der Kontrollfluss -- war nicht mehr
+   * erreichbar.
+   *
+   * Deshalb wird die Bewegung von Hand weitergereicht. Nur das Rollen; Klicks
+   * bleiben geblockt, die Schutzwirkung des Scrims bleibt also erhalten.
+   *
+   * @param {HTMLElement} scrim Der blockende Scrim.
+   */
+  function makeScrimScrollable(scrim) {
+    const scroller = () => document.querySelector(".main");
+    scrim.addEventListener("wheel", (ev) => {
+      const box = scroller();
+      if (!box) return;
+      box.scrollTop += ev.deltaY;
+      box.scrollLeft += ev.deltaX;
+      ev.preventDefault();
+    }, { passive: false });
+    // Touch: die Fingerbewegung selbst nachrechnen (ein `touchmove` auf dem
+    // Scrim rollt sonst ebenso wenig wie das Mausrad).
+    let lastY = 0, lastX = 0;
+    scrim.addEventListener("touchstart", (ev) => {
+      const p = ev.touches[0];
+      if (p) { lastY = p.clientY; lastX = p.clientX; }
+    }, { passive: true });
+    scrim.addEventListener("touchmove", (ev) => {
+      const box = scroller();
+      const p = ev.touches[0];
+      if (!box || !p) return;
+      box.scrollTop += lastY - p.clientY;
+      box.scrollLeft += lastX - p.clientX;
+      lastY = p.clientY;
+      lastX = p.clientX;
+      ev.preventDefault();
+    }, { passive: false });
+  }
+
+  /**
+   * Kennung des gezeichneten Zustands.
+   *
+   * Ändert sie sich, muss das Overlay neu gebaut werden; bleibt sie gleich,
+   * genügt das Nachführen der Positionen. Bewusst grob: Der Inhalt eines
+   * Schritts ist statisch, veränderlich sind nur Schritt-Nummer, ob der Anker
+   * gefunden wurde (Popup mittig vs. am Element) und der Blockier-Modus. Dass
+   * ein Neurendern der Sicht den Anker-KNOTEN austauscht, ist unerheblich --
+   * verwendet wird nur dessen Rechteck, und das wird ohnehin jeden Takt neu
+   * gemessen.
+   *
+   * @param {object} step Aktueller Schritt.
+   * @param {Element|null} anchor Gefundenes Anker-Element.
+   * @param {boolean} missing Anker dauerhaft nicht auffindbar.
+   * @returns {string} Vergleichbare Kennung.
+   */
+  function paintKey(step, anchor, missing) {
+    return [
+      t.tour ? t.tour.id : "",
+      t.index,
+      missing ? "1" : "0",
+      anchor ? "a" : "-",
+      step.action === "simulate" ? "b" : "-",
+    ].join("|");
   }
 
   /**
@@ -604,17 +733,44 @@ const Tour = (() => {
   }
 
   /**
-   * Scrollt den Anker in den sichtbaren Bereich, falls er außerhalb liegt.
+   * Rollt die Zielbereiche des Schritts ins Sichtfeld.
    *
-   * @param {Element} anchor Ankerelement.
-   * @param {DOMRect} rect Sein aktuelles Rechteck.
+   * Bekommt **alle** freigelassenen Bereiche, nicht nur den Anker: Ein Schritt
+   * mit ``also`` fordert zu mehreren Stellen auf, und die müssen zusammen
+   * sichtbar sein. Beim Ablehnungs-Schritt zentrierte das frühere Verhalten den
+   * Anker (den Tab unten rechts) und schob damit den Kontrollfluss über den
+   * oberen Rand -- also genau die Stelle, an der zuerst ein Schritt zu wählen
+   * war.
+   *
+   * Passt die Gesamthöhe ins Fenster, wird der Verbund mittig gestellt; sonst
+   * wird nur so weit gerollt, dass der obere Bereich anliegt (er kommt in der
+   * Aufforderung zuerst). Gerollt wird ``.main`` -- das Dokument selbst rollt
+   * in dieser Anwendung nicht.
+   *
+   * @param {DOMRect[]} rects Bildschirmrechtecke der Zielbereiche.
    */
-  function scrollAnchorIntoView(anchor, rect) {
-    if (rect.top >= 0 && rect.bottom <= window.innerHeight) return;
+  function scrollTargetsIntoView(rects) {
+    if (!rects.length) return;
+    const box = document.querySelector(".main");
+    if (!box) return;
+    const pad = 16;
+    const top = Math.min(...rects.map((r) => r.top));
+    const bottom = Math.max(...rects.map((r) => r.bottom));
+    const usableBottom = window.innerHeight - bottomInset();
+    if (top >= pad && bottom <= usableBottom - pad) return;   // passt schon
+
+    let delta;
+    if (bottom - top <= usableBottom - 2 * pad) {
+      delta = (top + bottom) / 2 - usableBottom / 2;          // mittig
+    } else {
+      delta = top - pad;                                      // oben anlegen
+    }
     const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     try {
-      anchor.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "auto" });
-    } catch (_e) { /* ältere Engines: dann eben nicht */ }
+      box.scrollBy({ top: delta, behavior: smooth ? "smooth" : "auto" });
+    } catch (_e) {
+      box.scrollTop += delta;                                 // ältere Engines
+    }
   }
 
   /**
@@ -718,9 +874,12 @@ const Tour = (() => {
    * @param {HTMLElement} box Das Popup.
    * @param {DOMRect} r Ankerrechteck.
    * @param {string} placement "top" erzwingt oberhalb, sonst automatisch.
+   * @param {boolean} [quiet] true beim reinen Nachführen eines bereits
+   *   stehenden Popups: Dann entfällt das Ausblenden bis zur Messung -- sonst
+   *   blinkte das Popup in jedem Takt (TICK_MS) einmal auf.
    */
-  function position(box, r, placement) {
-    box.style.visibility = "hidden";
+  function position(box, r, placement, quiet) {
+    if (!quiet) box.style.visibility = "hidden";
     requestAnimationFrame(() => {
       const pad = 12;
       const inset = bottomInset();

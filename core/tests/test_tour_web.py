@@ -171,6 +171,40 @@ def test_tour_popup_keeps_its_buttons_reachable() -> None:
     )
 
 
+def test_tour_popup_survives_the_tick_without_being_rebuilt() -> None:
+    """Derselbe Schritt darf im Takt nicht neu aufgebaut werden.
+
+    ``paint()`` laeuft alle ``TICK_MS``. Baute es das Overlay jedes Mal neu,
+    hatte das zwei sichtbare Folgen: Der Ring begann seine Puls-Animation
+    staendig von vorn (Flackern), und weil die Fusszeile neue Knopf-Elemente
+    bekam, lagen ``mousedown`` und ``mouseup`` auf verschiedenen Knoten --
+    „Weiter"/„Zurueck" loesten dadurch oft gar kein ``click`` aus.
+
+    Bewacht werden die drei Teile, die das zusammen verhindern: die Kennung des
+    gezeichneten Zustands, das an sie gebundene Leeren des Overlays und das
+    stille Nachfuehren der Popup-Position.
+    """
+
+    engine = _read(TOUR / "engine.js")
+
+    assert "function paintKey(" in engine, (
+        "Ohne Kennung kann paint() gleiche Schritte nicht wiedererkennen"
+    )
+    assert re.search(r"const reuse\s*=.*t\.painted", engine), (
+        "paint() prueft nicht, ob das bestehende Overlay weiterverwendbar ist"
+    )
+    assert "if (!reuse) clear(root);" in engine, (
+        "paint() leert das Overlay unbedingt -- damit sind Ring und Knoepfe je "
+        "Takt neu und der Klick geht verloren"
+    )
+    assert re.search(r"position\(t\.painted\.pop, rect, step\.placement, true\)", engine), (
+        "Das Nachfuehren laeuft nicht im stillen Modus -- das Popup blinkt je Takt"
+    )
+    assert re.search(r"function position\(box, r, placement, quiet\)", engine) and (
+        "if (!quiet) box.style.visibility" in engine
+    ), "position() kennt den stillen Modus nicht"
+
+
 def test_tour_popup_keeps_clear_of_the_demo_banner() -> None:
     """Der Demo-Banner darf das Popup nicht verdecken.
 
@@ -266,6 +300,89 @@ def test_simulate_steps_reach_every_element_they_ask_for(tours_js: str) -> None:
             "['[data-tour=\"model.graph\"]'] fehlt) -- der Scrim schluckt den Klick"
         )
     assert checked, "Kein passender simulate-Schritt gefunden -- Waechter angleichen"
+
+
+def test_simulate_binding_steps_free_the_whole_palette(tours_js: str, app_js: str) -> None:
+    """Wer zum Binden per ⊕ auffordert, muss die ganze Palette freilassen.
+
+    Der Tab (``model.tab.data``/``model.tab.res``) ist nur der Umschalter --
+    gebunden wird ueber das ⊕ in der Liste DARUNTER. Liegt als Aussparung nur
+    der Tab frei, blockt der Scrim genau den Knopf, zu dem der Schritt
+    auffordert: Der Tab laesst sich waehlen, das ⊕ nicht, und es bleibt nur
+    „Ueberspringen".
+    """
+
+    assert '"data-tour": "model.palette"' in app_js, (
+        "Die Bindungs-Palette traegt keinen Tour-Anker -- dann kann kein Schritt "
+        "sie freilassen"
+    )
+
+    steps = re.findall(r"\{\s*id: \"[^\"]+\".*?\n      \}", tours_js, re.S)
+    checked = 0
+    for step in steps:
+        if 'action: "simulate"' not in step:
+            continue
+        hint = re.search(r"hint: \"([^\"]*)\"", step)
+        if not hint or "⊕" not in hint.group(1):
+            continue
+        checked += 1
+        step_id = re.search(r"id: \"([^\"]+)\"", step)
+        assert "model.palette" in step, (
+            f"Schritt „{step_id.group(1) if step_id else '?'}\" fordert zum Binden "
+            "per ⊕ auf, laesst aber nur den Tab frei -- der Knopf liegt unter dem "
+            "Scrim (also: '[data-tour=\"model.palette\"]' fehlt)"
+        )
+    assert checked, "Kein Bindungs-Schritt gefunden -- Waechter angleichen"
+
+
+def test_tour_marks_belong_to_the_logged_in_user() -> None:
+    """„Erledigt"/„verschoben" gehoert zum Konto, nicht zum Browser.
+
+    Die Merker liegen im localStorage, das Konto wechselt aber darin. Ohne
+    Bindung an den angemeldeten Nutzer erbte der naechste den Stand des
+    vorigen: In der Demo teilen sich Erika und Tom (beide Bearbeiter) denselben
+    Schluessel ``done.operator.<version>`` -- hatte Erika die Tour gesehen,
+    bekam Tom nie ein Angebot. Auf gemeinsam genutzten Rechnern ebenso.
+    """
+
+    engine = _read(TOUR / "engine.js")
+
+    assert "function who()" in engine, "Die Merker sind an kein Konto gebunden"
+    assert re.search(r"state\.principal && state\.principal\.subject", engine), (
+        "who() liest nicht den angemeldeten Login"
+    )
+    for fn, call in [("mark", "getItem"), ("setMark", "setItem")]:
+        assert re.search(rf"localStorage\.{call}\(LS \+ who\(\) \+ key", engine), (
+            f"{fn}() nutzt den Konto-Praefix nicht -- der naechste Nutzer erbt den Stand"
+        )
+
+
+def test_blocking_scrim_still_lets_the_page_scroll() -> None:
+    """Der blockende Scrim darf das Rollen nicht mitschlucken.
+
+    Gerollt wird in dieser Anwendung ``.main`` (``styles.css``), nicht das
+    Dokument. Der Scrim liegt als fixiertes Kind darueber und nimmt bei
+    ``simulate`` Zeigerereignisse an -- damit landen auch Mausrad und Wisch bei
+    ihm, und der Browser rollt seinen rollbaren Vorfahren: das Dokument, das
+    sich nicht bewegt. Ergebnis war eine festsitzende Seite; ein Zielbereich
+    oberhalb des Sichtfensters (der Kontrollfluss) war unerreichbar.
+    """
+
+    engine = _read(TOUR / "engine.js")
+    css = _read(WEB / "styles.css")
+
+    assert re.search(r"\.main \{[^}]*overflow: auto", css), (
+        "Nicht mehr .main rollt -- makeScrimScrollable() zeigt ins Leere"
+    )
+    assert "function makeScrimScrollable(" in engine, "Der Scrim reicht das Rollen nicht weiter"
+    assert re.search(r"if \(blocking\) makeScrimScrollable\(scrim\)", engine), (
+        "makeScrimScrollable() wird nicht auf den blockenden Scrim angewandt"
+    )
+    for ev in ("wheel", "touchmove"):
+        assert f'addEventListener("{ev}"' in engine, f"{ev} wird nicht weitergereicht"
+    assert "{ passive: false }" in engine, (
+        "Ohne passive:false darf der Handler nicht preventDefault() rufen"
+    )
 
 
 def test_tour_keyboard_defers_to_input_fields() -> None:

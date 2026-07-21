@@ -80,7 +80,11 @@
    die mobile Safari/Chrome sonst auf einzelne Textbloecke anwenden – sie wuerde
    die sorgfaeltig abgestimmten Schriftgroessen unvorhersehbar aufblaehen. */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
-html, body { margin: 0; height: 100%; }
+/* Das Dokument selbst darf NIE scrollen – gerollt wird ausschliesslich `.main`
+   (siehe unten). Ohne diese Sperre kettet Safari das Mausrad am Scroll-Ende von
+   `.main` ans Dokument weiter: die ganze `.app` (Sidebar + Inhalt) schiebt sich
+   nach oben und ein Dokument-Scrollbalken taucht im Hintergrund auf. */
+html, body { margin: 0; height: 100%; overflow: hidden; }
 body {
   font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
   background: radial-gradient(1200px 600px at 80% -10%, var(--body-glow) 0%, transparent 60%), var(--bg);
@@ -163,7 +167,11 @@ body {
 .pill-gray { background: var(--gray-soft); color: var(--gray); }
 .pill-blue { background: var(--accent-soft); color: var(--accent-txt); }
 
-.main { overflow: auto; display: flex; flex-direction: column; }
+/* Der einzige Scroll-Container der App. `overscroll-behavior: contain` haelt die
+   Rollbewegung hier gefangen: am oberen/unteren Rand angekommen kettet sie nicht
+   an das Dokument weiter (kein Hintergrund-Scrollbalken, kein Ruckeln beim
+   Uebergang zwischen erstem und zweitem Scroll). */
+.main { overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; }
 .topbar {
   position: sticky; top: 0; z-index: 5; backdrop-filter: blur(8px);
   background: var(--topbar-bg); border-bottom: 1px solid var(--line);
@@ -321,6 +329,18 @@ tr.hl-row td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .graph-panel.graph-max .graph-body { flex: 1; min-height: 0; padding: 12px 14px; }
 .graph-panel.graph-max .canvas-wrap { height: 100%; border-radius: 8px; }
 .graph-max-btn { margin: -2px 0; }
+/* Einpassen-Knopf oben rechts im Canvas: holt ein verschobenes/gezoomtes
+   Modell wieder ganz ins Bild. Dezent (halbtransparent), damit er den
+   Kontrollfluss nicht dominiert, aber beim Ueberfahren klar greifbar. */
+.canvas-fit {
+  position: absolute; right: 10px; top: 8px; z-index: 3;
+  font: inherit; font-size: 11px; line-height: 1.4;
+  color: var(--txt-dim); background: var(--bg-elev2);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 8px; opacity: .85; cursor: pointer;
+}
+.canvas-fit:hover { color: var(--txt); opacity: 1; border-color: var(--accent); }
+.canvas-fit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .canvas-hint {
   position: absolute; right: 10px; bottom: 8px; z-index: 2;
   font-size: 11px; color: var(--txt-dim);

@@ -182,11 +182,12 @@ class LeadNotifier:
         expires_at = start + timedelta(seconds=ttl_seconds) if ttl_seconds > 0 else start
         first = _first_name(name)
         site = site_url.rstrip("/")
+        ttl_phrase = _humanize_duration(ttl_seconds)
         parts = {
             "first_name": first,
             "url": url,
             "expiry": _format_expiry(expires_at),
-            "ttl_phrase": _humanize_duration(ttl_seconds),
+            "ttl_phrase": ttl_phrase,
             "site_url": site,
             "marketing_consent": marketing_consent,
         }
@@ -195,7 +196,7 @@ class LeadNotifier:
         message["To"] = email
         if self.recipient:
             message["Reply-To"] = self.recipient
-        message["Subject"] = _welcome_subject(first)
+        message["Subject"] = _welcome_subject(first, ttl_phrase)
         # set_content + add_alternative in this order yields multipart/alternative
         # with text/plain FIRST -- the order clients use to pick the richest part.
         message.set_content(_welcome_text(**parts))  # type: ignore[arg-type]
@@ -297,11 +298,29 @@ def _first_name(name: str) -> str:
     return name.strip().split(" ")[0] if name.strip() else ""
 
 
-def _welcome_subject(first_name: str) -> str:
-    """Subject line of the welcome mail (personalised when a name is known)."""
-    if first_name:
-        return f"{first_name}, Ihre ProcWorks-Testumgebung ist bereit"
-    return "Ihre ProcWorks-Testumgebung ist bereit"
+def _welcome_subject(first_name: str, ttl_phrase: str) -> str:
+    """Subject line of the welcome mail (personalised when a name is known).
+
+    The lifetime belongs in the subject: the link dies the same afternoon, and
+    a visitor who only skims the subject line in their inbox would otherwise
+    file the mail away as "I'll look at this tomorrow" -- by which time the
+    environment is gone. The phrase comes from :func:`_humanize_duration`, so
+    it stays true if ``DEMO_TTL_SECONDS`` ever changes.
+
+    Args:
+        first_name: Given name, or "" when unknown.
+        ttl_phrase: Preformatted lifetime, e.g. "2 Stunden".
+
+    Returns:
+        The subject line.
+
+    Note:
+        The wording stays **pure ASCII** on purpose. A typographic en dash would
+        force an RFC 2047 encoded-word into the middle of the subject; plain
+        parentheses keep the header readable in every client and in raw form.
+    """
+    lead = f"{first_name}, Ihre" if first_name else "Ihre"
+    return f"{lead} ProcWorks-Testumgebung ist bereit ({ttl_phrase} lang)"
 
 
 def _welcome_text(
@@ -335,8 +354,8 @@ def _welcome_text(
     blocks = [
         hello,
         "",
-        "Ihre persoenliche ProcWorks-Testumgebung laeuft. Sie koennen sie jederzeit",
-        "ueber diesen Link wieder oeffnen:",
+        f"Ihre persoenliche ProcWorks-Testumgebung laeuft. Die naechsten {ttl_phrase}",
+        "kommen Sie ueber diesen Link jederzeit wieder hinein:",
         "",
         f"    {url}",
         "",
@@ -494,7 +513,7 @@ def _welcome_html(
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="color-scheme" content="dark light" />
 <meta name="supported-color-schemes" content="dark light" />
-<title>{html.escape(_welcome_subject(first_name))}</title>
+<title>{html.escape(_welcome_subject(first_name, ttl_phrase))}</title>
 </head>
 <body style="margin:0;padding:0;background-color:{c['bg']};">
 <!-- Preheader: the grey preview line in the inbox. Hidden in the body itself. -->
@@ -534,8 +553,9 @@ Ihr Link zur Testumgebung &ndash; verf&uuml;gbar bis {html.escape(expiry)}.
   {section(f'<p style="{p_style}">{hello}</p>')}
   {section(
       f'<p style="{p_style}">wir haben eine ProcWorks-Instanz nur f&uuml;r Sie '
-      f'gestartet. &Uuml;ber diesen Link kommen Sie jederzeit zur&uuml;ck &ndash; '
-      f'ohne Anmeldung, ohne Installation.</p>'
+      f'gestartet. Die n&auml;chsten {html.escape(ttl_phrase)} kommen Sie '
+      f'&uuml;ber diesen Link jederzeit zur&uuml;ck &ndash; ohne Anmeldung, '
+      f'ohne Installation.</p>'
   )}
 
   <!-- Call to action. The bulletproof pattern: a table cell with bgcolor whose

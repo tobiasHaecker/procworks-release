@@ -117,10 +117,11 @@ const TOURS = [
         hint: "Wähle links den neuen Schritt aus, öffne den Tab Datenelemente und binde „Urlaubstage“ mit ⊕ lesend an ihn.",
         action: "simulate",
         // Der Schritt braucht zwei Stellen: erst den Knoten im Kontrollfluss
-        // wählen, dann im Tab binden. Ohne den Zusatzbereich läge der Graph
-        // unter dem blockenden Scrim und der neue Schritt liesse sich nicht
-        // auswählen.
-        also: ['[data-tour="model.graph"]'],
+        // wählen, dann in der Palette binden. Ohne den Zusatzbereich läge der
+        // Graph unter dem blockenden Scrim und der neue Schritt liesse sich
+        // nicht auswählen. Die Palette muss GANZ frei sein -- der Tab ist nur
+        // der Umschalter, gebunden wird über das ⊕ in der Liste darunter.
+        also: ['[data-tour="model.graph"]', '[data-tour="model.palette"]'],
         sim: { reject: true },
         advance: (ctx) => ctx.rejected,
         doc: "Modellierer-Anleitung.md",
@@ -143,8 +144,9 @@ const TOURS = [
         hint: "Öffne den Tab Ressourcen und binde die Rolle „Sachbearbeiter“ mit ⊕ an den neuen Schritt.",
         action: "simulate",
         // Wie beim Ablehnungs-Schritt: das Bindungsziel ist der im Graph
-        // gewählte Knoten, die Auswahl muss also erreichbar bleiben.
-        also: ['[data-tour="model.graph"]'],
+        // gewählte Knoten, die Auswahl muss also erreichbar bleiben -- und die
+        // Palette ganz, weil das ⊕ der Rolle unter dem Tab sitzt.
+        also: ['[data-tour="model.graph"]', '[data-tour="model.palette"]'],
         sim: { stage: 2 },
         advance: (ctx) => ctx.stage >= 2,
       },

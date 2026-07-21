@@ -99,3 +99,105 @@ def test_render_lock_is_released_even_on_error() -> None:
     assert "renderQueued = false; render();" in body, (
         "Ein vorgemerkter Lauf wird nicht nachgeholt -- der letzte Zustand fehlt"
     )
+
+
+def _panzoom_body() -> str:
+    """Gibt ``attachPanZoom`` ohne ``//``-Kommentare zurueck.
+
+    Ohne das Entfernen der Kommentare wuerde schon der erklaerende Fliesstext
+    (der die mittlere Maustaste ausfuehrlich beschreibt) die Waechter unten
+    zufriedenstellen, obwohl der Code selbst fehlt.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = re.search(r"\nfunction attachPanZoom\(wrap, svgEl\) \{.*?\n\}\n", src, re.S)
+    assert body, "attachPanZoom() nicht in app.js gefunden -- Waechter angleichen"
+    return re.sub(r"//[^\n]*", "", body.group(0))
+
+
+def test_lost_model_can_be_brought_back_into_view() -> None:
+    """Ein verschobenes/gezoomtes Modell laesst sich wieder einpassen.
+
+    Pan und Zoom sind unbegrenzt: wer weit genug schiebt, hat den Kontrollfluss
+    komplett aus dem Fenster geschoben und findet ohne Hilfe nicht zurueck (ein
+    Neuzeichnen setzt die Ansicht zwar zurueck, ist aber kein Bedienelement).
+    Es gibt deshalb zwei Wege zurueck, die beide auf dieselbe Funktion fuehren.
+    """
+
+    body = _panzoom_body()
+    assert "function fitToView()" in body, "Die Einpass-Funktion fehlt"
+    assert "fitToView," in body, "fitToView wird nicht auf _panzoom veroeffentlicht"
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "class: \"canvas-fit\"" in src, "Der Einpassen-Knopf fehlt im Canvas"
+    assert "_panzoom.fitToView()" in src, "Der Knopf ruft das Einpassen nicht auf"
+
+
+def test_middle_button_double_click_fits_and_suppresses_autoscroll() -> None:
+    """Doppelklick mit der mittleren Maustaste passt ein -- ohne Autoscroll.
+
+    Zwei Fallen, die je einzeln alles kaputt machen: ``dblclick`` feuert nur
+    fuer die linke Taste (die Klicks muessen also selbst gezaehlt werden), und
+    ohne ``preventDefault`` auf ``mousedown`` startet der Browser den
+    Autoscroll-Modus, der danach am Zeiger klebt.
+    """
+
+    body = _panzoom_body()
+    assert "auxclick" in body, "Der mittlere Klick wird nicht ausgewertet"
+    assert "e.button === 1" in body, "Es wird nicht auf die mittlere Taste geprueft"
+    assert "midClicks >= 2" in body, "Ein einzelner mittlerer Klick passt schon ein"
+    mousedown = re.search(r"\"mousedown\", \(e\) => \{[^}]*\}", body)
+    assert mousedown and "preventDefault" in mousedown.group(0), (
+        "Autoscroll wird nicht unterdrueckt -- der Scroll-Anker klebt am Zeiger"
+    )
+
+
+def test_fitting_never_magnifies_a_small_model() -> None:
+    """Kleine Modelle werden eingepasst, nicht aufgeblasen (Deckel 1)."""
+
+    body = _panzoom_body()
+    assert "Math.min(1, fit)" in body, (
+        "Ohne Deckel wird ein Zwei-Knoten-Prozess beim Einpassen formatfuellend "
+        "vergroessert"
+    )
+
+
+STYLES_CSS = Path(__file__).resolve().parents[2] / "web" / "styles.css"
+
+
+def _css_without_comments() -> str:
+    """Gibt ``styles.css`` ohne ``/* ... */``-Kommentare zurueck.
+
+    Sonst stellte schon der erklaerende Kommentar (der ``overflow: hidden`` und
+    ``overscroll-behavior`` beim Namen nennt) die Waechter zufrieden, obwohl die
+    Regel selbst fehlt.
+    """
+
+    src = STYLES_CSS.read_text(encoding="utf-8")
+    return re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+
+
+def test_only_main_scrolls_never_the_document() -> None:
+    """Nur ``.main`` scrollt -- das Dokument bleibt gesperrt.
+
+    Ohne die Sperre kettet Safari das Mausrad am Scroll-Ende von ``.main`` ans
+    Dokument weiter: die ganze ``.app`` schiebt sich nach oben und ein
+    Hintergrund-Scrollbalken taucht auf (erst nach dem zweiten Scrollen sichtbar).
+    Bewacht beide Haelften der Zusage: Dokument gesperrt **und** Kette gefangen.
+    """
+
+    css = _css_without_comments()
+
+    html_body = re.search(r"html,\s*body\s*\{([^}]*)\}", css)
+    assert html_body, "html, body-Regel nicht in styles.css gefunden -- Waechter angleichen"
+    assert "overflow: hidden" in html_body.group(1), (
+        "Ohne `overflow: hidden` auf html/body kann das Dokument scrollen -- "
+        "der Hintergrund-Scrollbalken kommt zurueck"
+    )
+
+    main = re.search(r"\.main\s*\{([^}]*)\}", css)
+    assert main, ".main-Regel nicht in styles.css gefunden -- Waechter angleichen"
+    assert "overscroll-behavior: contain" in main.group(1), (
+        "Ohne `overscroll-behavior: contain` kettet die Rollbewegung am Rand von "
+        ".main ans Dokument weiter"
+    )

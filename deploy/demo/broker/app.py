@@ -38,6 +38,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -223,6 +224,19 @@ _MAX_ACTIVE = int(os.environ.get("DEMO_MAX_ACTIVE", "20"))
 #: demo -- e.g. a visitor who just closed the tab -- is cleaned up when the next
 #: visitor needs a slot. 0 disables reaping. Default two hours.
 _TTL_SECONDS = int(os.environ.get("DEMO_TTL_SECONDS", str(2 * 3600)))
+#: Give a demo's slot back the moment its visitor ends the demo (submits the
+#: post-demo survey), instead of holding it until the hard-TTL reaper. Purely an
+#: efficiency win on top of the reaper: a visitor who is done releases their slot
+#: at session speed, so the small concurrent cap (:data:`_MAX_ACTIVE`) serves many
+#: more visitors per day. Only an **explicit** end frees early -- an abandoned tab
+#: still frees at TTL. Best-effort (a destroy failure never fails the feedback).
+#: Default on; set ``DEMO_END_FREES_SLOT=0`` for the pure reaper-only behaviour.
+_END_FREES_SLOT = os.environ.get("DEMO_END_FREES_SLOT", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 #: Send the visitor a welcome mail with their demo link + validity (default on
 #: wherever the SMTP relay is configured at all). Set ``DEMO_WELCOME_MAIL=0`` to
 #: run the gate without ever mailing the visitor.
@@ -270,6 +284,22 @@ def _valid_email(email: str) -> bool:
         return False
     local, _, domain = email.partition("@")
     return bool(local) and "." in domain and not domain.startswith(".") and not domain.endswith(".")
+
+
+#: A well-formed trial id: the hex token minted by ``new_trial_id`` (16 hex chars
+#: from ``token_hex(8)``); the range stays generous but hex-only on purpose.
+_TRIAL_ID_RE = re.compile(r"[0-9a-f]{8,64}")
+
+
+def _looks_like_trial_id(value: str) -> bool:
+    """True only for the known hex shape of a trial id (see ``new_trial_id``).
+
+    Guards the slot-freeing destroy on ``/feedback``: the id becomes part of a
+    platform app name / URL path, so a crafted feedback payload (path characters,
+    another org's app) must never reach the provisioner. Anything but pure hex of
+    the expected length is rejected and simply skips the early free.
+    """
+    return bool(_TRIAL_ID_RE.fullmatch(value))
 #: Shared secret guarding the scheduled-reaper poke (``POST /admin/reap``). When
 #: unset (the default) the endpoint is *disabled* (404) so there is no open,
 #: destructive trigger; set it to enable an external scheduler to sweep expired
@@ -431,6 +461,7 @@ def admin_metrics(request: Request) -> dict[str, object]:
             "leads_relayed": snap.get("leads_relayed", 0),
             "feedback_received": snap.get("feedback_received", 0),
             "reaped": snap.get("reaped", 0),
+            "slots_freed_on_end": snap.get("slots_freed_on_end", 0),
         },
     }
 
@@ -581,4 +612,18 @@ def submit_feedback(req: FeedbackRequest) -> dict[str, str]:
             _metrics.incr("feedback_relay_failed")
         else:
             _metrics.incr("feedback_relayed")
+
+    # Slot hand-back: the visitor has explicitly ended the demo, so give their
+    # slot back now instead of waiting up to the full hard TTL (see
+    # :data:`_END_FREES_SLOT`). Best-effort -- the feedback is already recorded and
+    # the visitor already thanked, so a destroy error must never surface here; and
+    # only a well-formed trial id may reach the provisioner (path-safety). An
+    # abandoned tab that never ends the demo is still reclaimed by the reaper.
+    if _END_FREES_SLOT and _looks_like_trial_id(trial_id):
+        try:
+            _provisioner.destroy_by_trial(trial_id)
+        except Exception:  # noqa: BLE001 - freeing a slot must never fail feedback
+            _log.exception("freeing slot for trial %s on demo end failed", trial_id)
+        else:
+            _metrics.incr("slots_freed_on_end")
     return {"status": "ok"}

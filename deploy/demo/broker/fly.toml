@@ -52,6 +52,10 @@ primary_region = "fra"
   # is ALSO what the visitor's welcome mail promises ("verfuegbar bis ..."), so
   # raising it lengthens the window in which the mailed link still works.
   DEMO_TTL_SECONDS = "7200"
+  # Give a slot back the moment a visitor explicitly ends the demo (submits the
+  # survey), instead of holding it the full TTL. Lets the small active cap serve
+  # many more visitors/day; an abandoned tab still frees at TTL. "0" disables it.
+  DEMO_END_FREES_SLOT = "1"
   # Welcome mail to the visitor (their demo link + how long it is kept). On by
   # default wherever the SMTP relay is configured; "0" disables it.
   DEMO_WELCOME_MAIL = "1"

@@ -99,10 +99,24 @@ body {
    als der sichtbare Bereich und ihr unteres Ende (Fusszeile der Schublade,
    Seitenende) verschwaende dauerhaft hinter der Safari-Leiste. `vh` bleibt als
    Rueckfall fuer Browser ohne `dvh` stehen. */
-.app { display: grid; grid-template-columns: 244px 1fr; height: 100vh; height: 100dvh; }
+/* `grid-template-rows: minmax(0, 1fr)` bindet die einzige Grid-Zeile an die
+   Container-Hoehe (100dvh) statt an die Inhaltshoehe. Ohne diese Bindung wuerde
+   die Zeile auf die hoechste Spalte wachsen, die Spalten waeren hoeher als der
+   Viewport und ihr unteres Ende laege nach der Dokument-Sperre (`overflow:hidden`
+   auf html/body) unerreichbar abgeschnitten. So bleibt jede Spalte exakt
+   viewporthoch und scrollt ihren Ueberhang selbst (siehe `.sidebar`/`.main`). */
+.app {
+  display: grid; grid-template-columns: 244px 1fr; grid-template-rows: minmax(0, 1fr);
+  height: 100vh; height: 100dvh;
+}
 .sidebar {
   background: var(--bg-elev); border-right: 1px solid var(--line);
   padding: 18px 14px; display: flex; flex-direction: column; gap: 6px;
+  /* Eigener Scroll-Kontext: ist das Menue hoeher als der Viewport (kurzes
+     Fenster), bleibt die Fusszeile per Sidebar-Scroll erreichbar. `min-height:0`
+     hebt das `auto`-Minimum des Grid-Kindes auf, sonst wuerde die Spalte statt zu
+     scrollen wieder ueber den Viewport hinauswachsen. */
+  min-height: 0; overflow-y: auto;
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 18px; }
 .brand .logo {
@@ -171,7 +185,11 @@ body {
    Rollbewegung hier gefangen: am oberen/unteren Rand angekommen kettet sie nicht
    an das Dokument weiter (kein Hintergrund-Scrollbalken, kein Ruckeln beim
    Uebergang zwischen erstem und zweitem Scroll). */
-.main { overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; }
+/* `min-height: 0` wie bei `.sidebar`: hebt das `auto`-Minimum des Grid-Kindes
+   auf, damit `.main` an die Zeilenhoehe gebunden bleibt und seinen Ueberhang
+   wirklich scrollt (statt die Zeile aufzublaehen und den unteren Rand hinter dem
+   Viewport abzuschneiden). */
+.main { overflow: auto; overscroll-behavior: contain; min-height: 0; display: flex; flex-direction: column; }
 .topbar {
   position: sticky; top: 0; z-index: 5; backdrop-filter: blur(8px);
   background: var(--topbar-bg); border-bottom: 1px solid var(--line);

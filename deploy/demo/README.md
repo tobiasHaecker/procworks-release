@@ -136,6 +136,15 @@ cadence, or run `reaper/reaper.py` from a scheduler that has the Fly token (see
 [Scheduled-reaper backstop](#scheduled-reaper-backstop-optional)). Set
 `DEMO_TTL_SECONDS=0` to disable reaping entirely.
 
+`DEMO_END_FREES_SLOT` (default `1`) makes the broker hand a demo's slot back the
+moment its visitor **explicitly ends** the demo (submits the post-demo survey),
+instead of holding it until the hard TTL. This is purely additive on top of the
+reaper: a visitor who is done releases their slot at session speed, so the small
+`DEMO_MAX_ACTIVE` cap serves many more visitors per day. An abandoned tab that
+never ends the demo is still reclaimed at the TTL. Best-effort (a destroy failure
+never fails the visitor's feedback) and path-safe (only a well-formed hex trial id
+drives a destroy). Set `DEMO_END_FREES_SLOT=0` for the pure reaper-only behaviour.
+
 **Demo login.** The demo *image* sets `PROCWORKS_DEMO_MODE=1`, which makes the
 SPA auto-login a fresh visitor as the seeded **modeler** and show a one-click
 role-switch box (operator/viewer) — so visitors never face an empty login form.
@@ -317,6 +326,11 @@ On top, the **reaper** enforces a hard TTL (`DEMO_TTL_SECONDS`), destroying any
 demo app older than the TTL, so instances never accumulate — opportunistically
 on each `/trial` and, optionally, on a schedule via `POST /admin/reap`. Every
 limit returns a friendly HTTP 429.
+
+To make the concurrent cap go further, `DEMO_END_FREES_SLOT` (default `1`)
+reclaims a slot as soon as its visitor **explicitly ends** the demo (survey
+submit), rather than waiting out the TTL — so the same small `DEMO_MAX_ACTIVE`
+serves many more visitors per day. Best-effort and path-safe; see above.
 
 ## D1 — manual Fly proof (create → reach → stop → destroy)
 

@@ -201,3 +201,37 @@ def test_only_main_scrolls_never_the_document() -> None:
         "Ohne `overscroll-behavior: contain` kettet die Rollbewegung am Rand von "
         ".main ans Dokument weiter"
     )
+
+
+def test_both_columns_stay_viewport_high_and_scroll_their_overflow() -> None:
+    """Bei gesperrtem Dokument muss jede Grid-Spalte ihren Ueberhang selbst scrollen.
+
+    Andernfalls schneidet ``overflow: hidden`` (siehe
+    :func:`test_only_main_scrolls_never_the_document`) auf einem kurzen Fenster den
+    unteren Rand ab: die Grid-Zeile waechst auf die Inhaltshoehe, die Spalten sind
+    hoeher als der Viewport und ihr Ende ist unerreichbar (Sidebar-Fusszeile bzw.
+    unterste Panels rechts). Drei Zutaten fangen das ab: die Zeile an die
+    Container-Hoehe gebunden, plus je Spalte ein eigener Scroll-Kontext.
+    """
+
+    css = _css_without_comments()
+
+    app = re.search(r"\.app\s*\{([^}]*)\}", css)
+    assert app, ".app-Regel nicht in styles.css gefunden -- Waechter angleichen"
+    assert "minmax(0, 1fr)" in app.group(1), (
+        "Ohne `grid-template-rows: minmax(0, 1fr)` waechst die Grid-Zeile auf die "
+        "Inhaltshoehe und der untere Rand wird bei gesperrtem Dokument abgeschnitten"
+    )
+
+    sidebar = re.search(r"\.sidebar\s*\{([^}]*)\}", css)
+    assert sidebar, ".sidebar-Regel nicht in styles.css gefunden -- Waechter angleichen"
+    assert "overflow-y: auto" in sidebar.group(1) and "min-height: 0" in sidebar.group(1), (
+        "Ohne eigenen Scroll-Kontext ist die Sidebar-Fusszeile (Theme/API/Abmelden) "
+        "auf einem kurzen Fenster nicht mehr erreichbar"
+    )
+
+    main = re.search(r"\.main\s*\{([^}]*)\}", css)
+    assert main and "min-height: 0" in main.group(1), (
+        "Ohne `min-height: 0` blaeht `.main` die Grid-Zeile auf und scrollt seinen "
+        "Ueberhang nicht -- die unteren Panels sind abgeschnitten"
+    )

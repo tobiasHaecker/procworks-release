@@ -58,6 +58,15 @@ class ProvisionPort(Protocol):
     def destroy(self, instance_id: str) -> None:
         """Destroy an instance permanently (reaper / hard TTL). Idempotent."""
 
+    def destroy_by_trial(self, trial_id: str) -> None:
+        """Destroy the instance belonging to ``trial_id`` (visitor ended demo).
+
+        The broker only knows the visitor's ``trial_id`` (from the survey), not
+        the opaque ``instance_id``; each implementation maps the id to its own
+        naming scheme and destroys. Idempotent like :meth:`destroy` -- an
+        already-gone or never-created trial is a no-op.
+        """
+
     def status(self, instance_id: str) -> DemoInstance | None:
         """Return the current instance state, or None if it no longer exists."""
 
@@ -106,6 +115,10 @@ class InMemoryProvisioner:
     def destroy(self, instance_id: str) -> None:
         self._instances.pop(instance_id, None)
         self._created_at.pop(instance_id, None)
+
+    def destroy_by_trial(self, trial_id: str) -> None:
+        # Mirror the id scheme of :meth:`create` ("mem-<trial_id>").
+        self.destroy(f"mem-{trial_id}")
 
     def status(self, instance_id: str) -> DemoInstance | None:
         return self._instances.get(instance_id)
@@ -298,6 +311,10 @@ class FlyProvisioner:
             self._request("DELETE", f"/apps/{instance_id}")
         except RuntimeError:  # pragma: no cover - treat "already gone" as done
             pass
+
+    def destroy_by_trial(self, trial_id: str) -> None:
+        # The per-visitor app name is the instance id (see :meth:`create`).
+        self.destroy(self._app_name(trial_id))
 
     def status(self, instance_id: str) -> DemoInstance | None:
         try:

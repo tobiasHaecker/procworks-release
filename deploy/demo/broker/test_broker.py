@@ -175,6 +175,7 @@ def _fresh_client(monkeypatch: pytest.MonkeyPatch, *, max_active: int = 5) -> Te
     broker._guard = broker._AbuseGuard(max_per_day=100, max_per_ip=100, ip_window_seconds=3600)
     broker._metrics = broker._Metrics()  # isolate observability counters per test
     broker._notifier = broker.create_lead_notifier()  # unconfigured w/o SMTP env
+    broker._END_FREES_SLOT = True  # production default; a test may override it
     return TestClient(broker.app)
 
 
@@ -502,6 +503,77 @@ def test_feedback_relay_failure_is_logged_and_counted(
     text = caplog.text
     assert "t42" in text  # the trial id makes the loss traceable
     assert "geheim" not in text  # ... but never the visitor's answers
+
+
+def test_ending_a_demo_frees_its_slot_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ending the demo (survey submit) hands the slot back immediately.
+
+    With ``DEMO_END_FREES_SLOT`` on, a visitor who explicitly ends need not wait
+    for the hard-TTL reaper: their instance is destroyed on ``/feedback`` and the
+    freed slot lets the next visitor in at a cap that was full a moment ago.
+    """
+    client = _fresh_client(monkeypatch, max_active=1)
+    broker._END_FREES_SLOT = True
+    started = client.post("/trial", json=_LEAD)
+    assert started.status_code == 200
+    trial_id = started.json()["trial_id"]
+    # Cap is 1 and one demo is live -> a second trial would be refused right now.
+    assert client.post("/trial", json=_LEAD).status_code == 429
+    # The first visitor ends their demo -> slot returned.
+    ended = client.post("/feedback", json={"trial_id": trial_id, "satisfaction": 5})
+    assert ended.status_code == 200 and ended.json()["status"] == "ok"
+    assert f"mem-{trial_id}" not in broker._provisioner.list_ids()  # slot freed
+    assert broker._metrics.snapshot().get("slots_freed_on_end") == 1
+    # And the freed slot is immediately reusable.
+    assert client.post("/trial", json=_LEAD).status_code == 200
+
+
+def test_ending_a_demo_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the switch off the slot is kept until the reaper (pure old behaviour)."""
+    client = _fresh_client(monkeypatch, max_active=1)
+    broker._END_FREES_SLOT = False
+    trial_id = client.post("/trial", json=_LEAD).json()["trial_id"]
+    ended = client.post("/feedback", json={"trial_id": trial_id, "satisfaction": 5})
+    assert ended.status_code == 200
+    assert f"mem-{trial_id}" in broker._provisioner.list_ids()  # slot NOT freed
+    assert broker._metrics.snapshot().get("slots_freed_on_end") is None
+
+
+def test_ending_a_demo_ignores_a_malformed_trial_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crafted (non-hex) trial id never reaches the provisioner.
+
+    The id becomes part of a platform app name / URL path, so only the known hex
+    shape may drive a destroy. A malformed id is thanked like any feedback but
+    frees nothing -- and cannot touch another (or a path-escaped) instance.
+    """
+    client = _fresh_client(monkeypatch, max_active=2)
+    broker._END_FREES_SLOT = True
+    trial_id = client.post("/trial", json=_LEAD).json()["trial_id"]
+    live_before = set(broker._provisioner.list_ids())
+    # Path-traversal-flavoured and too-short ids are both rejected by the guard.
+    for bogus in ["../evil", "not-hex!", "abc", ""]:
+        resp = client.post("/feedback", json={"trial_id": bogus, "satisfaction": 3})
+        assert resp.status_code == 200
+    assert set(broker._provisioner.list_ids()) == live_before  # nothing destroyed
+    assert broker._metrics.snapshot().get("slots_freed_on_end") is None
+    # The genuine trial is still endable.
+    assert client.post("/feedback", json={"trial_id": trial_id}).status_code == 200
+    assert f"mem-{trial_id}" not in broker._provisioner.list_ids()
+
+
+def test_ending_a_demo_survives_a_destroy_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeing a slot is best-effort -- a destroy error never fails the feedback."""
+    client = _fresh_client(monkeypatch)
+    broker._END_FREES_SLOT = True
+    trial_id = client.post("/trial", json=_LEAD).json()["trial_id"]
+
+    def _boom(_trial: str) -> None:
+        raise RuntimeError("platform hiccup")
+
+    monkeypatch.setattr(broker._provisioner, "destroy_by_trial", _boom)
+    resp = client.post("/feedback", json={"trial_id": trial_id, "satisfaction": 4})
+    assert resp.status_code == 200 and resp.json()["status"] == "ok"  # visitor unaffected
+    assert broker._metrics.snapshot().get("slots_freed_on_end") is None  # not counted on error
 
 
 def test_lead_relay_failure_is_logged_and_counted(monkeypatch: pytest.MonkeyPatch) -> None:

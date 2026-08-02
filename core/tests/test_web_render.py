@@ -567,3 +567,76 @@ def test_arrow_keys_yield_to_typing_and_to_dialogs() -> None:
     assert src.count("isTypingTarget()") >= 3, (
         "Escape nutzt die gemeinsame Tipp-Erkennung nicht mit"
     )
+
+
+def test_task_mask_is_prefilled_from_the_instance_data() -> None:
+    """Die Aufgabenmaske zeigt die bereits erfassten Werte.
+
+    ``promptComplete`` baute jedes Bedienelement mit ``maskControl(..., null)``,
+    also ohne aktuellen Wert. Ein **Nur-Lese-Feld** ist aber per Definition die
+    Entscheidungsgrundlage des Schritts (der Auftragswert bei der Freigabe, der
+    Rechnungsbetrag beim Zahlungsabgleich) -- leer war es wertlos, und ein aus
+    einem Vor- oder Elternprozess uebernommener Wert musste abgetippt werden.
+
+    Der Waechter haelt die Kette fest: die Aufrufer reichen die Instanzdaten
+    durch, und ``promptComplete`` gibt sie je Feld an ``maskControl`` weiter --
+    in **beiden** Zweigen (gestaltete Maske und generischer Rueckfall).
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = re.search(
+        r"\nasync function promptComplete\(.*?\n\}\n", src, re.S
+    )
+    assert body, "promptComplete() nicht gefunden -- Waechter angleichen"
+    code = re.sub(r"//[^\n]*", "", body.group(0))
+
+    assert "dataValues" in code.split("\n")[1], (
+        "promptComplete nimmt die Instanzdaten nicht entgegen"
+    )
+    assert code.count("maskControl(") == 2, (
+        "Die Maske wird nicht mehr an genau zwei Stellen gebaut -- Waechter pruefen"
+    )
+    assert "maskControl(elem, f.widget, f.options, values[f.element_id])" in code, (
+        "Die gestaltete Maske wird nicht aus den Instanzdaten vorbelegt"
+    )
+    assert "maskControl(elem, widget, null, values[a.element_id])" in code, (
+        "Der generische Rueckfall wird nicht aus den Instanzdaten vorbelegt"
+    )
+
+    # Jeder Aufrufer muss die Werte auch tatsaechlich mitgeben, sonst bleibt die
+    # Vorbelegung im Einzelfall wirkungslos.
+    for caller in ("completeActivity", "completeTask", "completeTestTask"):
+        fn = re.search(rf"\nasync function {caller}\(.*?\n\}}\n", src, re.S)
+        assert fn, f"{caller}() nicht gefunden -- Waechter angleichen"
+        assert "data_values" in fn.group(0), (
+            f"{caller} reicht die Instanzdaten nicht an die Maske durch"
+        )
+
+
+def test_empty_required_field_blocks_the_completion() -> None:
+    """Ein leeres Pflichtfeld wird an der Maske abgefangen, nicht spaeter.
+
+    Der Kern erzwingt beim Abschluss **nicht**, dass die Pflicht-Schreibwerte
+    eines Schritts wirklich mitkommen -- ``complete_activity`` uebernimmt, was
+    da ist. Ein leer gelassenes Feld faellt darum erst an ganz anderer Stelle
+    auf: an der XOR-Verzweigung, die den Diskriminator braucht, oder an einer
+    Folgeprozess-Bedingung -- und dort als Laufzeitfehler eines *anderen*
+    Schritts. Das Modell erklaert die Pflicht bereits (``FormField.required``),
+    also haelt die Maske sie auch ein.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = re.search(r"\nasync function promptComplete\(.*?\n\}\n", src, re.S)
+    assert body, "promptComplete() nicht gefunden -- Waechter angleichen"
+    code = re.sub(r"//[^\n]*", "", body.group(0))
+
+    assert "required" in code, "Die Pflichtangabe der Maske wird nicht ausgewertet"
+    assert "missing.length" in code, "Fehlende Pflichtfelder werden nicht geprueft"
+    assert re.search(r"if \(missing\.length\) \{\s*toast\(", code), (
+        "Fehlende Pflichtfelder werden nicht gemeldet"
+    )
+    absenden = code.index("api.post(")
+    pruefung = code.index("missing.length")
+    assert pruefung < absenden, (
+        "Die Pflichtfeldpruefung steht hinter dem Absenden -- sie kaeme zu spaet"
+    )

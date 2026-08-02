@@ -31,6 +31,7 @@ from procworks import (
     assignment,
     backups,
     demo,
+    demo_o2c,
     mail_runtime,
     metrics,
     migration,
@@ -184,21 +185,27 @@ def _demo_mode() -> bool:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan: optionally seed the demo world at boot.
+    """Application lifespan: optionally seed a demo data set at boot.
 
     When ``PROCWORKS_LOAD_DEMO`` is truthy, the built-in demo cosmos is loaded
     once into the (still empty) module singletons, so a throw-away cloud demo
     container comes up *ready* -- no manual ``POST /admin/reset`` needed (see
-    docs/Demo-Hosting-Konzept.md, D0a). This is a pure boundary convenience and
-    touches no correctness rule; the seed goes through the same
-    ``demo.load_demo`` path as the admin reset.
+    docs/Demo-Hosting-Konzept.md, D0a). ``PROCWORKS_LOAD_O2C`` does the same for
+    the large Order-to-Cash data set; both are independent and may be combined.
+    This is a pure boundary convenience and touches no correctness rule; the
+    seeds go through the same ``load_demo``/``load_o2c`` path as the admin reset.
 
     Idempotent by design: it only seeds when no schema exists yet, so a
     re-entrant lifespan (test client, ``--reload``) or an already-populated
     store is left untouched. Off by default -- without the env var nothing runs.
     """
-    if _env_truthy("PROCWORKS_LOAD_DEMO") and not _store.list_ids():
+    # Die Leer-Pruefung faellt *einmal*, vor dem ersten Seed: sonst saehe der
+    # zweite Schalter den vom ersten gefuellten Store und liefe nie an.
+    was_empty = not _store.list_ids()
+    if was_empty and _env_truthy("PROCWORKS_LOAD_DEMO"):
         _seed_demo()
+    if was_empty and _env_truthy("PROCWORKS_LOAD_O2C"):
+        _seed_o2c()
     yield
 
 
@@ -280,6 +287,25 @@ def _seed_demo() -> None:
     """
     backend = _auth_backend if isinstance(_auth_backend, PasswordAuthBackend) else None
     demo.load_demo(
+        schema_store=_store,
+        instance_store=_instances,
+        org_store=_org_store,
+        audit_log=_audit,
+        password_backend=backend,
+        absence_store=_absence_store,
+    )
+
+
+def _seed_o2c() -> None:
+    """Load the large Order-to-Cash data set into the current stores.
+
+    Shared by ``POST /admin/reset {load_o2c:true}`` and the boot seed
+    (``PROCWORKS_LOAD_O2C``), exactly like :func:`_seed_demo`. The two data sets
+    are independent -- own org model, own schema ids, own logins -- so they may
+    be loaded separately or together. See docs/Order-to-Cash-Demoprozess-Konzept.md.
+    """
+    backend = _auth_backend if isinstance(_auth_backend, PasswordAuthBackend) else None
+    demo_o2c.load_o2c(
         schema_store=_store,
         instance_store=_instances,
         org_store=_org_store,
@@ -655,10 +681,18 @@ class ResetRequest(BaseModel):
         "otherwise leave an empty system.",
         examples=[True],
     )
+    load_o2c: bool = Field(
+        default=False,
+        description="When true, additionally load the large Order-to-Cash data "
+        "set (own org, six schemas, running orders). Independent of load_demo; "
+        "both may be combined.",
+        examples=[True],
+    )
 
 
 class ResetResponse(BaseModel):
     demo_loaded: bool
+    o2c_loaded: bool = False
     schemas: int
     instances: int
     org_models: int
@@ -1635,7 +1669,9 @@ def post_admin_reset(
     instance, audit event and shared org model is removed. In password mode all
     logins are dropped too, except the acting admin and the bootstrap ``admin``
     so nobody gets locked out. With ``load_demo`` the built-in demo world is
-    loaded afterwards (the same data that ships for a guided first look).
+    loaded afterwards (the same data that ships for a guided first look); with
+    ``load_o2c`` the large Order-to-Cash data set (own org, six schemas, nine
+    orders). Both flags are independent and may be combined.
     """
 
     _store.clear()
@@ -1657,9 +1693,12 @@ def post_admin_reset(
 
     if req.load_demo:
         _seed_demo()
+    if req.load_o2c:
+        _seed_o2c()
 
     return ResetResponse(
         demo_loaded=req.load_demo,
+        o2c_loaded=req.load_o2c,
         schemas=len(_store.list_ids()),
         instances=len(_instances.list_ids()),
         org_models=len(_org_store.list_ids()),

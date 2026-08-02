@@ -268,9 +268,15 @@ Damit alle Funktionen sofort sichtbar werden, kann der Administrator fertige
 Beispieldaten laden (eine Organisation, zwei Prozesse, drei laufende Instanzen):
 
 1. Als **Administrator** anmelden.
-2. In die Sicht **Monitoring** wechseln und ganz nach unten zum Bereich
-   **„Wartung (Administrator)"** scrollen.
+2. In die Sicht **Administration** wechseln und zum Bereich **„Wartung"**
+   scrollen.
 3. **„Beispieldaten laden"** klicken und bestätigen.
+
+Im selben Bereich liegt **„Order-to-Cash-Beispiel laden"**: ein umfangreicherer
+Datensatz mit einem vollständigen Geschäftsprozess (Angebot → Auftrag →
+Lieferung → Rechnung → Zahlungseingang → Mahnwesen), sechs Prozessen, einer
+eigenen Beispielfirma und neun vorbereiteten Vorgängen. Beide Datensätze lassen
+sich auch nacheinander laden; jedes Laden setzt vorher alle Daten zurück.
 
 Anschließend stehen vier **Testbenutzer** zum Anmelden bereit (Passwort für alle:
 `demo-procworks`):

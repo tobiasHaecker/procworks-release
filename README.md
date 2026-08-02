@@ -103,12 +103,20 @@ Beispieldaten mit (eine Organisation „Acme", zwei Prozesse und drei laufende
 Instanzen). So laden Sie sie:
 
 1. Als **Administrator** anmelden.
-2. In die Sicht **Monitoring** wechseln, ganz unten zum Bereich
-   **„Wartung (Administrator)"** scrollen.
+2. In die Sicht **Administration** wechseln und zum Bereich **„Wartung"**
+   scrollen.
 3. **„Beispieldaten laden"** klicken und bestätigen.
 
+Daneben steht **„Order-to-Cash-Beispiel laden"** — ein deutlich umfangreicherer
+Datensatz, der einen kompletten Geschäftsprozess vom Angebot über Lieferung und
+Rechnung bis ins Mahnwesen abbildet (sechs Prozesse, eine eigene Beispielfirma,
+neun vorbereitete Vorgänge). Er eignet sich, wenn Sie sehen möchten, wie ein
+echter Ablauf mit mehreren Abteilungen aussieht; für den ersten Eindruck sind die
+normalen Beispieldaten die schnellere Wahl.
+
 Derselbe Bereich enthält **„Auf Null zurücksetzen"**, um jederzeit wieder mit
-einem leeren System zu starten. Beides ist **nur für Administratoren** sichtbar.
+einem leeren System zu starten. Alles davon ist **nur für Administratoren**
+sichtbar.
 
 Nach dem Laden können Sie sich mit den **Testbenutzern** anmelden (Passwort für
 alle: `demo-procworks`):

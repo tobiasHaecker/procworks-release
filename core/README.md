@@ -719,13 +719,99 @@ tauchen also in KPIs und Prozesskarte auf). Mit `password_backend` werden
 zusätzlich die Test-Logins angelegt (`mara.modell`, `erika.sander`, `tom.berger`,
 `vera.viewer`; Passwort `demo-procworks`, ohne erzwungene Änderung).
 
+### Order-to-Cash: der große Beispieldatensatz
+
+`demo_o2c.py` enthält einen **zweiten, deutlich umfangreicheren** Datensatz: den
+kompletten Order-to-Cash-Wertstrom von der Kundenanfrage bis zum Zahlungseingang
+und ins Mahnwesen. Er ist unabhängig vom Datensatz oben (eigenes
+Organisationsmodell `org-nordwind`, eigene Schema-Ids, eigene Logins) und lässt
+sich einzeln oder zusammen mit ihm laden.
+
+Statt eines Monolithen ist es eine **Prozessfamilie** aus sechs freigegebenen
+Schemata — so wird zugleich die Komposition vorgeführt (H1–H4, F1–F4):
+
+```text
+o2c-auftragsabwicklung   Hauptprozess   37 Knoten, 36 Datenelemente
+├── o2c-bonitaet         Teilprozess    Bonitäts- und Kreditprüfung
+├── o2c-versand          Teilprozess    Versand und Zustellung
+├── o2c-faktura          Teilprozess    Fakturierung
+├── o2c-forderung        Folgeprozess   Mahnwesen bis Inkasso   (bedingt)
+└── o2c-retoure          Folgeprozess   Retoure und Gutschrift  (bedingt)
+```
+
+Der didaktische Kern sind drei Muster, die man reflexhaft als **Schleife**
+zeichnet und die hier zyklenfrei gelöst sind:
+
+- **Früher Abbruch** (Angebot abgelehnt): kein Sprung zum Ende, sondern
+  Verschachtelung — die gesamte weitere Abwicklung liegt *im* XOR-Zweig
+  „Angenommen".
+- **Mahn-Eskalation**: eine Kaskade geschachtelter XOR-Blöcke, deren „noch nicht
+  bezahlt"-Zweig jeweils die nächste Stufe *enthält* (Erinnerung → 1. Mahnung →
+  2. Mahnung → Inkasso). Jede Stufe ist total und disjunkt partitioniert (K7).
+- **Reklamation nach Lieferung**: ein eigener, bedingt ausgelöster Folgeprozess.
+
+Vier Verzweigungsarten kommen vor: die Kundenentscheidung (ENUM mit
+Auffang-Zweig), die **Wertgrenzen-Freigabe** (THRESHOLD — sie routet die
+*Zuständigkeit*, nicht das Ergebnis), der Beschaffungsweg (ENUM) und der
+Zahlungsabgleich (BOOLEAN). Dazu 36 Datenelemente über alle sechs Datentypen und
+alle sechs Widget-Arten, Benachrichtigungen in beiden Empfängerarten, die
+Vorgesetzten-Bearbeiterregel, Wertklassen, Prioritäten und eine aktive
+Urlaubsvertretung.
+
+**Ohne externe Systeme:** Wo in der Praxis ein ERP, ein Lagersystem oder ein
+Kontoauszug stünde, steht eine ganz normale interaktive Aktivität mit dem
+Namenspräfix `System (simuliert): `, deren Maske genau die Felder trägt, die die
+echte Integration liefern würde. Es gibt **kein** `EXTERNAL`-Datenelement (das
+bräuchte einen konfigurierten Connector) und **keinen** automatischen Schritt
+(der bräuchte einen laufenden Worker) — der Datensatz ist damit überall
+vollständig durchklickbar.
+
+Geseedet werden **neun Vorgänge** an unterschiedlichen Stellen (plus zwölf Kind-
+und Folgeprozess-Instanzen, die dabei von selbst entstehen), sodass jede Rolle
+sofort offene Aufgaben hat:
+
+```text
+o2c-2026-001  RUNNING    frisch gestartet
+o2c-2026-002  RUNNING    offener AND-Block (Bestand geklärt, Kalkulation offen)
+o2c-2026-003  RUNNING    Teilprozess Bonität läuft (Kind-Instanz wartet)
+o2c-2026-004  RUNNING    wartet auf die Freigabe der Geschäftsführung (48.500 €)
+o2c-2026-005  RUNNING    Fertigung steht, Kommissionierung + Versandpapiere offen
+o2c-2026-006  COMPLETED  vollständig abgewickelt und bezahlt
+o2c-2026-007  COMPLETED  unbezahlt -> Folgeprozess Forderungsmanagement läuft
+o2c-2026-008  RUNNING    Kunde will nachverhandeln
+o2c-2026-009  COMPLETED  Angebot abgelehnt, früh beendet
+```
+
+`load_o2c(*, schema_store, instance_store, org_store, audit_log,
+password_backend=None, absence_store=None)` baut alles **ausschließlich über die
+öffentlichen Change-Operationen** (wie `demo.py`), ist also correct by
+construction. Mit `password_backend` entstehen zusätzlich acht Logins
+(`sina.springer`, `nadja.neumann`, `viktor.vogel`, `karin.kredel`, `lars.lange`,
+`bianca.buch`, `gustav.gross`, `automat.nordwind`; dasselbe Passwort wie oben).
+**Sina Springer** trägt alle operativen Rollen — wer den Prozess allein
+durchklicken will, sieht unter dieser Anmeldung jede Aufgabe in einer Liste, ohne
+dass die Rollentrennung im Modell aufgeweicht wäre.
+
+Die Begründung jeder Modellierungsentscheidung — warum die Bonitätsprüfung
+hinter dem AND-Block steht, warum die Folgeprozess-Bedingungen an Ankreuzfeldern
+hängen, wie der kritische Pfad in den 60-Tage-Termin passt — steht im
+Konzeptdokument des Datensatzes (projektintern, `docs/`).
+
+### Reset über die API
+
 Der Reset ist **administrator-exklusiv** und läuft über die API:
 
 ```text
-POST /admin/reset   {"load_demo": false}  -> alles auf Null
-POST /admin/reset   {"load_demo": true}   -> alles auf Null, danach Beispieldaten
-   -> { demo_loaded, schemas, instances, org_models, users }
+POST /admin/reset   {}                    -> alles auf Null
+POST /admin/reset   {"load_demo": true}   -> auf Null, danach Beispieldaten
+POST /admin/reset   {"load_o2c": true}    -> auf Null, danach Order-to-Cash
+POST /admin/reset   {"load_demo": true, "load_o2c": true}   -> beide Datensätze
+   -> { demo_loaded, o2c_loaded, schemas, instances, org_models, users }
 ```
+
+Beide Schalter sind unabhängig und default-aus. Für Container gibt es sie auch
+als Boot-Variablen (`PROCWORKS_LOAD_DEMO=1`, `PROCWORKS_LOAD_O2C=1`); sie greifen
+nur, solange der Store leer ist.
 
 `require_role("admin")` schützt den Endpunkt; ein Nicht-Admin erhält HTTP 403.
 Geleert werden Schemata, Instanzen, Organisationsmodelle und das Audit-Log (alle

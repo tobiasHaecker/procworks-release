@@ -5270,7 +5270,8 @@ function openAdhocDelete(schema, inst, targets) {
 async function completeActivity(nodeId, node) {
   const schema = state.instance.ad_hoc_schema || state.schema;
   await promptComplete(schema, state.instanceId, nodeId, node ? nodeCaption(node) : nodeId, null,
-    async () => { await loadInstance(state.instanceId); render(); });
+    async () => { await loadInstance(state.instanceId); render(); },
+    state.instance.data_values);
 }
 
 // Instanzdaten direkt eingeben/aendern – ohne eine Aktivitaet abzuschliessen.
@@ -5312,10 +5313,21 @@ function openInstanceDataForm(schema, inst) {
   }, "Speichern");
 }
 
-async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone) {
+// Schliesst einen Schritt ueber seine Eingabemaske ab.
+//
+// ``dataValues`` sind die aktuellen Instanzdaten (``ProcessInstance.data_values``)
+// und belegen jedes Feld vor, dessen Element schon einen Wert traegt. Das ist fuer
+// datenreiche Prozesse wesentlich und nicht bloss Komfort: Ein Nur-Lese-Feld ist
+// per Definition die *Entscheidungsgrundlage* des Schritts (der Auftragswert bei
+// der Freigabe, der Rechnungsbetrag beim Zahlungsabgleich) -- ohne Vorbelegung
+// bliebe es leer und der Schritt waere fachlich nicht entscheidbar. Auch
+// Schreibfelder starten mit dem bisherigen Wert, damit eine Uebernahme aus einem
+// Vor- oder Elternprozess nur bestaetigt statt abgetippt werden muss.
+async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone, dataValues) {
   // Bevorzugt die gestaltete Eingabemaske dieses Schritts; sonst generische
   // Felder fuer die Pflicht-Schreibvariablen.
   const form = (schema.forms || {})[nodeId];
+  const values = dataValues || {};
   const inputs = {};
   const body = el("div", { class: "form-grid" });
   if (form) {
@@ -5323,9 +5335,9 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
     form.fields.forEach((f) => {
       const elem = schema.data_elements[f.element_id];
       const writable = f.mode === "WRITE" || f.mode === "READ_WRITE";
-      const { control, read } = maskControl(elem, f.widget, f.options, null);
+      const { control, read } = maskControl(elem, f.widget, f.options, values[f.element_id]);
       if (!writable) control.setAttribute("disabled", "disabled");
-      else inputs[f.element_id] = { read, elem };
+      else inputs[f.element_id] = { read, elem, label: f.label, required: f.required !== false };
       body.appendChild(el("label", { class: "field" },
         f.label + (f.required && writable ? " *" : ""), control,
         f.help_text ? el("span", { class: "field-help" }, f.help_text) : null));
@@ -5335,18 +5347,31 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
     writes.forEach((a) => {
       const elem = schema.data_elements[a.element_id];
       const widget = elem && (elem.data_type === "INTEGER" || elem.data_type === "FLOAT") ? "NUMBER" : "TEXT";
-      const { control, read } = maskControl(elem, widget, null, null);
-      inputs[a.element_id] = { read, elem };
+      const { control, read } = maskControl(elem, widget, null, values[a.element_id]);
+      inputs[a.element_id] = { read, elem, label: elem ? elem.name : a.element_id, required: true };
       body.appendChild(el("label", { class: "field" }, (elem ? elem.name : a.element_id) + ` (${elem ? elem.data_type : "?"})`, control));
     });
   }
   const doComplete = async () => {
     const data = {};
-    for (const [eid, { read, elem }] of Object.entries(inputs)) {
+    // Ein leer gelassenes Pflichtfeld wird hier abgefangen statt vom Kern: der
+    // fehlende Wert faellt sonst erst spaeter auf -- an einer XOR-Verzweigung
+    // oder einer Folgeprozess-Bedingung, die ihn braucht -- und zwar als
+    // Laufzeitfehler an einem *anderen* Schritt. Das Modell erklaert die
+    // Pflicht bereits (FormField.required), also halten wir sie auch ein.
+    const missing = [];
+    for (const [eid, { read, elem, label: fieldLabel, required }] of Object.entries(inputs)) {
       let val = read();
-      if (val === undefined) continue;
+      if (val === undefined || (typeof val === "number" && Number.isNaN(val))) {
+        if (required) missing.push(fieldLabel);
+        continue;
+      }
       if (typeof val === "string" && elem && elem.data_type === "BOOLEAN") val = val === "true" || val === "1";
       data[eid] = val;
+    }
+    if (missing.length) {
+      toast("err", "Bitte alle Pflichtfelder ausfüllen", missing);
+      return false;
     }
     try {
       const payload = { node_id: nodeId, data };
@@ -5527,10 +5552,11 @@ async function viewAdmin() {
       el("span", { class: "sub" }, "Daten zur\u00FCcksetzen \u00B7 Beispiel laden")),
     el("div", { class: "panel-b" },
       el("p", { class: "muted" },
-        "Setzt das gesamte System zur\u00FCck. Die Beispieldaten zeigen alle Funktionen anhand zweier Prozesse, einer Organisation und drei laufenden Instanzen. Dieser Vorgang l\u00F6scht alle vorhandenen Daten unwiderruflich."),
+        "Setzt das gesamte System zur\u00FCck. Die Beispieldaten zeigen alle Funktionen anhand zweier Prozesse, einer Organisation und drei laufenden Instanzen. Das Order-to-Cash-Beispiel ist der gro\u00DFe Datensatz: sechs Prozesse (Haupt-, Teil- und Folgeprozesse) vom Angebot bis zum Mahnwesen, mit neun laufenden bzw. abgeschlossenen Vorg\u00E4ngen. Dieser Vorgang l\u00F6scht alle vorhandenen Daten unwiderruflich."),
       el("div", { style: "display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;" },
-        el("button", { class: "btn primary", onClick: () => confirmReset(true) }, "Beispieldaten laden"),
-        el("button", { class: "btn danger", onClick: () => confirmReset(false) }, "Auf Null zur\u00FCcksetzen")))));
+        el("button", { class: "btn primary", onClick: () => confirmReset("demo") }, "Beispieldaten laden"),
+        el("button", { class: "btn", onClick: () => confirmReset("o2c") }, "Order-to-Cash-Beispiel laden"),
+        el("button", { class: "btn danger", onClick: () => confirmReset("wipe") }, "Auf Null zur\u00FCcksetzen")))));
 }
 
 // Groessenangabe menschenlesbar (Bytes -> KB/MB/GB ...).
@@ -5711,30 +5737,54 @@ async function openInstanceFromMonitor(id) {
   } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 }
 
-// Administrator-Wartung: System zur\u00FCcksetzen bzw. Beispieldaten laden.
-function confirmReset(loadDemo) {
-  const msg = loadDemo
-    ? "Alle vorhandenen Daten werden gel\u00F6scht und durch die Beispieldaten ersetzt. M\u00F6chten Sie fortfahren?"
-    : "Alle Schemata, Instanzen und Organisationsmodelle werden gel\u00F6scht. Im Login-Betrieb werden zus\u00E4tzlich alle Nutzer au\u00DFer Ihnen und dem Administrator-Konto entfernt. Dieser Schritt kann nicht r\u00FCckg\u00E4ngig gemacht werden.";
+// Administrator-Wartung: System zur\u00FCcksetzen bzw. einen Beispieldatensatz
+// laden. ``kind`` ist "demo" (schlanker Kosmos), "o2c" (der grosse
+// Order-to-Cash-Datensatz) oder "wipe" (leeres System). Alle drei laufen ueber
+// denselben Endpunkt POST /admin/reset, der immer zuerst loescht.
+const RESET_KINDS = {
+  demo: {
+    title: "Beispieldaten laden",
+    confirm: "Beispieldaten laden",
+    done: "Beispieldaten geladen",
+    msg: "Alle vorhandenen Daten werden gel\u00F6scht und durch die Beispieldaten ersetzt. M\u00F6chten Sie fortfahren?",
+    body: { load_demo: true },
+  },
+  o2c: {
+    title: "Order-to-Cash-Beispiel laden",
+    confirm: "Order-to-Cash laden",
+    done: "Order-to-Cash-Beispiel geladen",
+    msg: "Alle vorhandenen Daten werden gel\u00F6scht und durch den Order-to-Cash-Datensatz ersetzt: sechs Prozesse, eine eigene Organisation und neun Vorg\u00E4nge an unterschiedlichen Stellen. M\u00F6chten Sie fortfahren?",
+    body: { load_o2c: true },
+  },
+  wipe: {
+    title: "Auf Null zur\u00FCcksetzen",
+    confirm: "Endg\u00FCltig l\u00F6schen",
+    done: "System auf Null zur\u00FCckgesetzt",
+    msg: "Alle Schemata, Instanzen und Organisationsmodelle werden gel\u00F6scht. Im Login-Betrieb werden zus\u00E4tzlich alle Nutzer au\u00DFer Ihnen und dem Administrator-Konto entfernt. Dieser Schritt kann nicht r\u00FCckg\u00E4ngig gemacht werden.",
+    body: {},
+  },
+};
+
+function confirmReset(kind) {
+  const spec = RESET_KINDS[kind] || RESET_KINDS.wipe;
   openModal(
-    loadDemo ? "Beispieldaten laden" : "Auf Null zur\u00FCcksetzen",
-    el("p", { class: "muted" }, msg),
-    async () => { await runReset(loadDemo); return true; },
-    loadDemo ? "Beispieldaten laden" : "Endg\u00FCltig l\u00F6schen");
+    spec.title,
+    el("p", { class: "muted" }, spec.msg),
+    async () => { await runReset(kind); return true; },
+    spec.confirm);
 }
 
-async function runReset(loadDemo) {
+async function runReset(kind) {
+  const spec = RESET_KINDS[kind] || RESET_KINDS.wipe;
   try {
-    const res = await api.post("/admin/reset", { load_demo: !!loadDemo });
+    const res = await api.post("/admin/reset", spec.body);
     const lines = [
       `Schemata: ${res.schemas}`,
       `Instanzen: ${res.instances}`,
       `Organisationsmodelle: ${res.org_models}`,
     ];
     if (state.passwordLogin) lines.push(`Nutzerkonten: ${res.users}`);
-    toast("ok",
-      loadDemo ? "Beispieldaten geladen" : "System auf Null zur\u00FCckgesetzt",
-      lines);
+    toast("ok", spec.done, lines);
     // Auswahl zur\u00FCcksetzen, da bisherige Schemata/Instanzen evtl. weg sind.
     state.instance = null;
     state.schema = null;
@@ -5951,12 +6001,16 @@ async function absencePanel(agentId) {
 }
 
 async function completeTask(task, agentId) {
+  // Die Instanz wird ohnehin geladen (fuer ein moegliches Ad-hoc-Schema); ihre
+  // Datenwerte belegen zugleich die Maske vor -- siehe promptComplete.
   let schema;
+  let inst;
   try {
-    const inst = await api.get(`/instances/${task.instance_id}`);
+    inst = await api.get(`/instances/${task.instance_id}`);
     schema = inst.ad_hoc_schema || await api.get(`/schemas/${task.schema_id}`);
   } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return; }
-  await promptComplete(schema, task.instance_id, task.node_id, task.label || task.node_id, agentId, async () => { render(); });
+  await promptComplete(schema, task.instance_id, task.node_id, task.label || task.node_id, agentId,
+    async () => { render(); }, inst.data_values);
 }
 
 // --------------------------------------------------------------------------
@@ -6261,7 +6315,7 @@ async function completeTestTask(inst, schema, task, agentId) {
   await promptComplete(schema, inst.id, task.node_id, task.label || task.node_id, agentId, async () => {
     await loadTestInstance(inst.id);
     render();
-  });
+  }, inst.data_values);
 }
 
 // Identität eines Agenten (Name, Rollen, Abteilung) aus einem gegebenen

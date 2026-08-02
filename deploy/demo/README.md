@@ -37,6 +37,7 @@ API (both no-ops unless set, no correctness impact):
 | Switch | Effect |
 |--------|--------|
 | `PROCWORKS_LOAD_DEMO=1` | Seed the built-in demo world once at boot (idempotent, only on an empty store). |
+| `PROCWORKS_LOAD_O2C=1` | Seed the large Order-to-Cash data set instead of / next to it. **Deliberately off for the public demo** — that one stays lean and tour-guided. |
 | `PROCWORKS_WEB_DIR=<path>` | Serve the static web client from the same process → **one container = whole app = one URL**. |
 
 ## Contents

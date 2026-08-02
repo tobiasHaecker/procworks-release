@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from staffing import staff_via_api
 
 from procworks.api import app, get_principal
 from procworks.auth import (
@@ -39,6 +40,7 @@ def _released_schema_with_data() -> str:
         f"/schemas/{sid}/data-elements",
         json={"name": "Betrag", "data_type": "INTEGER", "element_id": "betrag"},
     )
+    staff_via_api(client, sid)
     client.post(f"/schemas/{sid}/release")
     return sid
 

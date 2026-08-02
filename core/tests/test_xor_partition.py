@@ -12,6 +12,7 @@ ENUM discriminators -- and the property is preserved under every evolution step.
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     AccessMode,
@@ -197,7 +198,7 @@ def test_unknown_discriminator_is_rejected_at_build_time() -> None:
 
 
 def test_boolean_execution_resolves_from_data() -> None:
-    schema = release(_boolean_schema())
+    schema = release(staffed(_boolean_schema()))
     pruefen = _nid(schema, "Pruefen")
     express = _nid(schema, "Express")
     standard = _nid(schema, "Standard")
@@ -209,7 +210,7 @@ def test_boolean_execution_resolves_from_data() -> None:
 
 
 def test_enum_execution_takes_catch_all_for_unknown_value() -> None:
-    schema = release(_enum_schema())
+    schema = release(staffed(_enum_schema()))
     einstufen = _nid(schema, "Einstufen")
     gold = _nid(schema, "Gold")
     sonstige = _nid(schema, "Sonstige")
@@ -224,7 +225,7 @@ def test_enum_execution_takes_catch_all_for_unknown_value() -> None:
 
 
 def test_new_revision_preserves_k7() -> None:
-    schema = release(_threshold_schema())
+    schema = release(staffed(_threshold_schema()))
     revision = new_revision(schema, new_schema_id="rev2")
     assert validate(revision) == []
     assert revision.version == schema.version + 1
@@ -235,7 +236,7 @@ def test_new_revision_preserves_k7() -> None:
 def test_editing_a_revision_cannot_break_k7() -> None:
     """Adding a branch to an existing split must keep the partition total."""
 
-    schema = release(_threshold_schema())
+    schema = release(staffed(_threshold_schema()))
     revision = new_revision(schema, new_schema_id="rev3")
     leitung = _nid(revision, "Leitung")
     # inserting a nested step inside a branch keeps the schema K7-correct
@@ -252,7 +253,7 @@ def test_running_k7_instance_migrates_to_revised_schema() -> None:
     re-validates K7.
     """
 
-    schema = release(_threshold_schema())
+    schema = release(staffed(_threshold_schema()))
     store = InMemoryInstanceStore()
 
     def resolver(schema_id: str, version: int | None) -> object:
@@ -270,7 +271,7 @@ def test_running_k7_instance_migrates_to_revised_schema() -> None:
     join = next(n.id for n in schema.nodes.values() if n.type is NodeType.XOR_JOIN)
     target = new_revision(schema, new_schema_id="rev-mig")
     target = serial_insert(target, "Nachgelagert", after_node_id=join)
-    target = release(target)
+    target = release(staffed(target))
     assert validate(target) == []  # K7 preserved across the revision
 
     assert is_migratable(instance, schema, target)

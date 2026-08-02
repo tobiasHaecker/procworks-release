@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     add_agent,
@@ -305,7 +306,7 @@ def test_update_agent_requires_draft():
     schema = create_empty_schema("Released", schema_id="rel")
     schema = serial_insert(schema, "Bearbeiten", after_node_id="start")
     schema = add_agent(schema, "Erika", agent_id="a1")
-    schema = release(schema)
+    schema = release(staffed(schema))
     with pytest.raises(CorrectnessError) as exc:
         update_agent(schema, "a1", name="Neu")
     assert any(f.rule == "R0" for f in exc.value.findings)
@@ -358,7 +359,7 @@ def test_clear_staff_rule_rejected_on_released_schema():
     schema = add_role(schema, "Sachbearbeiter", role_id="sb")
     schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
     schema = assign_staff_rule(schema, act, _role_rule("sb"))
-    schema = release(schema)
+    schema = release(staffed(schema))
 
     with pytest.raises(CorrectnessError) as exc:
         clear_staff_rule(schema, act)

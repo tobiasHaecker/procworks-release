@@ -42,9 +42,13 @@ ENV PROCWORKS_LOAD_DEMO=1 \
     PROCWORKS_DEMO_MODE=1 \
     PROCWORKS_WEB_DIR=/app/web \
     PROCWORKS_AUTH=password \
-    PROCWORKS_SESSION_TTL_MINUTES=120 \
+    PROCWORKS_SESSION_TTL_MINUTES=360 \
     PROCWORKS_EGRESS_DENY=1 \
     PROCWORKS_DEMO_FEEDBACK_URL=https://broker.procworks.de/feedback
+# PROCWORKS_SESSION_TTL_MINUTES must stay >= the broker's DEMO_TTL_SECONDS
+# (deploy/demo/broker/fly.toml, currently 6 h): the session is what keeps the
+# visitor logged in, the broker TTL is how long their machine lives. A shorter
+# session would log them out mid-demo on a machine that is still running.
 # PROCWORKS_LOAD_O2C adds the large Order-to-Cash cosmos (six linked schemas, an
 # own organisation, nine prepared cases) next to the slim base demo. It is what a
 # visitor is meant to *see* -- a whole value stream, already populated -- so the

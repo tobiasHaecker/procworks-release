@@ -11,6 +11,7 @@ against the variant.
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     ExecutionContext,
@@ -66,7 +67,7 @@ def _released_serial() -> ProcessSchema:
     schema = create_empty_schema("Seriell", schema_id="serial")
     schema = serial_insert(schema, "B", after_node_id="start")
     schema = serial_insert(schema, "A", after_node_id="start")
-    return release(schema)
+    return release(staffed(schema))
 
 
 def test_insert_into_unexecuted_region_runs_through_variant() -> None:

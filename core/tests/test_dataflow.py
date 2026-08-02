@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     BranchSpec,
@@ -380,7 +381,7 @@ def test_disconnect_data_rejected_on_released_schema():
     act = _activity_ids(schema, "Schreiben")[0]
     schema = add_data_element(schema, "x", DataType.INTEGER, element_id="x")
     schema = connect_data(schema, act, "x", AccessMode.WRITE)
-    schema = release(schema)
+    schema = release(staffed(schema))
 
     with pytest.raises(CorrectnessError) as exc:
         disconnect_data(schema, act, "x")

@@ -642,16 +642,15 @@ def test_empty_required_field_blocks_the_completion() -> None:
     )
 
 
-def test_release_warns_before_a_schema_without_assignees() -> None:
-    """Vor der Freigabe wird auf Schritte ohne Bearbeiter hingewiesen.
+def test_release_names_the_steps_that_block_it() -> None:
+    """Fehlt einem Schritt der Bearbeiter, nennt die Oberflaeche ihn beim Namen.
 
-    Ein interaktiver Schritt ohne BZR wird zur Laufzeit zwar aktiviert, taucht
-    aber in **keiner** Arbeitsliste auf (``assignment.open_tasks`` ueberspringt
-    Knoten ohne Regel). Der Vorgang sieht dann gestartet aus und steht still --
-    und das merkt nicht der Modellierer, sondern spaeter der Sachbearbeiter.
-    Der Kern laesst die Freigabe heute noch zu (Stufe B ist als eigenes
-    Inkrement geplant, Konzept §3.4), deshalb faengt die Oberflaeche den Fall
-    ab: sichtbar, benannt und mit Rueckfrage -- aber nicht bevormundend.
+    Entschieden wird im Kern: ``operations.release`` lehnt ab (Stufe B, Regel
+    B2), weil ein solcher Schritt zur Laufzeit zwar aktiviert wird, aber in
+    **keiner** Arbeitsliste auftaucht -- der Vorgang saehe gestartet aus und
+    stuende still. Die Pruefung im Client ist deshalb kein zweiter Entscheider,
+    sondern erspart den vergeblichen Aufruf und die Zuordnung roher Befunde:
+    sie benennt die Schritte und schickt gar nicht erst ab.
     """
 
     src = APP_JS.read_text(encoding="utf-8")
@@ -662,14 +661,17 @@ def test_release_warns_before_a_schema_without_assignees() -> None:
     assert "releaseFindings()" in code, (
         "releaseSchema fragt die Stufe-B-Befunde des Kerns nicht ab"
     )
-    assert "confirmDialog" in code, "Es gibt keine Rueckfrage vor der Freigabe"
-    rueckfrage = code.index("confirmDialog")
-    freigabe = code.index("api.post(")
-    assert rueckfrage < freigabe, (
-        "Die Rueckfrage steht hinter der Freigabe -- sie kaeme zu spaet"
+    assert "nodeLabelOf" in code, "Die blockierenden Schritte werden nicht benannt"
+    pruefung = code.index("missing.length")
+    absenden = code.index("api.post(")
+    assert pruefung < absenden, (
+        "Die Pruefung steht hinter dem Absenden -- sie kaeme zu spaet"
     )
-    assert re.search(r"if \(!ok\) return;", code), (
-        "Ein Abbruch der Rueckfrage verhindert die Freigabe nicht"
+    # Nach dem Befund wird zurueckgekehrt, BEVOR ueberhaupt gesendet wird.
+    # (Textuell statt per Klammer-Regex geprueft: der Block enthaelt
+    # Template-Literale mit `}`, an denen ein Regex zerbraeche.)
+    assert code.index("return;", pruefung) < absenden, (
+        "Bei fehlenden Bearbeitern wird trotzdem abgeschickt"
     )
 
 
@@ -692,38 +694,6 @@ def test_release_readiness_comes_from_the_core_not_the_client() -> None:
         "Der Client leitet die Freigabe-Reife selbst her statt sie zu lesen"
     )
 
-
-def test_confirm_dialog_also_settles_on_cancel() -> None:
-    """Die Rueckfrage loest ihr Versprechen auch beim Abbrechen auf.
-
-    Sonst haengt jeder ``await confirmDialog(...)`` nach einem Abbruch fuer
-    immer -- der Knopf reagierte danach scheinbar gar nicht mehr. Beide
-    Abbruchwege (Knopf und Klick auf den Hintergrund) muessen deshalb auf
-    denselben Haken laufen.
-    """
-
-    src = APP_JS.read_text(encoding="utf-8")
-    modal = re.search(r"\nfunction openModal\(.*?\n\}\n", src, re.S)
-    assert modal, "openModal() nicht gefunden -- Waechter angleichen"
-    code = re.sub(r"//[^\n]*", "", modal.group(0))
-
-    assert "onCancel" in code, "openModal kennt keinen Abbruch-Haken"
-    assert re.search(r"const cancel = \(\) => \{ close\(\); if \(onCancel\)", code), (
-        "Der Abbruch-Haken wird nicht beim Schliessen ausgeloest"
-    )
-    assert 'onClick: cancel }, "Abbrechen"' in code, (
-        "Der Abbrechen-Knopf laeuft nicht ueber den Abbruch-Haken"
-    )
-    assert "e.currentTarget) cancel()" in code, (
-        "Der Klick auf den Hintergrund laeuft nicht ueber den Abbruch-Haken"
-    )
-
-    dialog = re.search(r"\nfunction confirmDialog\(.*?\n\}\n", src, re.S)
-    assert dialog, "confirmDialog() nicht gefunden -- Waechter angleichen"
-    assert "resolve(value)" in dialog.group(0), "confirmDialog loest nie auf"
-    assert "settled" in dialog.group(0), (
-        "confirmDialog schuetzt sich nicht gegen doppeltes Aufloesen"
-    )
 
 
 def test_status_bar_separates_correctness_from_release_readiness() -> None:

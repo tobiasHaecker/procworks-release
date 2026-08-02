@@ -419,24 +419,10 @@ function showVersion(version) {
 // Modal
 // --------------------------------------------------------------------------
 
-/**
- * Oeffnet einen modalen Dialog.
- *
- * @param {string} title Ueberschrift.
- * @param {Node} bodyNode Inhalt.
- * @param {Function} onConfirm Wird bei „Anwenden" gerufen; liefert es `false`,
- *   bleibt der Dialog offen (z. B. bei einer fehlgeschlagenen Eingabe).
- * @param {string} [confirmLabel] Beschriftung des Bestaetigungsknopfes.
- * @param {Function} [onCancel] Wird beim Abbrechen gerufen (Knopf, Klick auf den
- *   Hintergrund). Optional -- bestehende Aufrufer uebergeben nichts und
- *   verhalten sich unveraendert; `confirmDialog` braucht den Haken, um sein
- *   Versprechen auch bei Ablehnung aufzuloesen.
- */
-function openModal(title, bodyNode, onConfirm, confirmLabel, onCancel) {
+function openModal(title, bodyNode, onConfirm, confirmLabel) {
   const root = byId("modal-root");
   clear(root);
   const close = () => clear(root);
-  const cancel = () => { close(); if (onCancel) onCancel(); };
   const confirmBtn = el("button", {
     class: "btn primary",
     onClick: async () => {
@@ -444,38 +430,16 @@ function openModal(title, bodyNode, onConfirm, confirmLabel, onCancel) {
       if (ok !== false) close();
     },
   }, confirmLabel || "Anwenden");
-  const modal = el("div", { class: "modal-backdrop", onClick: (e) => { if (e.target === e.currentTarget) cancel(); } },
+  const modal = el("div", { class: "modal-backdrop", onClick: (e) => { if (e.target === e.currentTarget) close(); } },
     el("div", { class: "modal" },
       el("div", { class: "modal-h" }, el("h3", null, title)),
       el("div", { class: "modal-b" }, bodyNode),
       el("div", { class: "modal-f" },
-        el("button", { class: "btn ghost", onClick: cancel }, "Abbrechen"),
+        el("button", { class: "btn ghost", onClick: close }, "Abbrechen"),
         confirmBtn)));
   root.appendChild(modal);
   const firstInput = modal.querySelector("input, select, textarea");
   if (firstInput) firstInput.focus();
-}
-
-/**
- * Ja/Nein-Rueckfrage als Versprechen -- derselbe Dialog, nur abwartbar.
- *
- * Loest mit `true` bei Bestaetigung und mit `false` bei Abbruch auf (Knopf oder
- * Klick auf den Hintergrund), damit ein Aufrufer schlicht `await`en kann. Der
- * Wachposten `settled` sorgt dafuer, dass das Versprechen genau einmal
- * aufgeloest wird, auch wenn beide Wege kurz nacheinander feuern.
- *
- * @param {string} title Ueberschrift.
- * @param {Node} bodyNode Erklaerender Inhalt.
- * @param {string} confirmLabel Beschriftung des bestaetigenden Knopfes.
- * @returns {Promise<boolean>} Ob bestaetigt wurde.
- */
-function confirmDialog(title, bodyNode, confirmLabel) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (value) => { if (!settled) { settled = true; resolve(value); } };
-    openModal(title, bodyNode, () => { done(true); return true; },
-      confirmLabel, () => done(false));
-  });
 }
 
 // --------------------------------------------------------------------------
@@ -4194,33 +4158,29 @@ function releaseFindings() {
 }
 
 /**
- * Gibt das Schema frei -- fragt aber vorher nach, wenn Schritte ohne Bearbeiter
- * darin stehen.
+ * Gibt das Schema frei -- sofern es freigabereif ist.
  *
- * Warum die Rueckfrage: Ein interaktiver Schritt ohne BZR wird zur Laufzeit zwar
- * aktiviert, taucht aber in **keiner** Arbeitsliste auf (`open_tasks`
- * ueberspringt ihn). Der Vorgang sieht dann gestartet aus und steht still --
- * und das faellt erst dem Sachbearbeiter auf, nicht dem Modellierer. Die
- * Freigabe bleibt moeglich (der Kern laesst sie zu, siehe Konzept §3.4: das
- * harte Gate ist ein eigenes Inkrement), aber niemand stolpert mehr blind
- * hinein.
+ * Der Kern lehnt eine Freigabe mit Schritten ohne Bearbeiter ab (Stufe B,
+ * Regel B2): ein solcher Schritt wird zur Laufzeit zwar aktiviert, taucht aber
+ * in **keiner** Arbeitsliste auf (`open_tasks` ueberspringt ihn) -- der Vorgang
+ * saehe gestartet aus und stuende still, und das faellt nicht dem Modellierer
+ * auf, sondern spaeter dem Sachbearbeiter.
+ *
+ * Die Pruefung hier ist **kein zweiter Entscheider**, sondern nimmt dem Nutzer
+ * den vergeblichen Weg ab: Sie nennt die betroffenen Schritte beim Namen, statt
+ * ihn in ein 422 laufen zu lassen, dessen Befunde er selbst zuordnen muesste.
+ * Entschieden wird ausschliesslich im Kern.
  */
 async function releaseSchema() {
   const missing = releaseFindings();
   if (missing.length) {
     const names = missing.map((f) => nodeLabelOf(f.node_id)).filter(Boolean);
-    const ok = await confirmDialog(
-      "Freigeben ohne Bearbeiter?",
-      el("div", null,
-        el("p", null,
-          `${missing.length} Schritt(e) haben noch keine Bearbeiterzuordnung. ` +
-          "Sie werden zur Laufzeit aktiviert, erscheinen aber in keiner " +
-          "Arbeitsliste – der Vorgang bliebe dort stehen."),
-        names.length ? el("ul", null, ...names.map((n) => el("li", null, n))) : null,
-        el("p", { class: "muted" },
-          "Empfehlung: erst je Schritt einen Bearbeiter zuordnen, dann freigeben.")),
-      "Trotzdem freigeben");
-    if (!ok) return;
+    toast("err", "Freigabe noch nicht möglich", [
+      `${missing.length} Schritt(e) brauchen noch eine Bearbeiterzuordnung.`,
+      ...names.map((n) => `• ${n}`),
+      "Sie würden sonst in keiner Arbeitsliste erscheinen.",
+    ]);
+    return;
   }
   try {
     await api.post(`/schemas/${state.schemaId}/release`);

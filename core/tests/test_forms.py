@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     BranchSpec,
@@ -221,7 +222,7 @@ def test_new_revision_carries_form():
         node,
         fields=[FormFieldSpec(element_id="name", widget=WidgetKind.TEXT)],
     )
-    schema = release(schema)
+    schema = release(staffed(schema))
     revised = new_revision(schema)
     assert node in revised.forms
 

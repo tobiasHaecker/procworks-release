@@ -9,6 +9,7 @@ These checks need a resolver that looks other schemas up.
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     add_data_element,
@@ -51,7 +52,7 @@ def _released_target() -> ProcessSchema:
     sub = create_empty_schema("Sub", schema_id="sub_target")
     sub = serial_insert(sub, "Pruefen", after_node_id="start")
     sub = add_data_element(sub, "betrag", DataType.FLOAT, element_id="betrag")
-    return release(sub)
+    return release(staffed(sub))
 
 
 def test_insert_subprocess_against_released_target() -> None:
@@ -210,7 +211,7 @@ def test_release_parent_with_released_subprocess() -> None:
     parent = create_empty_schema("Haupt", schema_id="parent")
     resolver = _resolver_for(target, parent)
     parent = insert_subprocess(parent, "start", "sub_target", 1, resolver=resolver)
-    released = release(parent, resolver)
+    released = release(staffed(parent), resolver)
     assert released.lifecycle_state.value == "RELEASED"
 
 
@@ -222,7 +223,7 @@ def _released_producer() -> ProcessSchema:
     sub = add_data_element(sub, "ergebnis", DataType.FLOAT, element_id="ergebnis")
     act = next(n.id for n in sub.nodes.values() if n.type is NodeType.ACTIVITY)
     sub = connect_data(sub, act, "ergebnis", AccessMode.WRITE)
-    return release(sub)
+    return release(staffed(sub))
 
 
 def _activity(schema: ProcessSchema) -> str:
@@ -275,7 +276,7 @@ def test_convert_with_unproduced_output_is_h2() -> None:
     loose = create_empty_schema("Lose", schema_id="loose")
     loose = serial_insert(loose, "Tun", after_node_id="start")
     loose = add_data_element(loose, "ergebnis", DataType.FLOAT, element_id="ergebnis")
-    loose = release(loose)
+    loose = release(staffed(loose))
     parent = create_empty_schema("Haupt", schema_id="parent")
     parent = serial_insert(parent, "Schritt", after_node_id="start")
     parent = add_data_element(parent, "summe", DataType.FLOAT, element_id="summe")
@@ -300,7 +301,7 @@ def test_set_subprocess_binding_rebinds_target() -> None:
     second = add_data_element(second, "ergebnis", DataType.FLOAT, element_id="ergebnis")
     act2 = _activity(second)
     second = connect_data(second, act2, "ergebnis", AccessMode.WRITE)
-    second = release(second)
+    second = release(staffed(second))
     parent = create_empty_schema("Haupt", schema_id="parent")
     resolver = _resolver_for(first, second, parent)
     parent = insert_subprocess(parent, "start", "calc", 1, resolver=resolver)

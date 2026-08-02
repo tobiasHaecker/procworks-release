@@ -71,6 +71,7 @@ from procworks.validator import (
     CorrectnessError,
     SchemaResolver,
     ValidationFinding,
+    check_executable,
     raise_if_invalid,
 )
 
@@ -1783,7 +1784,8 @@ def release(schema: ProcessSchema, resolver: SchemaResolver | None = None) -> Pr
     interactive step to carry a staff rule (B2), because a step without one is
     activated at runtime but shows up in no worklist. A draft may sit in that
     state as long as it likes -- the bar only applies at release, which is the
-    moment the schema becomes instantiable.
+    moment the schema becomes instantiable. This is the one place the two levels
+    meet: Stufe A is re-checked (as after every operation) and Stufe B on top.
     """
 
     if schema.lifecycle_state not in (LifecycleState.ENTWURF, LifecycleState.REVIEW):
@@ -1796,6 +1798,9 @@ def release(schema: ProcessSchema, resolver: SchemaResolver | None = None) -> Pr
             ]
         )
     raise_if_invalid(schema, resolver)
+    executable_findings = check_executable(schema)
+    if executable_findings:
+        raise CorrectnessError(executable_findings)
     released = schema.model_copy(deep=True)
     released.lifecycle_state = LifecycleState.RELEASED
     return released

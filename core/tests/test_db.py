@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     AccessMode,
@@ -80,7 +81,7 @@ def test_put_is_upsert_and_tracks_lifecycle(store: SqlAlchemySchemaStore) -> Non
     store.put(schema)
     assert store.get("s2").lifecycle_state is LifecycleState.ENTWURF  # type: ignore[union-attr]
 
-    released = release(schema)
+    released = release(staffed(schema))
     store.put(released)
     reloaded = store.get("s2")
     assert reloaded is not None
@@ -145,7 +146,7 @@ def instance_store(tmp_path: Path) -> SqlAlchemyInstanceStore:
 def _released_serial() -> object:
     schema = create_empty_schema("Lauf", schema_id="run")
     schema = serial_insert(schema, "Schritt", after_node_id="start")
-    return release(schema)
+    return release(staffed(schema))
 
 
 def test_instance_roundtrip_preserves_markings(

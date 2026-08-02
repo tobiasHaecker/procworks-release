@@ -10,6 +10,8 @@ coupling starts a coupled instance that records its originating instance id.
 
 from __future__ import annotations
 
+from staffing import staffed
+
 from procworks import (
     ExecutionContext,
     add_data_element,
@@ -54,7 +56,7 @@ def test_follow_up_starts_decoupled_instance_with_handover() -> None:
     target = create_empty_schema("Folge", schema_id="follow_target")
     target = serial_insert(target, "Nacharbeit", after_node_id="start")
     target = add_data_element(target, "vorgang", DataType.STRING, element_id="vorgang")
-    target = release(target)
+    target = release(staffed(target))
     target_act = _activity_id(target)
 
     source = create_empty_schema("Quelle", schema_id="source")
@@ -68,7 +70,7 @@ def test_follow_up_starts_decoupled_instance_with_handover() -> None:
         handover_mapping={"vorgang": "referenz"},
         resolver=build_resolver,
     )
-    source = release(source, build_resolver)
+    source = release(staffed(source), build_resolver)
 
     store = InMemoryInstanceStore()
     context = ExecutionContext(_resolver_for(source, target), store)
@@ -93,7 +95,7 @@ def test_follow_up_starts_decoupled_instance_with_handover() -> None:
 def test_sync_follow_up_starts_coupled_instance() -> None:
     target = create_empty_schema("FolgeSync", schema_id="sync_target")
     target = serial_insert(target, "T", after_node_id="start")
-    target = release(target)
+    target = release(staffed(target))
 
     source = create_empty_schema("QuelleSync", schema_id="source_sync")
     source = serial_insert(source, "S", after_node_id="start")
@@ -102,7 +104,7 @@ def test_sync_follow_up_starts_coupled_instance() -> None:
     source = link_follow_up(
         source, "sync_target", mode=FollowUpMode.SYNC, resolver=build_resolver
     )
-    source = release(source, build_resolver)
+    source = release(staffed(source), build_resolver)
 
     store = InMemoryInstanceStore()
     context = ExecutionContext(_resolver_for(source, target), store)
@@ -122,7 +124,7 @@ def test_sync_follow_up_starts_coupled_instance() -> None:
 def test_conditional_follow_up_starts_when_predicate_holds() -> None:
     target = create_empty_schema("FolgeCond", schema_id="cond_target")
     target = serial_insert(target, "T", after_node_id="start")
-    target = release(target)
+    target = release(staffed(target))
 
     source = create_empty_schema("QuelleCond", schema_id="source_cond")
     source = serial_insert(source, "S", after_node_id="start")
@@ -136,7 +138,7 @@ def test_conditional_follow_up_starts_when_predicate_holds() -> None:
         condition="betrag > 100",
         resolver=build_resolver,
     )
-    source = release(source, build_resolver)
+    source = release(staffed(source), build_resolver)
 
     store = InMemoryInstanceStore()
     context = ExecutionContext(_resolver_for(source, target), store)
@@ -154,7 +156,7 @@ def test_conditional_follow_up_starts_when_predicate_holds() -> None:
 def test_conditional_follow_up_skipped_when_predicate_fails() -> None:
     target = create_empty_schema("FolgeCond2", schema_id="cond_target2")
     target = serial_insert(target, "T", after_node_id="start")
-    target = release(target)
+    target = release(staffed(target))
 
     source = create_empty_schema("QuelleCond2", schema_id="source_cond2")
     source = serial_insert(source, "S", after_node_id="start")
@@ -168,7 +170,7 @@ def test_conditional_follow_up_skipped_when_predicate_fails() -> None:
         condition="betrag > 100",
         resolver=build_resolver,
     )
-    source = release(source, build_resolver)
+    source = release(staffed(source), build_resolver)
 
     store = InMemoryInstanceStore()
     context = ExecutionContext(_resolver_for(source, target), store)
@@ -183,14 +185,14 @@ def test_conditional_follow_up_skipped_when_predicate_fails() -> None:
 def test_follow_up_not_started_without_context() -> None:
     target = create_empty_schema("FolgeBlack", schema_id="black_target")
     target = serial_insert(target, "T", after_node_id="start")
-    target = release(target)
+    target = release(staffed(target))
 
     source = create_empty_schema("QuelleBlack", schema_id="source_black")
     source = serial_insert(source, "S", after_node_id="start")
     src_act = _activity_id(source)
     build_resolver = _resolver_for(target)
     source = link_follow_up(source, "black_target", resolver=build_resolver)
-    source = release(source, build_resolver)
+    source = release(staffed(source), build_resolver)
 
     inst = instantiate(source)  # no context
     inst = complete_activity(inst, source, src_act)

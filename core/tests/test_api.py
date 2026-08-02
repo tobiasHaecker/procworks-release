@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from staffing import staff_via_api
 
 import procworks
 from procworks.api import app
@@ -202,6 +203,7 @@ def test_empty_xor_branch_via_api_and_manual_removal() -> None:
 def test_release_via_api_then_immutable() -> None:
     sid = client.post("/schemas", json={"name": "R"}).json()["id"]
     client.post(f"/schemas/{sid}/serial-insert", json={"label": "S", "after_node_id": "start"})
+    staff_via_api(client, sid)
     resp = client.post(f"/schemas/{sid}/release")
     assert resp.status_code == 200
     assert resp.json()["lifecycle_state"] == "RELEASED"
@@ -351,6 +353,7 @@ def test_staff_rule_unknown_role_returns_422() -> None:
 def test_instance_run_via_api() -> None:
     sid = client.post("/schemas", json={"name": "Lauf"}).json()["id"]
     client.post(f"/schemas/{sid}/serial-insert", json={"label": "S", "after_node_id": "start"})
+    staff_via_api(client, sid)
     client.post(f"/schemas/{sid}/release")
 
     resp = client.post(f"/schemas/{sid}/instances")
@@ -377,6 +380,7 @@ def test_put_instance_data_right_after_start() -> None:
         f"/schemas/{sid}/data-elements",
         json={"name": "betrag", "data_type": "INTEGER", "element_id": "betrag"},
     )
+    staff_via_api(client, sid)
     client.post(f"/schemas/{sid}/release")
 
     iid = client.post(f"/schemas/{sid}/instances").json()["id"]
@@ -396,6 +400,7 @@ def test_put_instance_data_rejects_unknown_and_mistyped() -> None:
         f"/schemas/{sid}/data-elements",
         json={"name": "betrag", "data_type": "INTEGER", "element_id": "betrag"},
     )
+    staff_via_api(client, sid)
     client.post(f"/schemas/{sid}/release")
     iid = client.post(f"/schemas/{sid}/instances").json()["id"]
 
@@ -450,6 +455,7 @@ def test_monitoring_revision_tracks_progress() -> None:
     # detect "something changed" without diffing the whole monitoring payload.
     sid = client.post("/schemas", json={"name": "RevLauf"}).json()["id"]
     client.post(f"/schemas/{sid}/serial-insert", json={"label": "S", "after_node_id": "start"})
+    staff_via_api(client, sid)
     client.post(f"/schemas/{sid}/release")
 
     before = client.get("/monitoring/revision")
@@ -508,6 +514,7 @@ def test_subprocess_via_api() -> None:
     # released target schema
     tid = client.post("/schemas", json={"name": "Teilprozess"}).json()["id"]
     client.post(f"/schemas/{tid}/serial-insert", json={"label": "T", "after_node_id": "start"})
+    staff_via_api(client, tid)
     client.post(f"/schemas/{tid}/release")
 
     pid = client.post("/schemas", json={"name": "Haupt"}).json()["id"]
@@ -537,6 +544,7 @@ def test_subprocess_execution_via_api() -> None:
     # released target schema with one activity
     tid = client.post("/schemas", json={"name": "Kindprozess"}).json()["id"]
     client.post(f"/schemas/{tid}/serial-insert", json={"label": "T", "after_node_id": "start"})
+    staff_via_api(client, tid)
     client.post(f"/schemas/{tid}/release")
 
     # parent with a SUBPROCESS node right after start, then released
@@ -545,6 +553,7 @@ def test_subprocess_execution_via_api() -> None:
         f"/schemas/{pid}/subprocess",
         json={"after_node_id": "start", "target_schema_id": tid, "target_version": 1},
     )
+    staff_via_api(client, pid)
     client.post(f"/schemas/{pid}/release")
 
     inst = client.post(f"/schemas/{pid}/instances").json()
@@ -579,6 +588,7 @@ def _released_producer_via_api(name: str, schema_hint: str) -> str:
         f"/schemas/{tid}/data-access",
         json={"node_id": act, "element_id": "ergebnis", "mode": "WRITE"},
     )
+    staff_via_api(client, tid)
     client.post(f"/schemas/{tid}/release")
     return tid
 
@@ -616,6 +626,7 @@ def test_convert_activity_unproduced_output_returns_422() -> None:
         f"/schemas/{tid}/data-elements",
         json={"name": "ergebnis", "data_type": "FLOAT", "element_id": "ergebnis"},
     )
+    staff_via_api(client, tid)
     client.post(f"/schemas/{tid}/release")
     pid = client.post("/schemas", json={"name": "LoseHaupt"}).json()["id"]
     r = client.post(
@@ -659,6 +670,7 @@ def _released_two_step(name: str) -> str:
     sid = client.post("/schemas", json={"name": name}).json()["id"]
     client.post(f"/schemas/{sid}/serial-insert", json={"label": "B", "after_node_id": "start"})
     client.post(f"/schemas/{sid}/serial-insert", json={"label": "A", "after_node_id": "start"})
+    staff_via_api(client, sid)
     client.post(f"/schemas/{sid}/release")
     return sid
 
@@ -766,6 +778,7 @@ def test_migration_check_and_migrate_via_api() -> None:
         if n["type"] == "ACTIVITY" and n["label"] == "B"
     )
     client.post(f"/schemas/{rid}/serial-insert", json={"label": "C", "after_node_id": b_id})
+    staff_via_api(client, rid)
     client.post(f"/schemas/{rid}/release")
 
     check = client.post(
@@ -793,6 +806,7 @@ def test_migration_rewiring_returns_422() -> None:
     rid = revision["id"]
     # Insert after the already-completed A -> rewires a completed node (M3).
     client.post(f"/schemas/{rid}/serial-insert", json={"label": "C", "after_node_id": a_id})
+    staff_via_api(client, rid)
     client.post(f"/schemas/{rid}/release")
 
     resp = client.post(f"/instances/{iid}/migrate", json={"target_schema_id": rid})
@@ -961,6 +975,7 @@ def _released_task_schema(name: str) -> tuple[str, str]:
         f"/schemas/{sid}/staff-rule",
         json={"node_id": act_id, "rule": {"kind": "ROLE", "ref": "sb"}},
     )
+    staff_via_api(client, sid)
     client.post(f"/schemas/{sid}/release")
     return sid, act_id
 

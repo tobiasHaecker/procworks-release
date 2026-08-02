@@ -9,6 +9,8 @@ Without an ExecutionContext the SUBPROCESS node stays an opaque black box.
 
 from __future__ import annotations
 
+from staffing import staffed
+
 from procworks import (
     ExecutionContext,
     add_data_element,
@@ -62,7 +64,7 @@ def test_subprocess_spawns_and_joins_child() -> None:
     child_act = _activity_id(sub)
     # the child guarantees to produce its output so the composition is runnable
     sub = connect_data(sub, child_act, "ergebnis", AccessMode.WRITE)
-    sub = release(sub)
+    sub = release(staffed(sub))
 
     parent = create_empty_schema("Haupt", schema_id="parent")
     parent = serial_insert(parent, "Vorbereiten", after_node_id="start")
@@ -79,7 +81,7 @@ def test_subprocess_spawns_and_joins_child() -> None:
         output_mapping={"ergebnis": "summe"},
         resolver=build_resolver,
     )
-    parent = release(parent, build_resolver)
+    parent = release(staffed(parent), build_resolver)
     sub_node = _subprocess_id(parent)
 
     store = InMemoryInstanceStore()
@@ -116,14 +118,14 @@ def test_subprocess_spawns_and_joins_child() -> None:
 
 def test_subprocess_with_empty_child_completes_inline() -> None:
     sub = create_empty_schema("Leer", schema_id="empty_sub")  # START -> END
-    sub = release(sub)
+    sub = release(staffed(sub))
 
     parent = create_empty_schema("HauptInline", schema_id="parent_inline")
     parent = serial_insert(parent, "Schritt", after_node_id="start")
     pre_act = _activity_id(parent)
     build_resolver = _resolver_for(sub)
     parent = insert_subprocess(parent, pre_act, "empty_sub", 1, resolver=build_resolver)
-    parent = release(parent, build_resolver)
+    parent = release(staffed(parent), build_resolver)
     sub_node = _subprocess_id(parent)
 
     store = InMemoryInstanceStore()
@@ -141,14 +143,14 @@ def test_subprocess_with_empty_child_completes_inline() -> None:
 def test_subprocess_is_black_box_without_context() -> None:
     sub = create_empty_schema("SubBlack", schema_id="sub_black")
     sub = serial_insert(sub, "X", after_node_id="start")
-    sub = release(sub)
+    sub = release(staffed(sub))
 
     parent = create_empty_schema("HauptBlack", schema_id="parent_black")
     parent = serial_insert(parent, "Vor", after_node_id="start")
     pre_act = _activity_id(parent)
     build_resolver = _resolver_for(sub)
     parent = insert_subprocess(parent, pre_act, "sub_black", 1, resolver=build_resolver)
-    parent = release(parent, build_resolver)
+    parent = release(staffed(parent), build_resolver)
     sub_node = _subprocess_id(parent)
 
     # no ExecutionContext: the SUBPROCESS node completes immediately as a black

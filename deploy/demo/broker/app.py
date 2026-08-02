@@ -222,8 +222,12 @@ _MAX_ACTIVE = int(os.environ.get("DEMO_MAX_ACTIVE", "20"))
 #: Hard lifetime of a demo instance. The broker reaps anything older than this
 #: opportunistically on each /trial (see :func:`_reap_expired`), so an abandoned
 #: demo -- e.g. a visitor who just closed the tab -- is cleaned up when the next
-#: visitor needs a slot. 0 disables reaping. Default two hours.
-_TTL_SECONDS = int(os.environ.get("DEMO_TTL_SECONDS", str(2 * 3600)))
+#: visitor needs a slot. 0 disables reaping. Default six hours -- long enough to
+#: pick the demo up again after a meeting or a lunch break, short enough that the
+#: promise stays honest: the demo runs in-memory and scale-to-zero, so a machine
+#: that idles out and restarts comes back **re-seeded**. A day-long window would
+#: therefore invite visitors to return to work that is no longer there.
+_TTL_SECONDS = int(os.environ.get("DEMO_TTL_SECONDS", str(6 * 3600)))
 #: Give a demo's slot back the moment its visitor ends the demo (submits the
 #: post-demo survey), instead of holding it until the hard-TTL reaper. Purely an
 #: efficiency win on top of the reaper: a visitor who is done releases their slot

@@ -11,6 +11,7 @@ every node COMPLETED or SKIPPED.
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     AccessMode,
@@ -41,7 +42,7 @@ def _released_serial() -> object:
     schema = create_empty_schema("Seriell")
     schema = serial_insert(schema, "B", after_node_id="start")
     schema = serial_insert(schema, "A", after_node_id="start")
-    return release(schema)
+    return release(staffed(schema))
 
 
 def _released_conditional() -> object:
@@ -65,7 +66,7 @@ def _released_conditional() -> object:
             BranchSpec(label="Leitung"),
         ],
     )
-    return release(schema)
+    return release(staffed(schema))
 
 
 def test_instantiate_requires_released() -> None:
@@ -101,7 +102,7 @@ def test_serial_run_completes() -> None:
 def test_parallel_branches_are_concurrently_ready() -> None:
     schema = create_empty_schema("Parallel")
     schema = parallel_insert(schema, ["L", "R"], after_node_id="start")
-    schema = release(schema)
+    schema = release(staffed(schema))
     instance = instantiate(schema)
 
     ready = worklist(instance, schema)

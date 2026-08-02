@@ -14,6 +14,7 @@ at least one non-empty branch); the empty branch is removed on demand via
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     AccessMode,
@@ -111,7 +112,7 @@ def test_emptied_branch_is_selectable_by_the_engine() -> None:
     schema = _threshold_schema()
     join = _join(schema)
     schema = delete_node(schema, _nid(schema, "Team"))  # Team (< 1001) now empty
-    schema = release(schema)
+    schema = release(staffed(schema))
     leitung = _nid(schema, "Leitung")
 
     # betrag 100 falls into the *empty* branch -> Leitung is skipped, join taken.

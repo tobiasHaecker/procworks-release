@@ -10,6 +10,7 @@ These tests demonstrate Correctness by Construction:
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     BranchSpec,
@@ -152,13 +153,13 @@ def test_parallel_insert_requires_two_branches() -> None:
 def test_release_requires_entwurf_and_marks_released() -> None:
     schema = create_empty_schema("Release")
     schema = serial_insert(schema, "Schritt", after_node_id="start")
-    released = release(schema)
+    released = release(staffed(schema))
     assert released.lifecycle_state is LifecycleState.RELEASED
 
 
 def test_released_schema_is_not_editable() -> None:
     schema = create_empty_schema("Immutable")
-    released = release(schema)
+    released = release(staffed(schema))
     with pytest.raises(CorrectnessError):
         serial_insert(released, "X", after_node_id="start")
 
@@ -184,7 +185,7 @@ def test_rename_node_on_released_schema_is_rejected() -> None:
     schema = create_empty_schema("Umbenennen")
     schema = serial_insert(schema, "S", after_node_id="start")
     act = next(n for n in schema.nodes.values() if n.type is NodeType.ACTIVITY)
-    released = release(schema)
+    released = release(staffed(schema))
     with pytest.raises(CorrectnessError):
         rename_node(released, act.id, "Neu")
 
@@ -245,7 +246,7 @@ def test_delete_on_released_schema_is_rejected() -> None:
     schema = create_empty_schema("Loeschen")
     schema = serial_insert(schema, "S", after_node_id="start")
     act = next(n for n in schema.nodes.values() if n.type is NodeType.ACTIVITY)
-    released = release(schema)
+    released = release(staffed(schema))
     with pytest.raises(CorrectnessError):
         delete_node(released, act.id)
 

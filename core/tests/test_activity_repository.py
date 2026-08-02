@@ -10,6 +10,7 @@ type-conformantly (A3). Free-form bindings without a template stay valid.
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     ActivityTemplate,
@@ -192,7 +193,7 @@ def test_unassign_service_rejected_on_released_schema() -> None:
     the binding stays -- a live process keeps its executor."""
     schema, act = _schema_with_activity()
     schema = assign_service(schema, act, "Freie Bindung")
-    schema = release(schema)
+    schema = release(staffed(schema))
     with pytest.raises(CorrectnessError) as exc:
         unassign_service(schema, act)
     assert any(f.rule == "R0" for f in exc.value.findings)

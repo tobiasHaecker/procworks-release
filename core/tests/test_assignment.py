@@ -10,6 +10,7 @@ validations (manager / deputy, rule Z1) plus eligibility enforcement on complete
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     add_agent,
@@ -58,9 +59,9 @@ def test_eligible_agents_role_union():
     schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
     schema = add_agent(schema, "Max", role_ids=["sb"], agent_id="a2")
     schema = assign_staff_rule(schema, act, _role_rule("sb"))
-    instance = instantiate(release(schema))
+    instance = instantiate(release(staffed(schema)))
 
-    assert eligible_agents(release(schema), act, instance) == {"a1", "a2"}
+    assert eligible_agents(release(staffed(schema)), act, instance) == {"a1", "a2"}
 
 
 def test_eligible_agents_org_unit_recursive():
@@ -72,7 +73,7 @@ def test_eligible_agents_org_unit_recursive():
     schema = add_agent(schema, "Mitglied", org_unit_id="team", agent_id="a2")
     rule = StaffRule(kind=StaffRuleKind.ORG_UNIT, ref="abt", recursive=True)
     schema = assign_staff_rule(schema, act, rule)
-    rel = release(schema)
+    rel = release(staffed(schema))
     instance = instantiate(rel)
 
     assert eligible_agents(rel, act, instance) == {"a1", "a2"}
@@ -87,7 +88,7 @@ def test_eligible_agents_org_unit_non_recursive():
     schema = add_agent(schema, "Mitglied", org_unit_id="team", agent_id="a2")
     rule = StaffRule(kind=StaffRuleKind.ORG_UNIT, ref="abt", recursive=False)
     schema = assign_staff_rule(schema, act, rule)
-    rel = release(schema)
+    rel = release(staffed(schema))
     instance = instantiate(rel)
 
     assert eligible_agents(rel, act, instance) == {"a1"}
@@ -101,7 +102,7 @@ def test_eligible_agents_deputy_transitive_only_when_absent():
     schema = add_agent(schema, "Vertreter1", agent_id="a2")
     schema = add_agent(schema, "Vertreter2", agent_id="a3")
     schema = assign_staff_rule(schema, act, _role_rule("sb"))
-    rel = release(schema)
+    rel = release(staffed(schema))
     # Vertreterregelung erst zur Laufzeit (Stammdaten, auf RELEASED erlaubt)
     rel = set_agent_deputy(rel, "a1", "a2")
     rel = set_agent_deputy(rel, "a2", "a3")
@@ -133,7 +134,7 @@ def test_eligible_agents_node_performing_agent():
     schema = assign_staff_rule(
         schema, pruefen, StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT, ref=erfassen)
     )
-    rel = release(schema)
+    rel = release(staffed(schema))
     instance = instantiate(rel)
 
     # noch niemand hat Erfassen ausgefuehrt -> Pruefen hat keine Bearbeiter
@@ -182,7 +183,7 @@ def test_eligible_agents_supervisor_of_performer():
         schema, genehmigen,
         StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR, ref=antrag),
     )
-    rel = release(schema)
+    rel = release(staffed(schema))
     instance = instantiate(rel)
 
     # Antrag noch offen -> Genehmigen hat noch keinen Bearbeiter
@@ -241,7 +242,7 @@ def test_open_tasks_lists_activated_activity_with_rule():
     schema = add_role(schema, "Sachbearbeiter", role_id="sb")
     schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
     schema = assign_staff_rule(schema, act, _role_rule("sb"))
-    rel = release(schema)
+    rel = release(staffed(schema))
     instance = instantiate(rel)
 
     tasks = open_tasks(rel, instance)
@@ -262,7 +263,7 @@ def test_open_tasks_carry_revision_version():
     schema = add_role(schema, "Sachbearbeiter", role_id="sb")
     schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
     schema = assign_staff_rule(schema, act, _role_rule("sb"))
-    rel_v1 = release(schema)
+    rel_v1 = release(staffed(schema))
     rev_v2 = release(new_revision(rel_v1))
     assert rev_v2.version == 2
 
@@ -274,10 +275,18 @@ def test_open_tasks_carry_revision_version():
 
 
 def test_open_tasks_empty_when_no_rule():
+    """Eine Aktivitaet ohne BZR erscheint in keiner Arbeitsliste.
+
+    Genau darum blockt B2 die Freigabe eines solchen Schemas -- der Zustand ist
+    ueber ``release`` also nicht mehr erreichbar. Das *Verhalten* bleibt aber
+    pruefenswert, weil es zur Laufzeit weiterhin vorkommt: bei einer
+    Pruefinstanz eines Entwurfs (hier), bei einer Ad-hoc-Variante und bei
+    Instanzen, die aelter sind als ihre Bearbeiterzuordnung.
+    """
+
     schema = _single_activity_schema("asgnorule")
-    rel = release(schema)
-    instance = instantiate(rel)
-    assert open_tasks(rel, instance) == []
+    instance = instantiate(schema, allow_unreleased=True, is_test=True)
+    assert open_tasks(schema, instance) == []
 
 
 def test_open_tasks_empty_when_instance_completed():
@@ -286,7 +295,7 @@ def test_open_tasks_empty_when_instance_completed():
     schema = add_role(schema, "Sachbearbeiter", role_id="sb")
     schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
     schema = assign_staff_rule(schema, act, _role_rule("sb"))
-    rel = release(schema)
+    rel = release(staffed(schema))
     instance = instantiate(rel)
     instance = complete_activity(instance, rel, act, agent_id="a1")
     assert instance.state is InstanceState.COMPLETED
@@ -300,7 +309,7 @@ def test_open_tasks_deputy_receives_task_when_agent_absent():
     schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
     schema = add_agent(schema, "Vertreter", agent_id="a2")
     schema = assign_staff_rule(schema, act, _role_rule("sb"))
-    rel = set_agent_deputy(release(schema), "a1", "a2")
+    rel = set_agent_deputy(release(staffed(schema)), "a1", "a2")
     instance = instantiate(rel)
 
     # Ohne Abwesenheit sieht nur a1 die Aufgabe.
@@ -346,7 +355,7 @@ def test_set_manager_and_deputy_on_released_schema():
     schema = assign_staff_rule(
         schema, act, StaffRule(kind=StaffRuleKind.ORG_UNIT, ref="abt")
     )
-    rel = release(schema)
+    rel = release(staffed(schema))
     rel = set_org_unit_manager(rel, "abt", "a1")
     rel = set_agent_deputy(rel, "a1", "a2")
     assert rel.org_model.org_units["abt"].manager_id == "a1"
@@ -388,7 +397,7 @@ def test_set_org_unit_parent_on_released_schema():
     schema = _single_activity_schema("mvrel")
     schema = add_org_unit(schema, "Bereich", org_unit_id="bereich")
     schema = add_org_unit(schema, "Team", org_unit_id="team")
-    rel = release(schema)
+    rel = release(staffed(schema))
     rel = set_org_unit_parent(rel, "team", "bereich")
     assert rel.org_model.org_units["team"].parent_id == "bereich"
     assert validate(rel) == []
@@ -405,7 +414,7 @@ def test_complete_rejects_ineligible_agent():
     schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
     schema = add_agent(schema, "Fremd", agent_id="a2")
     schema = assign_staff_rule(schema, act, _role_rule("sb"))
-    rel = release(schema)
+    rel = release(staffed(schema))
     instance = instantiate(rel)
     with pytest.raises(ExecutionError):
         complete_activity(instance, rel, act, agent_id="a2")
@@ -417,7 +426,7 @@ def test_complete_without_agent_id_skips_eligibility():
     schema = add_role(schema, "Sachbearbeiter", role_id="sb")
     schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1")
     schema = assign_staff_rule(schema, act, _role_rule("sb"))
-    rel = release(schema)
+    rel = release(staffed(schema))
     instance = instantiate(rel)
     instance = complete_activity(instance, rel, act)
     assert instance.state is InstanceState.COMPLETED

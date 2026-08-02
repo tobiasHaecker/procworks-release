@@ -128,7 +128,7 @@ Broker env: `FLY_API_TOKEN`, `FLY_ORG`, `DEMO_IMAGE_REF`, `FLY_REGION`,
 `CAPTCHA_SECRET` is **optional** (set it to require Turnstile; unset = no Captcha).
 Use `DEMO_IMAGE_REF`, **not** `FLY_IMAGE_REF`: Fly injects `FLY_IMAGE_REF` at
 runtime as the broker's *own* image, which would make it provision itself.
-`DEMO_TTL_SECONDS` (default `7200` = 2 h) is the hard lifetime of a demo: the
+`DEMO_TTL_SECONDS` (default `21600` = 6 h) is the hard lifetime of a demo: the
 broker reaps anything older on each `/trial`, so an abandoned tab is cleaned up
 when the next visitor needs a slot — no always-on scheduler required. For
 zero-traffic periods there is an optional backstop: set `DEMO_ADMIN_TOKEN` and

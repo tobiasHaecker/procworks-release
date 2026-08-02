@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
+from staffing import staffed
 
 from procworks import (
     AggregateKind,
@@ -386,7 +387,7 @@ def _external_scalar_schema() -> tuple[ProcessSchema, str]:
     schema = assign_service(schema, worker_node, "Bearbeiten", automatic=True)
     schema = set_automation(schema, worker_node, AutomationKind.EXTERNAL_TASK, topic="erp")
     schema = connect_data(schema, worker_node, "kundenname", AccessMode.READ, mandatory=False)
-    schema = release(schema)
+    schema = release(staffed(schema))
     return schema, writer
 
 
@@ -633,7 +634,7 @@ def _external_write_schema() -> tuple[ProcessSchema, str]:
     schema = assign_service(schema, worker_node, "Bearbeiten", automatic=True)
     schema = set_automation(schema, worker_node, AutomationKind.EXTERNAL_TASK, topic="erpw")
     schema = connect_data(schema, worker_node, "status_extern", AccessMode.WRITE, mandatory=False)
-    schema = release(schema)
+    schema = release(staffed(schema))
     return schema, writer
 
 

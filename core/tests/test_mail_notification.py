@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from staffing import staffed
 
 from procworks import (
     add_agent,
@@ -290,7 +291,7 @@ def test_group_n_is_silent_without_bindings_or_addresses():
 # --------------------------------------------------------------------------- #
 def test_render_template_substitutes_instance_values():
     schema = _base_schema()
-    schema = release(schema)
+    schema = release(staffed(schema))
     instance = instantiate(schema)
     instance.data_values["kundenname"] = "Meier"
     assert render_template("Antrag von {kundenname}", instance) == "Antrag von Meier"
@@ -300,7 +301,7 @@ def test_build_message_resolves_agent_addresses():
     schema = _base_schema()
     binding = _mail(subject="Neue Aufgabe für {kundenname}")
     schema = set_mail_binding(schema, _activity(schema, "Prüfen"), binding)
-    schema = release(schema)
+    schema = release(staffed(schema))
     instance = instantiate(schema)
     instance.data_values["kundenname"] = "Meier"
     message = build_message(schema, _activity(schema, "Prüfen"), binding, instance)
@@ -314,7 +315,7 @@ def test_build_message_group_mode_uses_role_mailbox():
     schema = set_role_mailbox(schema, "sb", "sachbearbeitung@firma.de")
     binding = _mail(mode=MailRecipientMode.TO_GROUP_MAILBOX)
     schema = set_mail_binding(schema, _activity(schema, "Prüfen"), binding)
-    schema = release(schema)
+    schema = release(staffed(schema))
     instance = instantiate(schema)
     message = build_message(schema, _activity(schema, "Prüfen"), binding, instance)
     assert message is not None
@@ -324,7 +325,7 @@ def test_build_message_group_mode_uses_role_mailbox():
 def test_newly_ready_only_reports_transition():
     schema = _base_schema()
     schema = set_mail_binding(schema, _activity(schema, "Prüfen"), _mail())
-    schema = release(schema)
+    schema = release(staffed(schema))
     instance = instantiate(schema)
     pruefen = _activity(schema, "Prüfen")
     # 'Prüfen' is not yet ready at instantiation (still NOT_ACTIVATED).
@@ -354,7 +355,7 @@ def test_notify_ready_tasks_sends_and_is_soft_on_failure():
     schema = _base_schema()
     pruefen = _activity(schema, "Prüfen")
     schema = set_mail_binding(schema, pruefen, _mail())
-    schema = release(schema)
+    schema = release(staffed(schema))
     instance = instantiate(schema)
     before = dict(instance.node_states)
     instance.node_states[pruefen] = NodeState.ACTIVATED
@@ -381,7 +382,7 @@ def test_api_trigger_sends_mail_on_ready_task(monkeypatch):
     schema = add_agent(schema, "Erika", role_ids=["sb"], agent_id="a1", email="e@firma.de")
     schema = assign_staff_rule(schema, _activity(schema, "Prüfen"), _role_rule("sb"))
     schema = set_mail_binding(schema, _activity(schema, "Prüfen"), _mail())
-    schema = release(schema)
+    schema = release(staffed(schema))
 
     collector = _CollectingSender()
     monkeypatch.setattr(api_module, "_mail_sender", collector)
@@ -408,7 +409,7 @@ def test_api_trigger_on_downstream_task_after_complete(monkeypatch):
     schema = assign_staff_rule(schema, _activity(schema, "Erfassen"), _role_rule("sb"))
     schema = assign_staff_rule(schema, _activity(schema, "Prüfen"), _role_rule("sb"))
     schema = set_mail_binding(schema, _activity(schema, "Prüfen"), _mail())
-    schema = release(schema)
+    schema = release(staffed(schema))
 
     collector = _CollectingSender()
     monkeypatch.setattr(api_module, "_mail_sender", collector)

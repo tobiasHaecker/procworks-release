@@ -17,6 +17,7 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from staffing import staff_via_api
 
 import procworks.api as api_module
 from procworks.api import app
@@ -138,6 +139,7 @@ def _released_schema(headers: dict[str, str]) -> str:
         json={"label": "Tun", "after_node_id": "start"},
         headers=headers,
     )
+    staff_via_api(client, sid, headers)
     client.post(f"/schemas/{sid}/release", headers=headers)
     return sid
 
@@ -216,6 +218,7 @@ def _build_running_instance(headers: dict[str, str]) -> tuple[str, str]:
         json={"node_id": act, "rule": {"kind": "ROLE", "ref": "sb"}},
         headers=headers,
     )
+    staff_via_api(client, sid, headers)
     client.post(f"/schemas/{sid}/release", headers=headers)
     iid = client.post(f"/schemas/{sid}/instances", headers=headers).json()["id"]
     client.post(f"/instances/{iid}/start", json={"node_id": act}, headers=headers)

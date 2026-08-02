@@ -11,6 +11,10 @@ The rule implemented today is **B2**: every interactive step carries a staff rul
 :func:`procworks.assignment.open_tasks` skips it, so it appears in nobody's
 worklist -- the process looks started and stuck. These tests pin both halves:
 what the check flags, and what it deliberately leaves alone.
+
+``operations.release`` **enforces** the rule, so this is a real gate, not just a
+report: a draft may stay unstaffed for as long as its author likes, but it cannot
+become instantiable that way.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from procworks import (
     AccessMode,
+    CorrectnessError,
     DataType,
     NodeType,
     StaffRule,
@@ -286,3 +291,80 @@ def test_validation_endpoint_reports_releasable_once_staffed() -> None:
     assert report["correct"] is True
     assert report["releasable"] is True
     assert report["release_findings"] == []
+
+
+# --- the gate: release actually refuses ------------------------------------
+
+
+def test_release_refuses_a_schema_with_an_unstaffed_step() -> None:
+    """The gate bites: an unstaffed interactive step cannot be released."""
+
+    schema = serial_insert(create_empty_schema("Ungedeckt"), "Prüfen", "start")
+
+    with pytest.raises(CorrectnessError) as excinfo:
+        release(schema)
+
+    findings = excinfo.value.findings
+    assert [f.rule for f in findings] == ["B2"]
+    assert findings[0].node_id == _nid(schema, "Prüfen")
+
+
+def test_a_refused_release_leaves_the_schema_untouched() -> None:
+    """Validate-before-commit also holds for the Stufe-B gate.
+
+    A rejected operation must never leave a half-applied state -- the draft stays
+    exactly as it was, in particular still ENTWURF and therefore still editable.
+    """
+
+    schema = serial_insert(create_empty_schema("Unveraendert"), "Prüfen", "start")
+    before = schema.model_copy(deep=True)
+
+    with pytest.raises(CorrectnessError):
+        release(schema)
+
+    assert schema == before
+    assert schema.lifecycle_state is LifecycleState.ENTWURF
+
+
+def test_release_succeeds_once_every_step_is_staffed() -> None:
+    schema = serial_insert(create_empty_schema("Gedeckt"), "Prüfen", "start")
+    schema = _with_actor(schema)
+    schema = assign_staff_rule(schema, _nid(schema, "Prüfen"), _role_rule())
+
+    released = release(schema)
+
+    assert released.lifecycle_state is LifecycleState.RELEASED
+
+
+def test_release_allows_a_purely_automatic_process() -> None:
+    """No interactive step, no assignee needed -- the gate stays silent."""
+
+    schema = serial_insert(create_empty_schema("Vollautomatisch"), "Buchen", "start")
+    schema = assign_service(schema, _nid(schema, "Buchen"), "Dienst", automatic=True)
+
+    assert release(schema).lifecycle_state is LifecycleState.RELEASED
+
+
+def test_release_endpoint_reports_the_blocking_steps() -> None:
+    """Over HTTP the refusal is a 422 carrying the localized B2 findings.
+
+    That is what the web client turns into "these steps still need an assignee";
+    without the node ids it could only show a generic error.
+    """
+
+    client = TestClient(app)
+    schema = client.post("/schemas", json={"name": "Ungedeckt HTTP"}).json()
+    sid = schema["id"]
+    client.post(
+        f"/schemas/{sid}/serial-insert",
+        json={"label": "Prüfen", "after_node_id": "start"},
+    )
+
+    resp = client.post(f"/schemas/{sid}/release")
+
+    assert resp.status_code == 422
+    findings = resp.json()["detail"]["findings"]
+    assert [f["rule"] for f in findings] == ["B2"]
+    assert findings[0]["node_id"]
+    # And the schema is still a draft, so the modeller can just fix it.
+    assert client.get(f"/schemas/{sid}").json()["lifecycle_state"] == "ENTWURF"

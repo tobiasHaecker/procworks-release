@@ -42,8 +42,13 @@ primary_region = "fra"
   # which would make the broker clone itself instead of the demo image.
   DEMO_IMAGE_REF = "registry.fly.io/procworks-demo:demo"
   BROKER_CORS_ORIGINS = "https://procworks.de"
-  # Conservative cost caps for the initial rollout (raise later as needed).
-  DEMO_MAX_ACTIVE = "5"
+  # Cost caps. DEMO_MAX_ACTIVE was raised 5 -> 15 together with the TTL below:
+  # a demo now holds its slot three times as long, so the same cap would have cut
+  # the throughput to a third (5 slots x 4 cycles = 20 demos/day, below the
+  # DEMO_MAX_PER_DAY of 50). Three times the slots keeps the previous throughput
+  # at the same conservative posture -- machines are scale-to-zero, so idle ones
+  # cost next to nothing.
+  DEMO_MAX_ACTIVE = "15"
   DEMO_MAX_PER_DAY = "50"
   DEMO_MAX_PER_IP = "3"
   DEMO_IP_WINDOW_SECONDS = "3600"
@@ -51,7 +56,7 @@ primary_region = "fra"
   # an abandoned tab is cleaned up when the next visitor needs a slot. This value
   # is ALSO what the visitor's welcome mail promises ("verfuegbar bis ..."), so
   # raising it lengthens the window in which the mailed link still works.
-  DEMO_TTL_SECONDS = "7200"
+  DEMO_TTL_SECONDS = "21600"
   # Give a slot back the moment a visitor explicitly ends the demo (submits the
   # survey), instead of holding it the full TTL. Lets the small active cap serve
   # many more visitors/day; an abandoned tab still frees at TTL. "0" disables it.

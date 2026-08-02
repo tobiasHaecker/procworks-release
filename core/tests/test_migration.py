@@ -16,6 +16,7 @@ migration criteria are:
 from __future__ import annotations
 
 import pytest
+from staffing import staffed
 
 from procworks import (
     ExecutionContext,
@@ -80,7 +81,7 @@ def _released_serial() -> ProcessSchema:
     schema = create_empty_schema("Seriell", schema_id="serial")
     schema = serial_insert(schema, "B", after_node_id="start")
     schema = serial_insert(schema, "A", after_node_id="start")
-    return release(schema)
+    return release(staffed(schema))
 
 
 def _instance_with_a_completed(schema: ProcessSchema):
@@ -115,7 +116,7 @@ def test_happy_path_migration_remaps_markings() -> None:
     # Add C after B -- strictly ahead of the execution front.
     target = new_revision(source)
     target = serial_insert(target, "C", after_node_id=b_id)
-    target = release(target)
+    target = release(staffed(target))
 
     assert is_migratable(instance, source, target)
     migrated = migrate_instance(instance, source, target)
@@ -149,7 +150,7 @@ def test_m3_rewiring_completed_node_blocks_migration() -> None:
     # Insert C right after the already-completed A -> rewires its successor.
     target = new_revision(source)
     target = serial_insert(target, "C", after_node_id=a_id)
-    target = release(target)
+    target = release(staffed(target))
 
     findings = check_migration(instance, source, target)
     assert any(f.rule == "M3" for f in findings)
@@ -169,7 +170,7 @@ def test_m2_changing_executed_edge_blocks_migration() -> None:
     # Splice C between A and B -> the executed edge A->B disappears.
     target = new_revision(source)
     target = serial_insert(target, "C", after_node_id=a_id)
-    target = release(target)
+    target = release(staffed(target))
 
     findings = check_migration(instance, source, target)
     assert any(f.rule == "M2" for f in findings)
@@ -181,7 +182,7 @@ def test_m4_missing_mandatory_data_blocks_then_mapping_fixes() -> None:
     source = serial_insert(source, "B", after_node_id="start")
     source = serial_insert(source, "A", after_node_id="start")
     source = serial_insert(source, "W", after_node_id="start")
-    source = release(source)
+    source = release(staffed(source))
     w_id, a_id, _b_id = _ordered_activities(source)
 
     store = InMemoryInstanceStore()
@@ -195,7 +196,7 @@ def test_m4_missing_mandatory_data_blocks_then_mapping_fixes() -> None:
     target = add_data_element(target, "Beleg", DataType.STRING, element_id="doc")
     target = connect_data(target, w_id, "doc", AccessMode.WRITE)
     target = connect_data(target, a_id, "doc", AccessMode.READ)
-    target = release(target)
+    target = release(staffed(target))
 
     findings = check_migration(instance, source, target)
     assert any(f.rule == "M4" for f in findings)
@@ -220,7 +221,7 @@ def test_m5_adhoc_instance_blocks_migration() -> None:
 
     target = new_revision(source)
     target = serial_insert(target, "C", after_node_id=b_id)
-    target = release(target)
+    target = release(staffed(target))
 
     findings = check_migration(instance, source, target)
     assert any(f.rule == "M5" for f in findings)
@@ -235,7 +236,7 @@ def test_worklist_drives_target_after_migration() -> None:
 
     target = new_revision(source)
     target = serial_insert(target, "C", after_node_id=b_id)
-    target = release(target)
+    target = release(staffed(target))
 
     migrated = migrate_instance(instance, source, target)
     # B is still the ready activity on the target schema.

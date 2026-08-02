@@ -38,12 +38,19 @@ COPY web ./web
 # In-memory (NO DATABASE_URL -> no migration, no persistence, wipes on restart).
 # Boot-seeded and single-URL: the two additive boot switches do the work.
 ENV PROCWORKS_LOAD_DEMO=1 \
+    PROCWORKS_LOAD_O2C=1 \
     PROCWORKS_DEMO_MODE=1 \
     PROCWORKS_WEB_DIR=/app/web \
     PROCWORKS_AUTH=password \
     PROCWORKS_SESSION_TTL_MINUTES=120 \
     PROCWORKS_EGRESS_DENY=1 \
     PROCWORKS_DEMO_FEEDBACK_URL=https://broker.procworks.de/feedback
+# PROCWORKS_LOAD_O2C adds the large Order-to-Cash cosmos (six linked schemas, an
+# own organisation, nine prepared cases) next to the slim base demo. It is what a
+# visitor is meant to *see* -- a whole value stream, already populated -- so the
+# public demo ships both. It also gates the Order-to-Cash logins advertised on
+# /auth/config (api._demo_logins): advertising them without seeding them would
+# offer credentials that cannot work, so both hang off this one switch.
 # PROCWORKS_DEMO_MODE surfaces the seeded demo logins on /auth/config so the SPA
 # auto-logs the visitor in as the modeler (no credential guessing). It is a
 # throw-away-demo-only switch and MUST stay unset in any real deployment.
@@ -53,7 +60,8 @@ ENV PROCWORKS_LOAD_DEMO=1 \
 # guard alone only blocks *internal* targets, not arbitrary public ones.
 # IMPORTANT invariants for a public throw-away demo (leave these UNSET):
 #   * PROCWORKS_LICENSE_PUBKEY -> licensing stays dormant. The demo seeds five
-#     agents; with the free quota of three, enforcement would 402 the demo.
+#     agents plus eight more from the Order-to-Cash cosmos; with the free quota
+#     of three, enforcement would 402 the demo.
 #   * PROCWORKS_SMTP_*         -> mail falls back to the no-op NullMailSender.
 #   * PROCWORKS_WEBHOOK_ALLOWLIST / PROCWORKS_CONNECTIONS / PROCWORKS_PUSH_ENDPOINTS
 #     -> no outbound targets configured. DAL connectors carry no URL in the model

@@ -37,7 +37,7 @@ API (both no-ops unless set, no correctness impact):
 | Switch | Effect |
 |--------|--------|
 | `PROCWORKS_LOAD_DEMO=1` | Seed the built-in demo world once at boot (idempotent, only on an empty store). |
-| `PROCWORKS_LOAD_O2C=1` | Seed the large Order-to-Cash data set instead of / next to it. **Deliberately off for the public demo** — that one stays lean and tour-guided. |
+| `PROCWORKS_LOAD_O2C=1` | Seed the large Order-to-Cash data set next to it. **On for the public demo** (revised 2026-08-02): a visitor should land in a whole, already-populated value stream, which is what makes the product legible in the first minute. The guided tour is unaffected — it serves every `/schemas` call from its own write-free recording, so what is seeded never reaches it. Also gates the Order-to-Cash logins on `/auth/config`. |
 | `PROCWORKS_WEB_DIR=<path>` | Serve the static web client from the same process → **one container = whole app = one URL**. |
 
 ## Contents

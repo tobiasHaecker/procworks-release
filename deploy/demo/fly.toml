@@ -24,6 +24,7 @@ primary_region = "fra"          # Frankfurt (EU); "ams" is an alternative.
 # are repeated here only to make the demo posture explicit at the platform.
 [env]
   PROCWORKS_LOAD_DEMO = "1"
+  PROCWORKS_LOAD_O2C = "1"
   PROCWORKS_WEB_DIR = "/app/web"
   PROCWORKS_AUTH = "password"
 

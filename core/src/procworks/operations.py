@@ -1776,8 +1776,14 @@ def release(schema: ProcessSchema, resolver: SchemaResolver | None = None) -> Pr
     ensures:  schema becomes RELEASED (immutable for further edits).
 
     ``resolver`` enables the cross-schema composition checks (H1: a SUBPROCESS
-    must reference a RELEASED target). Note: full Stufe-B checks (B1-B3:
-    services, staff rules, data bindings) are added in later roadmap steps.
+    must reference a RELEASED target).
+
+    Beyond structural correctness this is the **Stufe-B gate** (concept §3.4):
+    :func:`~procworks.validator.check_executable` additionally requires every
+    interactive step to carry a staff rule (B2), because a step without one is
+    activated at runtime but shows up in no worklist. A draft may sit in that
+    state as long as it likes -- the bar only applies at release, which is the
+    moment the schema becomes instantiable.
     """
 
     if schema.lifecycle_state not in (LifecycleState.ENTWURF, LifecycleState.REVIEW):

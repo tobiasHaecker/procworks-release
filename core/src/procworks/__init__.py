@@ -299,7 +299,12 @@ from procworks.store import (
     hydrate_org,
     make_org_resolver,
 )
-from procworks.validator import CorrectnessError, ValidationFinding, validate
+from procworks.validator import (
+    CorrectnessError,
+    ValidationFinding,
+    check_executable,
+    validate,
+)
 from procworks.worklist_priority import (
     TimeAssessment,
     TimeContext,
@@ -477,6 +482,7 @@ __all__ = [
     "bind_sql_write",
     "build_connection_registry",
     "build_push_endpoint_registry",
+    "check_executable",
     "check_migration",
     "clear_staff_rule",
     "complete_activity",

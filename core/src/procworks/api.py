@@ -156,6 +156,7 @@ from procworks.validator import (
     CorrectnessError,
     ValidationFinding,
     _possible_agents,
+    check_executable,
     validate,
 )
 from procworks.worklist_priority import TimeContext
@@ -1082,6 +1083,15 @@ class WorklistReport(BaseModel):
 class ValidationReport(BaseModel):
     correct: bool
     findings: list[ValidationFinding]
+    #: Stufe B (concept §3.4): whether the schema is not merely *correct* but also
+    #: *runnable*. ``correct`` (Stufe A) holds after every operation; this one may
+    #: legitimately be false while a draft is still being built. Additive fields --
+    #: an older client simply ignores them.
+    releasable: bool = True
+    #: The Stufe-B findings behind ``releasable`` (empty when it is true). Today
+    #: this is rule B2: an interactive step without a staff rule would be
+    #: activated at runtime but appear in nobody's worklist.
+    release_findings: list[ValidationFinding] = []
 
 
 # --- helpers -------------------------------------------------------------
@@ -1501,6 +1511,69 @@ def get_me(principal: Principal = Depends(get_principal)) -> Principal:
     return principal
 
 
+def _business_role_label(
+    org: OrgModel | None, agent_id: str | None, fallback: str
+) -> str:
+    """Human label for a demo login's *business* role (not its RBAC role).
+
+    The RBAC role of every Order-to-Cash login is ``operator``, which would make
+    the demo's role-switch box read "Bearbeiter" eight times over and tell a
+    visitor nothing. What they actually want to pick is the **role in the
+    process** -- Debitorenbuchhaltung, Lager/Versand, Kreditmanagement -- so the
+    label is resolved from the seeded organisation instead.
+
+    An agent carrying more than two roles is the deliberate "walk the whole
+    process under one login" persona (Sina Springer holds every operational
+    role); listing six names would overflow the box, so it collapses to a short
+    hint. Falls back to ``fallback`` (the RBAC role) whenever the organisation
+    is not resolvable -- the label is a convenience, never a correctness input.
+    """
+
+    if org is None or agent_id is None:
+        return fallback
+    agent = org.agents.get(agent_id)
+    if agent is None or not agent.role_ids:
+        return fallback
+    if len(agent.role_ids) > 2:
+        return "alle Rollen"
+    names = [org.roles[rid].name for rid in agent.role_ids if rid in org.roles]
+    return "/".join(names) if names else fallback
+
+
+def _demo_logins() -> list[DemoLogin]:
+    """The demo logins advertised on ``/auth/config`` (demo mode only).
+
+    Always the base demo cosmos; the Order-to-Cash logins are added **only when
+    that data set is part of this deployment** (``PROCWORKS_LOAD_O2C``, the same
+    boot switch :func:`_lifespan` seeds it with). Advertising a login that was
+    never seeded would offer a visitor credentials that cannot work, so the two
+    are deliberately tied to one switch.
+    """
+
+    from procworks.demo import DEMO_USERS
+
+    logins = [
+        DemoLogin(login=login, name=name, role=next(iter(roles), "viewer"))
+        for login, name, roles, _agent in DEMO_USERS
+    ]
+    if not _env_truthy("PROCWORKS_LOAD_O2C"):
+        return logins
+
+    from procworks.demo_o2c import O2C_USERS
+    from procworks.demo_o2c import ORG_ID as O2C_ORG_ID
+
+    org = _org_store.get(O2C_ORG_ID)
+    logins += [
+        DemoLogin(
+            login=login,
+            name=name,
+            role=_business_role_label(org, agent_id, next(iter(roles), "viewer")),
+        )
+        for login, name, roles, agent_id in O2C_USERS
+    ]
+    return logins
+
+
 @app.get("/auth/config", response_model=AuthConfig)
 def get_auth_config() -> AuthConfig:
     """Public: tell the client which login UI to render (open/token/password).
@@ -1514,15 +1587,12 @@ def get_auth_config() -> AuthConfig:
     mode = _auth_mode()
     cfg = AuthConfig(mode=mode, password_login=mode == "password")
     if mode == "password" and _demo_mode():
-        from procworks.demo import DEMO_AUTOLOGIN, DEMO_PASSWORD, DEMO_USERS
+        from procworks.demo import DEMO_AUTOLOGIN, DEMO_PASSWORD
 
         cfg.demo = True
         cfg.demo_password = DEMO_PASSWORD
         cfg.demo_autologin = DEMO_AUTOLOGIN
-        cfg.demo_logins = [
-            DemoLogin(login=login, name=name, role=next(iter(roles), "viewer"))
-            for login, name, roles, _agent in DEMO_USERS
-        ]
+        cfg.demo_logins = _demo_logins()
         # Broker survey endpoint for the "end demo & give feedback" flow (unset ->
         # the SPA simply shows no survey). Not a secret; the broker gates + relays.
         cfg.demo_feedback_url = os.environ.get("PROCWORKS_DEMO_FEEDBACK_URL", "").strip() or None
@@ -1977,9 +2047,23 @@ def get_schema(schema_id: str) -> ProcessSchema:
     dependencies=[_read],
 )
 def get_validation(schema_id: str) -> ValidationReport:
+    """Structural correctness (Stufe A) **and** release readiness (Stufe B).
+
+    The two are reported separately because they mean different things: ``correct``
+    is an invariant that holds after every operation, while ``releasable`` is a
+    bar a draft only has to clear when it is released. A modeller therefore sees
+    "still missing an assignee" as a *completeness* state, not as an error.
+    """
+
     schema = _get_or_404(schema_id)
     findings = validate(schema, _resolver)
-    return ValidationReport(correct=not findings, findings=findings)
+    release_findings = check_executable(schema)
+    return ValidationReport(
+        correct=not findings,
+        findings=findings,
+        releasable=not release_findings,
+        release_findings=release_findings,
+    )
 
 
 @app.get(

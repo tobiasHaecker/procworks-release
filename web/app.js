@@ -419,10 +419,24 @@ function showVersion(version) {
 // Modal
 // --------------------------------------------------------------------------
 
-function openModal(title, bodyNode, onConfirm, confirmLabel) {
+/**
+ * Oeffnet einen modalen Dialog.
+ *
+ * @param {string} title Ueberschrift.
+ * @param {Node} bodyNode Inhalt.
+ * @param {Function} onConfirm Wird bei „Anwenden" gerufen; liefert es `false`,
+ *   bleibt der Dialog offen (z. B. bei einer fehlgeschlagenen Eingabe).
+ * @param {string} [confirmLabel] Beschriftung des Bestaetigungsknopfes.
+ * @param {Function} [onCancel] Wird beim Abbrechen gerufen (Knopf, Klick auf den
+ *   Hintergrund). Optional -- bestehende Aufrufer uebergeben nichts und
+ *   verhalten sich unveraendert; `confirmDialog` braucht den Haken, um sein
+ *   Versprechen auch bei Ablehnung aufzuloesen.
+ */
+function openModal(title, bodyNode, onConfirm, confirmLabel, onCancel) {
   const root = byId("modal-root");
   clear(root);
   const close = () => clear(root);
+  const cancel = () => { close(); if (onCancel) onCancel(); };
   const confirmBtn = el("button", {
     class: "btn primary",
     onClick: async () => {
@@ -430,16 +444,38 @@ function openModal(title, bodyNode, onConfirm, confirmLabel) {
       if (ok !== false) close();
     },
   }, confirmLabel || "Anwenden");
-  const modal = el("div", { class: "modal-backdrop", onClick: (e) => { if (e.target === e.currentTarget) close(); } },
+  const modal = el("div", { class: "modal-backdrop", onClick: (e) => { if (e.target === e.currentTarget) cancel(); } },
     el("div", { class: "modal" },
       el("div", { class: "modal-h" }, el("h3", null, title)),
       el("div", { class: "modal-b" }, bodyNode),
       el("div", { class: "modal-f" },
-        el("button", { class: "btn ghost", onClick: close }, "Abbrechen"),
+        el("button", { class: "btn ghost", onClick: cancel }, "Abbrechen"),
         confirmBtn)));
   root.appendChild(modal);
   const firstInput = modal.querySelector("input, select, textarea");
   if (firstInput) firstInput.focus();
+}
+
+/**
+ * Ja/Nein-Rueckfrage als Versprechen -- derselbe Dialog, nur abwartbar.
+ *
+ * Loest mit `true` bei Bestaetigung und mit `false` bei Abbruch auf (Knopf oder
+ * Klick auf den Hintergrund), damit ein Aufrufer schlicht `await`en kann. Der
+ * Wachposten `settled` sorgt dafuer, dass das Versprechen genau einmal
+ * aufgeloest wird, auch wenn beide Wege kurz nacheinander feuern.
+ *
+ * @param {string} title Ueberschrift.
+ * @param {Node} bodyNode Erklaerender Inhalt.
+ * @param {string} confirmLabel Beschriftung des bestaetigenden Knopfes.
+ * @returns {Promise<boolean>} Ob bestaetigt wurde.
+ */
+function confirmDialog(title, bodyNode, confirmLabel) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value) => { if (!settled) { settled = true; resolve(value); } };
+    openModal(title, bodyNode, () => { done(true); return true; },
+      confirmLabel, () => done(false));
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -1848,6 +1884,16 @@ function modelStatusBar(schema, draft) {
   bar.appendChild(v && v.correct
     ? el("span", { class: "pill pill-green" }, "✓ korrekt")
     : el("span", { class: "pill pill-red" }, `${v ? v.findings.length : 0} Befund(e)`));
+  // Stufe B getrennt von Stufe A: „korrekt" ist eine Invariante, „freigabereif"
+  // ein Reifegrad. Ein Entwurf darf unfertig sein -- er soll es nur sehen, bevor
+  // er freigibt und der Vorgang spaeter beim Sachbearbeiter stillsteht.
+  const notReady = draft ? releaseFindings() : [];
+  if (notReady.length) {
+    bar.appendChild(el("span", {
+      class: "pill pill-amber",
+      title: notReady.map((f) => f.message).join("\n"),
+    }, `${notReady.length} Schritt(e) ohne Bearbeiter`));
+  }
   const focusElem = state.dataElemFocus && schema.data_elements[state.dataElemFocus];
   const text = focusElem
     ? el("span", null,
@@ -4134,13 +4180,60 @@ function openInsertModal(afterNodeId) {
   }, "Einf\u00FCgen");
 }
 
+/**
+ * Die Schritte, denen fuer die Freigabe noch etwas fehlt (Stufe B, Regel B2).
+ *
+ * Kommt aus dem Kern (`GET /schemas/{id}/validation` -> `release_findings`); der
+ * Client entscheidet nichts selbst, er zeigt nur an. Leeres Array = bereit.
+ *
+ * @returns {Array<object>} Die Stufe-B-Befunde der aktuellen Validierung.
+ */
+function releaseFindings() {
+  const v = state.validation;
+  return (v && v.release_findings) || [];
+}
+
+/**
+ * Gibt das Schema frei -- fragt aber vorher nach, wenn Schritte ohne Bearbeiter
+ * darin stehen.
+ *
+ * Warum die Rueckfrage: Ein interaktiver Schritt ohne BZR wird zur Laufzeit zwar
+ * aktiviert, taucht aber in **keiner** Arbeitsliste auf (`open_tasks`
+ * ueberspringt ihn). Der Vorgang sieht dann gestartet aus und steht still --
+ * und das faellt erst dem Sachbearbeiter auf, nicht dem Modellierer. Die
+ * Freigabe bleibt moeglich (der Kern laesst sie zu, siehe Konzept §3.4: das
+ * harte Gate ist ein eigenes Inkrement), aber niemand stolpert mehr blind
+ * hinein.
+ */
 async function releaseSchema() {
+  const missing = releaseFindings();
+  if (missing.length) {
+    const names = missing.map((f) => nodeLabelOf(f.node_id)).filter(Boolean);
+    const ok = await confirmDialog(
+      "Freigeben ohne Bearbeiter?",
+      el("div", null,
+        el("p", null,
+          `${missing.length} Schritt(e) haben noch keine Bearbeiterzuordnung. ` +
+          "Sie werden zur Laufzeit aktiviert, erscheinen aber in keiner " +
+          "Arbeitsliste – der Vorgang bliebe dort stehen."),
+        names.length ? el("ul", null, ...names.map((n) => el("li", null, n))) : null,
+        el("p", { class: "muted" },
+          "Empfehlung: erst je Schritt einen Bearbeiter zuordnen, dann freigeben.")),
+      "Trotzdem freigeben");
+    if (!ok) return;
+  }
   try {
     await api.post(`/schemas/${state.schemaId}/release`);
     await refreshSchema();
     render();
     toast("ok", "Schema freigegeben", ["Jetzt instanziierbar."]);
   } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+/** Bezeichnung eines Knotens der aktuellen Sicht (fuer Meldungen). */
+function nodeLabelOf(nodeId) {
+  const node = nodeId && state.schema && state.schema.nodes[nodeId];
+  return node ? (node.label || nodeId) : nodeId;
 }
 
 async function newRevision() {

@@ -124,6 +124,64 @@ def raise_if_invalid(
     return schema
 
 
+# --- B2: release readiness / executability (Stufe B) ---------------------
+
+
+def check_executable(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Stufe-B check: is the schema not merely *correct* but also *runnable*?
+
+    Deliberately **not** part of :func:`validate`. Stufe A (K/D/Z/…) holds after
+    every single operation, so a half-finished draft stays editable; Stufe B is
+    the additional bar a schema must clear to be **released** (concept §1.1.1,
+    §3.4). Calling it from ``validate`` would make an incomplete draft
+    unmodellable, which is exactly the "Verbotsmodell" the architecture rejects.
+
+    Implemented rule:
+
+    * **B2 -- Bearbeiterzuordnung.** Every *interactive* ACTIVITY carries a staff
+      rule (BZR). Without one the step is activated at runtime but appears in no
+      worklist (:func:`procworks.assignment.open_tasks` skips nodes without a
+      rule), so the instance cannot be driven forward by the people meant to work
+      it. An **automatic** step is exempt -- rule Z4 even forbids a BZR there.
+
+    Not enforced here, on purpose:
+
+    * **B1 -- Dienstzuordnung** as literally worded in the concept ("every
+      activity node is linked to an executable ActivityTemplate") does not match
+      how the product is actually used: an interactive step with an input mask
+      needs no service, and *none* of the shipped example processes or built-in
+      templates binds one. Enforcing it would reject the product's own corpus.
+      The concept text is the outdated part; see §3.4.
+    * **B3 -- Vollständige Datenbindung** is already guaranteed by Stufe A: D1
+      supplies every mandatory input on every path and K7 makes each branch
+      partition total, both checked on every commit. A separate gate would only
+      re-assert what cannot be violated.
+
+    Returns an empty list when the schema is releasable.
+    """
+
+    findings: list[ValidationFinding] = []
+    for node in schema.nodes.values():
+        if node.type is not NodeType.ACTIVITY:
+            continue
+        binding = schema.service_bindings.get(node.id)
+        if binding is not None and binding.automatic:
+            continue  # automatic step: no performer needed (and Z4 forbids one)
+        if node.id in schema.staff_rules:
+            continue
+        findings.append(
+            ValidationFinding(
+                rule="B2",
+                node_id=node.id,
+                message=(
+                    f"interactive step '{node.label or node.id}' has no staff rule "
+                    f"(BZR); it would be activated but appear in nobody's worklist"
+                ),
+            )
+        )
+    return findings
+
+
 # --- K2: single start/end, well-formed in/out degrees --------------------
 
 

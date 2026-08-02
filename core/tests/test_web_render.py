@@ -640,3 +640,108 @@ def test_empty_required_field_blocks_the_completion() -> None:
     assert pruefung < absenden, (
         "Die Pflichtfeldpruefung steht hinter dem Absenden -- sie kaeme zu spaet"
     )
+
+
+def test_release_warns_before_a_schema_without_assignees() -> None:
+    """Vor der Freigabe wird auf Schritte ohne Bearbeiter hingewiesen.
+
+    Ein interaktiver Schritt ohne BZR wird zur Laufzeit zwar aktiviert, taucht
+    aber in **keiner** Arbeitsliste auf (``assignment.open_tasks`` ueberspringt
+    Knoten ohne Regel). Der Vorgang sieht dann gestartet aus und steht still --
+    und das merkt nicht der Modellierer, sondern spaeter der Sachbearbeiter.
+    Der Kern laesst die Freigabe heute noch zu (Stufe B ist als eigenes
+    Inkrement geplant, Konzept §3.4), deshalb faengt die Oberflaeche den Fall
+    ab: sichtbar, benannt und mit Rueckfrage -- aber nicht bevormundend.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = re.search(r"\nasync function releaseSchema\(\) \{.*?\n\}\n", src, re.S)
+    assert body, "releaseSchema() nicht gefunden -- Waechter angleichen"
+    code = re.sub(r"//[^\n]*", "", body.group(0))
+
+    assert "releaseFindings()" in code, (
+        "releaseSchema fragt die Stufe-B-Befunde des Kerns nicht ab"
+    )
+    assert "confirmDialog" in code, "Es gibt keine Rueckfrage vor der Freigabe"
+    rueckfrage = code.index("confirmDialog")
+    freigabe = code.index("api.post(")
+    assert rueckfrage < freigabe, (
+        "Die Rueckfrage steht hinter der Freigabe -- sie kaeme zu spaet"
+    )
+    assert re.search(r"if \(!ok\) return;", code), (
+        "Ein Abbruch der Rueckfrage verhindert die Freigabe nicht"
+    )
+
+
+def test_release_readiness_comes_from_the_core_not_the_client() -> None:
+    """Die Befunde stammen aus der Validierung des Kerns, nicht aus dem Client.
+
+    Der Web-Client traegt keine Korrektheits- und keine Reifegrad-Logik: er
+    zeigt an, was ``GET /schemas/{id}/validation`` liefert. Rechnete er selbst
+    nach, gaebe es zwei Wahrheiten, die auseinanderlaufen koennen.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = re.search(r"\nfunction releaseFindings\(\) \{.*?\n\}\n", src, re.S)
+    assert body, "releaseFindings() nicht gefunden -- Waechter angleichen"
+
+    assert "release_findings" in body.group(0), (
+        "releaseFindings liest nicht das Feld des Kerns (release_findings)"
+    )
+    assert "staff_rules" not in body.group(0), (
+        "Der Client leitet die Freigabe-Reife selbst her statt sie zu lesen"
+    )
+
+
+def test_confirm_dialog_also_settles_on_cancel() -> None:
+    """Die Rueckfrage loest ihr Versprechen auch beim Abbrechen auf.
+
+    Sonst haengt jeder ``await confirmDialog(...)`` nach einem Abbruch fuer
+    immer -- der Knopf reagierte danach scheinbar gar nicht mehr. Beide
+    Abbruchwege (Knopf und Klick auf den Hintergrund) muessen deshalb auf
+    denselben Haken laufen.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    modal = re.search(r"\nfunction openModal\(.*?\n\}\n", src, re.S)
+    assert modal, "openModal() nicht gefunden -- Waechter angleichen"
+    code = re.sub(r"//[^\n]*", "", modal.group(0))
+
+    assert "onCancel" in code, "openModal kennt keinen Abbruch-Haken"
+    assert re.search(r"const cancel = \(\) => \{ close\(\); if \(onCancel\)", code), (
+        "Der Abbruch-Haken wird nicht beim Schliessen ausgeloest"
+    )
+    assert 'onClick: cancel }, "Abbrechen"' in code, (
+        "Der Abbrechen-Knopf laeuft nicht ueber den Abbruch-Haken"
+    )
+    assert "e.currentTarget) cancel()" in code, (
+        "Der Klick auf den Hintergrund laeuft nicht ueber den Abbruch-Haken"
+    )
+
+    dialog = re.search(r"\nfunction confirmDialog\(.*?\n\}\n", src, re.S)
+    assert dialog, "confirmDialog() nicht gefunden -- Waechter angleichen"
+    assert "resolve(value)" in dialog.group(0), "confirmDialog loest nie auf"
+    assert "settled" in dialog.group(0), (
+        "confirmDialog schuetzt sich nicht gegen doppeltes Aufloesen"
+    )
+
+
+def test_status_bar_separates_correctness_from_release_readiness() -> None:
+    """„korrekt" und „freigabereif" stehen nebeneinander, nicht vermischt.
+
+    Stufe A ist eine Invariante (gilt nach jeder Operation), Stufe B ein
+    Reifegrad (darf im Entwurf offen sein). Wuerde die Oberflaeche beides in
+    eine Anzeige werfen, sähe ein unfertiger -- aber voellig korrekter --
+    Entwurf wie ein fehlerhafter aus.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = re.search(r"\nfunction modelStatusBar\(.*?\n\}\n", src, re.S)
+    assert body, "modelStatusBar() nicht gefunden -- Waechter angleichen"
+    code = re.sub(r"//[^\n]*", "", body.group(0))
+
+    assert "pill-green" in code and "pill-red" in code, "Stufe A fehlt in der Leiste"
+    assert "releaseFindings()" in code, "Stufe B fehlt in der Leiste"
+    assert "pill-amber" in code, (
+        "Die Freigabe-Reife wird nicht als eigener, milderer Zustand gezeigt"
+    )

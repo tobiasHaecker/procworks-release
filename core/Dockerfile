@@ -21,17 +21,26 @@ WORKDIR /app
 
 # Install dependencies first (better layer caching), then the package itself.
 #
-# setuptools wird bewusst mit angehoben: das Basis-Image bringt eine aeltere
-# Version mit (70.3.0), die Trivy im Release-Scan als HIGH meldet
-# (CVE-2025-47273, Path Traversal in PackageIndex, gefixt in 78.1.1). Es ist
-# eine Build-Abhaengigkeit, die im Laufzeit-Image nur noch herumliegt -- der
-# Scan sieht sie trotzdem. Anheben ist billiger als eine Ausnahme, weil hier
-# tatsaechlich ein Fix existiert (anders als bei den Go-Lucken im Caddy-Image,
-# siehe .trivyignore).
+# setuptools wird bewusst mit angehoben: das Basis-Image bringt 70.3.0 mit, die
+# Trivy im Release-Scan als HIGH meldet (CVE-2025-47273, Path Traversal in
+# PackageIndex, gefixt in 78.1.1).
+#
+# Die abschliessende Zeile ist eine *Diagnose*, keine Funktion: sie schreibt die
+# tatsaechlich importierbare Version und jeden setuptools-Pfad des fertigen
+# Dateisystems ins Build-Log. Hintergrund: nach dem Upgrade auf 83.0.0 meldete
+# Trivy weiterhin 70.3.0, ohne den Fund einer Datei zuzuordnen -- vermutlich,
+# weil der Upgrade das alte Verzeichnis setuptools-70.3.0.dist-info nicht
+# ueberschreibt, sondern loescht (der neue Name lautet 83.0.0.dist-info), und
+# der Scanner das Paket aus der Basisschicht weitertraegt. Lokal ist das nicht
+# nachstellbar (kein Docker-Daemon in der Entwicklungsumgebung). Zeigt das Log
+# eine echte zweite Kopie, wird sie geloescht und die Ausnahme in .trivyignore
+# entfaellt; zeigt es keine, ist die Ausnahme belegt und diese Zeile kann weg.
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN python -m pip install --upgrade pip setuptools \
-    && python -m pip install ".[postgres]"
+    && python -m pip install ".[postgres]" \
+    && python -c "import setuptools; print('DIAG importierbare setuptools-Version:', setuptools.__version__)" \
+    && find / -xdev -maxdepth 8 -name 'setuptools*' -print | sed 's/^/DIAG Pfad: /'
 
 # Migrations + Alembic config are needed at runtime for the entrypoint.
 COPY alembic.ini ./

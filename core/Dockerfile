@@ -20,9 +20,17 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Install dependencies first (better layer caching), then the package itself.
+#
+# setuptools wird bewusst mit angehoben: das Basis-Image bringt eine aeltere
+# Version mit (70.3.0), die Trivy im Release-Scan als HIGH meldet
+# (CVE-2025-47273, Path Traversal in PackageIndex, gefixt in 78.1.1). Es ist
+# eine Build-Abhaengigkeit, die im Laufzeit-Image nur noch herumliegt -- der
+# Scan sieht sie trotzdem. Anheben ist billiger als eine Ausnahme, weil hier
+# tatsaechlich ein Fix existiert (anders als bei den Go-Lucken im Caddy-Image,
+# siehe .trivyignore).
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN python -m pip install --upgrade pip \
+RUN python -m pip install --upgrade pip setuptools \
     && python -m pip install ".[postgres]"
 
 # Migrations + Alembic config are needed at runtime for the entrypoint.

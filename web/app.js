@@ -89,8 +89,23 @@ const state = {
   // dessen Herkunft (Schreib- -> Lese-Knoten) im Kontrollfluss als gestrichelte
   // Linien hervorgehoben wird. Rein visuell, nicht persistiert.
   dataElemFocus: null,
-  // Aktiver Tab der rechten Bindungs-Palette ("data" | "res"). Nicht persistiert.
+  // Aktive Modellier-Oberflaeche: "card" (Kontrollfluss + Schritt-Karte,
+  // Standard) oder "classic" (Zwei-Spalten-Sicht mit Bindungs-Palette rechts).
+  // Beide bleiben gleichwertig erhalten; persistiert je Browser.
+  modelUx: localStorage.getItem("modelUx") || "card",
+  // Aktiver Tab der Bindungs-Palette der klassischen Sicht ("data" | "res").
+  // Nicht persistiert.
   paletteTab: "data",
+  // Modellieren-Sicht: aufgeklappte Abschnitte der Schritt-Karte (§4.4 des
+  // Konzepts "Modellieren im Kontrollfluss"). Persistiert, damit die eigene
+  // Arbeitsweise erhalten bleibt -- wer Zeit/Priorität immer braucht, klappt sie
+  // einmal auf. Ein defekter/fehlender Eintrag faellt auf CARD_DEFAULT_OPEN
+  // zurueck (siehe readCardOpen).
+  cardOpen: null,
+  // Abschnitt, der beim naechsten Rendern in den sichtbaren Bereich der Karte
+  // gerollt wird ("name" = das Bezeichnungsfeld im Kartenkopf fokussieren).
+  // Einmalig -- viewModel raeumt ihn nach dem Anwenden ab. Nicht persistiert.
+  cardFocusSection: null,
   // Resource view: clicking an org unit (in the org chart or the Abteilungen
   // tree) highlights that unit plus the agents that belong to it -- including
   // the unit's supervisor -- in the Agenten table. orgFocusUnit is the selected
@@ -842,13 +857,17 @@ function renderGraph(schema, opts) {
     const x1 = a.x + a.w / 2, y1 = a.y, x2 = b.x + b.w / 2, y2 = b.y;
     const lift = 34 + Math.min(60, Math.abs(x2 - x1) * 0.12);
     const my = Math.min(y1, y2) - lift;
-    return { x1, y1, x2, y2, my, label: pv.label, lx: (x1 + x2) / 2, ly: my + 4 };
+    // ``a``/``b`` reisen mit, damit unten der Bereich bestimmt werden kann, den
+    // die Herkunft insgesamt einnimmt (Bogen *und* beide beteiligten Knoten).
+    return { x1, y1, x2, y2, my, from: a, to: b,
+      label: pv.label, lx: (x1 + x2) / 2, ly: my + 4 };
   }).filter(Boolean);
 
   // Labels vertikal entzerren: nach Bogenspitze (oben zuerst) sortieren und
   // jedes Label so weit nach oben schieben, dass es kein bereits platziertes
   // Label in der Naehe (gleicher horizontaler Bereich) mehr ueberdeckt.
   const LBL_LINE = 12; // Zeilenhoehe der 9px-Beschriftung inkl. kleinem Rand
+  const LBL_HALF_W = 45; // grobe halbe Breite einer (auf 14 Zeichen gekuerzten) Beschriftung
   const placed = [];
   provItems.slice().sort((p, q) => p.ly - q.ly).forEach((pv) => {
     if (!pv.label) return;
@@ -870,6 +889,14 @@ function renderGraph(schema, opts) {
   // abgeschnitten; die Modellsicht waechst nur nach oben, Knoten bleiben fix.
   let topY = 0;
   provItems.forEach((pv) => { topY = Math.min(topY, pv.my - 2, pv.ly - 10); });
+  // Der Schnellring des gewaehlten Knotens (siehe renderNodeRing) sitzt UEBER
+  // dem Knotenrechteck. Bei einem Knoten auf der obersten Bahn (y = LAYOUT_PAD)
+  // ragt er sonst ueber den Rand der viewBox hinaus und waere unklickbar --
+  // deshalb geht er in dieselbe Erweiterung nach oben ein wie die Herkunft.
+  const ringPos = opts.onNodeAction && opts.selectedId ? L.pos[opts.selectedId] : null;
+  if (ringPos && nodeRingActions(schema, schema.nodes[opts.selectedId]).length) {
+    topY = Math.min(topY, ringPos.y - RING_LIFT - RING_R - 2);
+  }
   if (topY < 0) {
     const vbTop = topY - 6;
     root.setAttribute("viewBox", `0 ${vbTop} ${L.width} ${L.height - vbTop}`);
@@ -886,6 +913,25 @@ function renderGraph(schema, opts) {
     }
   });
 
+  // Umschliessender Bereich der Datenherkunft (Bogen + Beschriftung + **beide**
+  // beteiligten Knoten). Er wandert an die Canvas, damit das Einrasten auf den
+  // gewaehlten Knoten die Herkunft nicht aus dem Bild schiebt: Der Schreiber
+  // liegt typischerweise mehrere hundert Pixel weiter links, sodass ein reines
+  // Zentrieren auf den Leseknoten genau das versteckte, was der Bogen zeigen
+  // soll -- die Verbindung zwischen den beiden Schritten (siehe centerOn).
+  const provBounds = provItems.length ? provItems.reduce((acc, pv) => {
+    const parts = [
+      [pv.from.x, pv.from.y, pv.from.w, pv.from.h],
+      [pv.to.x, pv.to.y, pv.to.w, pv.to.h],
+      [pv.lx - LBL_HALF_W, Math.min(pv.my, pv.ly - LBL_LINE), LBL_HALF_W * 2, LBL_LINE],
+    ];
+    parts.forEach(([x, y, w, h]) => {
+      acc.x0 = Math.min(acc.x0, x); acc.y0 = Math.min(acc.y0, y);
+      acc.x1 = Math.max(acc.x1, x + w); acc.y1 = Math.max(acc.y1, y + h);
+    });
+    return acc;
+  }, { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }) : null;
+
   // Knoten
   Object.entries(L.pos).forEach(([id, p]) => {
     const node = schema.nodes[id];
@@ -901,6 +947,8 @@ function renderGraph(schema, opts) {
       document.createTextNode(sub)));
     root.appendChild(g);
     renderNodeBadges(root, schema, node, p, opts);
+    renderNodeFindingMark(root, node, p, opts);
+    renderNodeRing(root, schema, node, p, opts);
   });
 
   // Einpassen-Knopf oben rechts **im** Canvas (nicht im Panel-Kopf): so steht er
@@ -921,6 +969,9 @@ function renderGraph(schema, opts) {
   }, "\u2922 Einpassen");
   const wrap = el("div", { class: "canvas-wrap", "data-tour": "model.graph" }, root, fitBtn,
     el("div", { class: "canvas-hint" }, "Scrollen/Wischen: Verschieben \u00B7 Strg/Pinch: Zoom \u00B7 Ziehen: Verschieben"));
+  // Der Herkunfts-Bereich haengt an der Canvas, weil nur sie ihre eigene Groesse
+  // kennt (das Einpassen passiert erst nach dem Einhaengen ins Dokument).
+  wrap._provBounds = provBounds;
   attachPanZoom(wrap, root);
   return wrap;
 }
@@ -947,8 +998,11 @@ function renderNodeBadges(root, schema, node, p, opts) {
       class: "gchip gchip-" + chip.kind + (onOpen ? " gchip-link" : ""),
       onClick: onOpen ? (e) => { e.stopPropagation(); onOpen(node.id); } : null,
     });
+    // Wohin der Klick fuehrt, entscheidet die aufrufende Sicht (Karten-Sicht:
+    // der passende Abschnitt der Schritt-Karte; klassisch: die Daten-/
+    // Ressourcensicht) -- der Hinweis bleibt deshalb bewusst neutral.
     const hint = onOpen
-      ? (chip.kind === "data" ? " \u2013 klicken \u00F6ffnet die Datensicht" : " \u2013 klicken \u00F6ffnet die Bearbeiterzuordnung")
+      ? (chip.kind === "data" ? " \u2013 klicken zeigt die Datenbindungen" : " \u2013 klicken zeigt die Bearbeiterzuordnung")
       : "";
     g.appendChild(svg("title", null, document.createTextNode(chip.title + hint)));
     g.appendChild(svg("rect", { class: "gchip-bg", x: cx, y, width: w, height: CHIP_H, rx: 8 }));
@@ -957,6 +1011,137 @@ function renderNodeBadges(root, schema, node, p, opts) {
     root.appendChild(g);
     y += CHIP_H + CHIP_GAP;
   });
+}
+
+// Geometrie des Schnellrings am gewaehlten Knoten (Konzept "Modellieren im
+// Kontrollfluss", §4.3). Der Ring liegt UEBER dem Knoten, weil unter ihm bereits
+// der Badge-Stapel haengt (siehe renderNodeBadges).
+const RING_R = 11, RING_GAP = 7, RING_LIFT = 24;
+
+/**
+ * Die Aktionen des Schnellrings fuer einen Knoten -- rein deklarativ.
+ *
+ * Gemeinsame Quelle fuer das Zeichnen (renderNodeRing) und die
+ * viewBox-Erweiterung in renderGraph, damit beide dieselbe Anzahl sehen. An
+ * Start-, End- und Join-Knoten faellt der Ring ganz weg (dort gibt es nichts zu
+ * tun; Joins werden ueber ihren oeffnenden Split entfernt).
+ *
+ * @param {object} schema Das Schema (fuer die Erkennung eines leeren XOR-Zweigs).
+ * @param {object} node   Der Knoten.
+ * @returns {Array<{key: string, symbol: string, title: string}>} Aktionen, ggf. leer.
+ */
+function nodeRingActions(schema, node) {
+  if (!node) return [];
+  if (node.type === NODE_TYPE.ACTIVITY || node.type === NODE_TYPE.SUBPROCESS) {
+    return [
+      { key: "insert", symbol: "+", title: "Schritt danach einfügen" },
+      { key: "rename", symbol: "✎", title: "Bezeichnung ändern" },
+      { key: "bind", symbol: "⊕", title: "Datenelement binden" },
+      { key: "delete", symbol: "✕", title: "Schritt entfernen" },
+    ];
+  }
+  if (SPLIT_TYPES.has(node.type)) {
+    const acts = [];
+    if (emptyBranchJoin(schema, node.id)) {
+      acts.push({ key: "empty-branch", symbol: "⌫", title: "Leeren Zweig entfernen" });
+    }
+    acts.push({ key: "delete", symbol: "✕", title: "Verzweigung entfernen" });
+    return acts;
+  }
+  return [];
+}
+
+/**
+ * Zeichnet den Schnellring des gewaehlten Knotens als Teil des SVG.
+ *
+ * Bewusst IM SVG und nicht als HTML-Overlay: Pan/Zoom verschiebt den Graphen
+ * ueber eine CSS-Transformation, ein separat positioniertes Overlay muesste
+ * jede Bewegung nachfuehren (oder verlöre den Bezug). Als SVG-Element wandert
+ * der Ring automatisch mit seinem Knoten mit.
+ *
+ * Wird nur gezeichnet, wenn die aufrufende Sicht ``opts.onNodeAction`` setzt --
+ * Ausfuehrung, Monitoring und Pruefinstanz nutzen dieselbe renderGraph-Funktion
+ * und bleiben damit unveraendert.
+ *
+ * @param {SVGElement} root Wurzel-SVG.
+ * @param {object} schema   Das Schema.
+ * @param {object} node     Der zu bedienende Knoten.
+ * @param {{x:number,y:number,w:number,h:number}} p Knotenrechteck aus layoutSchema.
+ * @param {object} opts     renderGraph-Optionen (onNodeAction, selectedId).
+ */
+function renderNodeRing(root, schema, node, p, opts) {
+  if (!opts.onNodeAction || opts.selectedId !== node.id) return;
+  const acts = nodeRingActions(schema, node);
+  if (!acts.length) return;
+  const total = acts.length * (RING_R * 2) + (acts.length - 1) * RING_GAP;
+  let cx = p.x + p.w / 2 - total / 2 + RING_R;
+  const cy = p.y - RING_LIFT;
+  acts.forEach((a) => {
+    const g = svg("g", {
+      class: "gring gring-" + a.key,
+      style: "cursor:pointer",
+      onClick: (e) => { e.stopPropagation(); opts.onNodeAction(node.id, a.key); },
+    });
+    g.appendChild(svg("title", null, document.createTextNode(a.title)));
+    g.appendChild(svg("circle", { class: "gring-bg", cx, cy, r: RING_R }));
+    g.appendChild(svg("text", { class: "gring-txt", x: cx, y: cy + 4, "text-anchor": "middle" },
+      document.createTextNode(a.symbol)));
+    root.appendChild(g);
+    cx += RING_R * 2 + RING_GAP;
+  });
+}
+
+/**
+ * Setzt den Befund-Marker an einen Knoten, an dem der Kern etwas beanstandet.
+ *
+ * ``ValidationFinding`` traegt bereits ein optionales ``node_id`` -- der Client
+ * gruppiert die Befunde nur (findingsByNode) und zeigt sie dort an, wo sie
+ * entstehen, statt nur als Liste am Seitenrand. Er entscheidet dabei **nichts**:
+ * angezeigt wird ausschliesslich, was der Kern geliefert hat.
+ *
+ * @param {SVGElement} root Wurzel-SVG.
+ * @param {object} node     Der Knoten.
+ * @param {{x:number,y:number,w:number,h:number}} p Knotenrechteck.
+ * @param {object} opts     renderGraph-Optionen (findings, onFinding).
+ */
+function renderNodeFindingMark(root, node, p, opts) {
+  const list = opts.findings ? opts.findings[node.id] : null;
+  if (!list || !list.length) return;
+  const cx = p.x + p.w - 9, cy = p.y + 9;
+  const g = svg("g", {
+    class: "gfind",
+    style: opts.onFinding ? "cursor:pointer" : "",
+    onClick: opts.onFinding ? (e) => { e.stopPropagation(); opts.onFinding(node.id); } : null,
+  });
+  g.appendChild(svg("title", null, document.createTextNode(
+    list.map((f) => `[${f.rule}] ${f.message}`).join("\n"))));
+  g.appendChild(svg("circle", { class: "gfind-bg", cx, cy, r: 8 }));
+  g.appendChild(svg("text", { class: "gfind-txt", x: cx, y: cy + 4, "text-anchor": "middle" },
+    document.createTextNode(list.length > 1 ? String(list.length) : "!")));
+  root.appendChild(g);
+}
+
+/**
+ * Gruppiert die Befunde der letzten Validierung nach Knoten-Id.
+ *
+ * @returns {Object<string, Array<object>>} Knoten-Id -> Befunde (nur solche mit node_id).
+ */
+function findingsByNode() {
+  const out = {};
+  const v = state.validation;
+  if (!v || !v.findings) return out;
+  v.findings.forEach((f) => {
+    if (!f.node_id) return;
+    (out[f.node_id] = out[f.node_id] || []).push(f);
+  });
+  return out;
+}
+
+/** Befunde ohne Knotenbezug (modellweit, z. B. T2 kritischer Pfad). */
+function globalFindings() {
+  const v = state.validation;
+  if (!v || !v.findings) return [];
+  return v.findings.filter((f) => !f.node_id);
 }
 
 // Jump from the control flow into the data / resource view. Called from a node
@@ -1064,6 +1249,11 @@ function focusOrgAgent(agentId, unitId) {
 function attachPanZoom(wrap, svgEl) {
   const MIN = 0.2, MAX = 4;
   let scale = 1, tx = 0, ty = 0;
+  // Breite eines am rechten Rand liegenden Overlays (Modellieren-Sicht: die
+  // Schritt-Karte), die beim Einpassen und Zentrieren frei bleiben muss.
+  // Ohne diese Reserve zentriert die Canvas den gewaehlten Knoten exakt unter
+  // die Karte -- man bearbeitet dann einen Schritt, den man nicht sieht.
+  let reserveRight = 0;
 
   function apply() {
     svgEl.style.transformOrigin = "0 0";
@@ -1180,25 +1370,69 @@ function attachPanZoom(wrap, svgEl) {
     const vw = wrap.clientWidth, vh = wrap.clientHeight;
     if (!bw || !bh || !vw || !vh) return;
     const MARGIN = 16;
-    const fit = Math.min((vw - MARGIN * 2) / bw, (vh - MARGIN * 2) / bh);
+    const vwFree = Math.max(120, vw - reserveRight);
+    const fit = Math.min((vwFree - MARGIN * 2) / bw, (vh - MARGIN * 2) / bh);
     scale = Math.min(MAX, Math.max(MIN, Math.min(1, fit)));
-    tx = (vw - bw * scale) / 2 - bx * scale;
+    tx = (vwFree - bw * scale) / 2 - bx * scale;
     ty = (vh - bh * scale) / 2 - by * scale;
     apply();
   }
 
   wrap._panzoom = {
     fitToView,
-    centerOn(pos) {
+    /**
+     * Meldet die Breite eines rechts liegenden Overlays (Schritt-Karte), die
+     * beim Einpassen/Zentrieren frei bleiben soll. ``0`` hebt die Reserve auf
+     * (z. B. mobile Bodensheet-Darstellung, die den Canvas nicht seitlich
+     * verdeckt).
+     *
+     * @param {number} px Reservierte Breite in Bildschirmpixeln.
+     */
+    setReserve(px) { reserveRight = Math.max(0, px || 0); },
+    /**
+     * Rueckt den gewaehlten Knoten -- und optional einen zusaetzlichen Bereich,
+     * der zu ihm gehoert -- ins Bild.
+     *
+     * @param {{x:number,y:number,w:number,h:number}|null} pos Knotenrechteck in
+     *        Modellkoordinaten (darf fehlen, wenn nur ``region`` interessiert).
+     * @param {{x0:number,y0:number,x1:number,y1:number}|null} region Zusaetzlich
+     *        sichtbar zu haltender Bereich -- in der Modellieren-Sicht die
+     *        gestrichelte Datenherkunft samt ihrer **Quellknoten**.
+     *
+     * Ohne ``region`` bleibt es beim reinen Zentrieren im aktuellen Massstab.
+     * Mit ``region`` wird der Massstab bei Bedarf **verkleinert** (nie
+     * vergroessert, nie ueber 1), bis der ganze Bereich hineinpasst: Der
+     * Schreiber eines gelesenen Datenelements liegt meist mehrere hundert Pixel
+     * weiter links, ein Zentrieren allein auf den Leseknoten schob ihn samt
+     * Bogen und Beschriftung aus dem (overflow:hidden) Canvas -- die Herkunft
+     * war gezeichnet, aber unsichtbar.
+     */
+    centerOn(pos, region) {
       // Die viewBox kann fuer die Datenherkunft-Boegen nach oben erweitert
       // sein (negativer viewBox-Ursprung); der Knoten liegt dann um |vbY|
       // tiefer im Pixelraum. Diesen Versatz beim Zentrieren kompensieren,
       // sonst springt der gewaehlte Knoten aus der Mitte.
       const vb = svgEl.viewBox && svgEl.viewBox.baseVal;
-      const offY = vb ? vb.y : 0;
-      const cx = pos.x + pos.w / 2, cy = pos.y + pos.h / 2;
-      tx = wrap.clientWidth / 2 - cx * scale;
-      ty = wrap.clientHeight / 2 - (cy - offY) * scale;
+      const offX = vb ? vb.x : 0, offY = vb ? vb.y : 0;
+      const vw = wrap.clientWidth, vh = wrap.clientHeight;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      if (pos) {
+        x0 = pos.x; y0 = pos.y; x1 = pos.x + pos.w; y1 = pos.y + pos.h;
+      }
+      if (region) {
+        x0 = Math.min(x0, region.x0); y0 = Math.min(y0, region.y0);
+        x1 = Math.max(x1, region.x1); y1 = Math.max(y1, region.y1);
+      }
+      if (!(x1 > x0) || !(y1 > y0)) return;
+      const vwFree = Math.max(120, vw - reserveRight);
+      if (region && vw > 0 && vh > 0) {
+        const MARGIN = 24;
+        const fit = Math.min((vwFree - MARGIN * 2) / (x1 - x0), (vh - MARGIN * 2) / (y1 - y0));
+        scale = Math.min(scale, Math.max(MIN, Math.min(1, fit)));
+      }
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+      tx = vwFree / 2 - (cx - offX) * scale;
+      ty = vh / 2 - (cy - offY) * scale;
       apply();
     },
   };
@@ -1401,17 +1635,63 @@ async function saveAsTemplate() {
 // View: Modellieren
 // --------------------------------------------------------------------------
 
+/**
+ * Modellieren-Sicht: waehlt zwischen den beiden gleichwertigen Oberflaechen.
+ *
+ * * ``card``    -- Kontrollfluss als Arbeitsflaeche, alles zum gewaehlten
+ *                  Schritt in einer Karte daneben (Standard, siehe
+ *                  docs/Modellieren-im-Kontrollfluss-Konzept.md).
+ * * ``classic`` -- die urspruengliche Zwei-Spalten-Sicht mit Knoten-Inspektor
+ *                  und Bindungs-Palette rechts.
+ *
+ * Beide laufen ueber **dieselben** API-Aufrufe; die Wahl ist reine Darstellung
+ * und wird pro Browser gemerkt (localStorage ``modelUx``).
+ */
 function viewModel() {
-  const content = byId("content");
-  clear(content);
-  if (!state.schema) {
-    content.appendChild(emptyState("Kein Schema ausgewaehlt. Lege oben rechts ein neues Schema an."));
-    return;
-  }
-  const schema = state.schema;
-  const draft = isDraft(schema);
+  return modelUx() === "classic" ? viewModelClassic() : viewModelCard();
+}
 
-  const header = el("div", { class: "panel" },
+/** Aktive Modellier-Oberflaeche ("card" | "classic"); Default ist "card". */
+function modelUx() {
+  return state.modelUx === "classic" ? "classic" : "card";
+}
+
+/** Schaltet zwischen Karten- und klassischer Oberflaeche um (persistiert). */
+function setModelUx(ux) {
+  state.modelUx = ux === "classic" ? "classic" : "card";
+  localStorage.setItem("modelUx", state.modelUx);
+  // Vollbild ist an die Karten-Sicht gewoehnt (dort ist die Karte ein Overlay);
+  // beim Wechsel zurueckfallen, damit die klassische Sicht nie ohne ihre
+  // rechte Spalte dasteht.
+  state.graphMaximized = false;
+  render();
+}
+
+/**
+ * Umschalter zwischen den beiden Modellier-Oberflaechen (Kopfzeile).
+ *
+ * @returns {HTMLElement} Der Knopf.
+ */
+function modelUxToggle() {
+  const card = modelUx() === "card";
+  return el("button", {
+    class: "btn small ghost",
+    title: card
+      ? "Zur klassischen Ansicht wechseln (Knoten-Inspektor und Bindungs-Palette rechts)"
+      : "Zur Karten-Ansicht wechseln (Kontrollfluss über die volle Breite, alles am gewählten Schritt)",
+    onClick: () => setModelUx(card ? "classic" : "card"),
+  }, card ? "▤ Klassische Ansicht" : "▦ Karten-Ansicht");
+}
+
+/**
+ * Gemeinsame Kopfzeile beider Modellier-Oberflaechen (Name, Zustand, Aktionen).
+ *
+ * @param {object} schema Das aktuelle Schema.
+ * @param {boolean} draft Ob es sich um einen Entwurf handelt.
+ * @returns {HTMLElement} Das Kopf-Panel.
+ */
+function modelHeader(schema, draft) {
+  return el("div", { class: "panel" },
     el("div", { class: "panel-h" },
       el("h2", null, schema.name),
       el("span", { class: "sub" }, `v${schema.version}`),
@@ -1441,7 +1721,196 @@ function viewModel() {
         : el("button", { class: "btn small primary", onClick: () => { state.view = "run"; setActiveNav(); render(); } }, "Zur Ausf\u00FChrung"),
       draft && hasRole("modeler", "admin")
         ? el("button", { class: "btn small", onClick: startTestInstance, title: "Test-Instanz dieses Entwurfs starten und im 4-Quadranten-Cockpit durchspielen" }, "\u2697 Pr\u00FCfinstanz")
-        : null));
+        : null,
+      modelUxToggle()));
+}
+
+/**
+ * Modellieren im Kontrollfluss: der Graph nutzt die volle Breite, die
+ * Schritt-Karte erscheint als Overlay am gewaehlten Schritt.
+ */
+function viewModelCard() {
+  const content = byId("content");
+  // Der Fokus im Bezeichnungsfeld der Schritt-Karte muss VOR dem Leeren
+  // gesichert werden: die Sicht baut ihr DOM bei jedem Rendern komplett neu auf,
+  // und ein Hintergrund-Rendern (Tour-Tick) mitten im Tippen wuerde sonst Fokus
+  // und Schreibmarke verschlucken.
+  const nameFocus = captureCardNameFocus();
+  clear(content);
+  if (!state.schema) {
+    content.appendChild(emptyState("Kein Schema ausgewaehlt. Lege oben rechts ein neues Schema an."));
+    return;
+  }
+  const schema = state.schema;
+  const draft = isDraft(schema);
+  const header = modelHeader(schema, draft);
+
+  // Datenherkunft-Ueberlagerung: ein gezielt hervorgehobenes Element hat
+  // Vorrang, sonst die Lesestellen des gewaehlten Knotens.
+  const provenance = draft || state.selectedNode || state.dataElemFocus
+    ? computeProvenance(schema, { selectedNode: state.selectedNode, dataElemFocus: state.dataElemFocus })
+    : [];
+
+  const graph = renderGraph(schema, {
+    onPlus: draft ? openInsertModal : null,
+    selectedId: state.selectedNode,
+    onSelectNode: (id) => { state.selectedNode = id; state.cardFocusSection = null; render(); },
+    // Ein Klick auf ein Knoten-Badge oeffnet den passenden Abschnitt der
+    // Schritt-Karte -- am Element, statt in eine andere Sicht zu wechseln.
+    // Der Weg in die Vollansicht bleibt ueber die Karte erhalten.
+    onOpenData: (id) => openCardSection(id, "data"),
+    onOpenStaff: (id) => openCardSection(id, "staff"),
+    onNodeAction: draft ? nodeRingAction : null,
+    findings: findingsByNode(),
+    onFinding: (id) => openCardSection(id, "findings"),
+    provenance,
+  });
+
+  // Kontrollfluss-Panel mit Maximieren-Knopf oben rechts. Im Vollbild wird das
+  // Panel per CSS-Klasse ``graph-max`` zu einem bildschirmfuellenden Overlay
+  // (zum gemeinsamen Diskutieren); der Knopf schaltet dann auf "verlassen".
+  const maxBtn = el("button", {
+    class: "btn small ghost graph-max-btn",
+    title: state.graphMaximized ? "Vollbild verlassen (Esc)" : "Kontrollfluss maximieren",
+    onClick: () => { state.graphMaximized = !state.graphMaximized; render(); },
+  }, state.graphMaximized ? "× Verkleinern" : "⛶ Vollbild");
+  // Der Kontrollfluss ist die Arbeitsflaeche: er nutzt die volle Breite, die
+  // Schritt-Karte liegt als Overlay darueber und erscheint nur bei Auswahl.
+  const graphBody = el("div", { class: "panel-b graph-body" }, graph);
+  const card = stepCard(schema, draft);
+  if (card) graphBody.appendChild(card);
+  const empty = canvasEmptyState(schema, draft);
+  if (empty) graphBody.appendChild(empty);
+  const cfPanel = el("div", { class: "panel graph-panel model-canvas" + (state.graphMaximized ? " graph-max" : "") },
+    el("div", { class: "panel-h" },
+      el("h2", null, "Kontrollfluss"),
+      el("span", { class: "spacer", style: "flex:1" }),
+      maxBtn),
+    graphBody,
+    modelStatusBar(schema, draft));
+
+  content.appendChild(header);
+  content.appendChild(cfPanel);
+
+  // Nach dem (Neu-)Rendern den ausgewaehlten Knoten in die Mitte der scrollbaren
+  // Canvas ruecken, statt nach links auf den Start zurueckzuspringen -- und dabei
+  // die gestrichelte Datenherkunft des Knotens mit ins Bild holen. Ohne diesen
+  // zweiten Bezugspunkt zentrierte die Canvas allein auf den Leseknoten und schob
+  // die Schreibseite (und damit den ganzen Bogen) aus dem sichtbaren Ausschnitt:
+  // die Pfeile waren gezeichnet, aber nicht zu sehen.
+  const focusPos = state.selectedNode ? layoutSchema(schema).pos[state.selectedNode] : null;
+  if (focusPos || graph._provBounds) {
+    requestAnimationFrame(() => {
+      reserveCardWidth(graph, card);
+      centerCanvasOnNode(graph, focusPos, graph._provBounds);
+    });
+  } else {
+    requestAnimationFrame(() => reserveCardWidth(graph, card));
+  }
+  applyCardFocus(content, nameFocus);
+}
+
+/**
+ * Meldet der Canvas, wie viel Breite die Schritt-Karte rechts belegt.
+ *
+ * Erst nach dem Einhaengen ins Dokument steht die tatsaechliche Breite fest
+ * (sie haengt am CSS). Deckt die Karte fast die ganze Canvas ab, liegt die
+ * mobile Bodensheet-Darstellung vor -- dann wird **keine** seitliche Reserve
+ * gesetzt, weil die Karte dort unten und nicht rechts liegt.
+ *
+ * @param {HTMLElement} wrap Die Canvas (.canvas-wrap) mit ihrem Pan/Zoom-Controller.
+ * @param {HTMLElement|null} card Die Schritt-Karte, falls sichtbar.
+ */
+function reserveCardWidth(wrap, card) {
+  if (!wrap || !wrap._panzoom || !wrap._panzoom.setReserve) return;
+  if (!card || !card.getBoundingClientRect) { wrap._panzoom.setReserve(0); return; }
+  const cw = card.getBoundingClientRect().width;
+  const vw = wrap.clientWidth || 0;
+  wrap._panzoom.setReserve(vw && cw > vw * 0.75 ? 0 : cw + 12);
+}
+
+/**
+ * Statusleiste unter dem Kontrollfluss: Freigabe-Ampel, modellweite Befunde
+ * (die ohne Knotenbezug, z. B. T2 kritischer Pfad) und der Hinweistext.
+ *
+ * Ersetzt das frühere Panel „Korrektheit" der rechten Spalte. Knotenbezogene
+ * Befunde stehen jetzt **am Knoten** (siehe renderNodeFindingMark) und in der
+ * Schritt-Karte -- hier bleibt, was zu keinem einzelnen Schritt gehoert.
+ *
+ * @param {object} schema Das aktuelle Schema.
+ * @param {boolean} draft Ob das Schema im Entwurf ist.
+ * @returns {HTMLElement} Die Leiste.
+ */
+function modelStatusBar(schema, draft) {
+  const v = state.validation;
+  const globals = globalFindings();
+  const bar = el("div", { class: "model-status", "data-tour": "model.findings" });
+  bar.appendChild(v && v.correct
+    ? el("span", { class: "pill pill-green" }, "✓ korrekt")
+    : el("span", { class: "pill pill-red" }, `${v ? v.findings.length : 0} Befund(e)`));
+  const focusElem = state.dataElemFocus && schema.data_elements[state.dataElemFocus];
+  const text = focusElem
+    ? el("span", null,
+        "Datenherkunft von „" + focusElem.name + "“: gestrichelte Linien zeigen, wo geschrieben → wo gelesen wird. ",
+        el("a", { href: "#", onClick: (e) => { e.preventDefault(); state.dataElemFocus = null; render(); } }, "Hervorhebung löschen"))
+    : el("span", null, draft
+      ? "Einen Schritt anklicken: die Karte daneben trägt alles, was an ihm getan werden kann. „+“ an einer Kante oder am Schritt fügt einen weiteren ein. Unzulässiges weist der Kern ab."
+      : "Schema ist freigegeben und damit unveränderlich. Einen Schritt anklicken zeigt seine Bindungen und – gestrichelt – woher seine gelesenen Daten stammen. Zum Bearbeiten eine neue Revision anlegen.");
+  bar.appendChild(el("span", { class: "model-status-txt" }, text));
+  // Die Tastaturwege (§5.2) findet ohne Hinweis niemand; deshalb stehen sie
+  // hier, wo sie beim Modellieren im Blick sind (mobil ausgeblendet).
+  bar.appendChild(el("span", { class: "model-status-key",
+    title: "Pfeiltasten bewegen die Auswahl im Kontrollfluss (← → entlang des Ablaufs, ↑ ↓ zwischen Zweigen), Enter springt in die Karte, Esc hebt die Auswahl auf" },
+    "← → Schritt · ↑ ↓ Zweig · ↵ Karte · Esc abwählen"));
+  globals.forEach((f) => bar.appendChild(
+    el("span", { class: "model-status-find", title: f.message },
+      el("span", { class: "rule" }, f.rule), f.message)));
+  return bar;
+}
+
+/**
+ * Einstiegskarte fuer einen noch leeren Prozess (nur Start → Ende).
+ *
+ * Der Weg ist derselbe wie sonst (``openInsertModal`` auf der einzigen Kante),
+ * nur auffindbar: Vor der Umstellung stand hier eine leere Flaeche mit einem
+ * kleinen „+“ auf der einzigen Verbindungslinie.
+ *
+ * @param {object} schema Das Schema.
+ * @param {boolean} draft Ob bearbeitet werden darf.
+ * @returns {HTMLElement|null} Die Karte, oder null (Prozess ist nicht leer).
+ */
+function canvasEmptyState(schema, draft) {
+  if (!draft || activitiesOf(schema).length) return null;
+  const start = Object.values(schema.nodes || {}).find((n) => n.type === NODE_TYPE.START);
+  if (!start) return null;
+  return el("div", { class: "canvas-empty" },
+    el("div", { class: "canvas-empty-t" }, "Der Prozess ist noch leer"),
+    el("div", { class: "canvas-empty-b" },
+      "Zwischen Start und Ende passiert bisher nichts. Der erste Schritt legt fest, womit der Vorgang beginnt."),
+    el("button", { class: "btn primary", onClick: () => openInsertModal(start.id) }, "Ersten Schritt anlegen"));
+}
+
+// --------------------------------------------------------------------------
+// Modellieren (klassisch): zwei Spalten -- Kontrollfluss links, Knoten-
+// Inspektor + Bindungs-Palette + Korrektheit + Schema-Evolution rechts.
+//
+// Bleibt bewusst **gleichwertig neben** der Karten-Sicht bestehen (Umschalter
+// in der Kopfzeile): Beide bedienen dieselben API-Aufrufe, tragen also keine
+// eigene Korrektheitslogik, und wer die gewohnte Palette bevorzugt, verliert
+// nichts. Aenderungen an einer Bindungs-/Knoten-Operation wirken automatisch in
+// beiden Sichten, weil sie dieselben Funktionen aufrufen.
+// --------------------------------------------------------------------------
+
+function viewModelClassic() {
+  const content = byId("content");
+  clear(content);
+  if (!state.schema) {
+    content.appendChild(emptyState("Kein Schema ausgewaehlt. Lege oben rechts ein neues Schema an."));
+    return;
+  }
+  const schema = state.schema;
+  const draft = isDraft(schema);
+  const header = modelHeader(schema, draft);
 
   // Datenherkunft-Ueberlagerung: ein in der Palette gewaehltes Element hat
   // Vorrang, sonst die Lesestellen des gewaehlten Knotens.
@@ -1462,11 +1931,11 @@ function viewModel() {
   const hint = el("div", { class: "panel-b muted", style: "font-size:12px" },
     focusElem
       ? el("span", null,
-          "Datenherkunft von \u201E" + focusElem.name + "\u201C: gestrichelte Linien zeigen, wo geschrieben \u2192 wo gelesen wird. ",
-          el("a", { href: "#", onClick: (e) => { e.preventDefault(); state.dataElemFocus = null; render(); } }, "Hervorhebung l\u00F6schen"))
+          "Datenherkunft von „" + focusElem.name + "“: gestrichelte Linien zeigen, wo geschrieben → wo gelesen wird. ",
+          el("a", { href: "#", onClick: (e) => { e.preventDefault(); state.dataElemFocus = null; render(); } }, "Hervorhebung löschen"))
       : draft
-        ? "Gef\u00FChrtes Modellieren: \u201E+\u201C an einer Kante f\u00FCgt einen Schritt ein. Einen Schritt anklicken, dann rechts unter \u201EBinden\u201C ein Datenelement/eine Ressource mit \u2295 zuweisen. Unzul\u00E4ssiges weist der Kern ab."
-        : "Schema ist freigegeben und damit unver\u00E4nderlich. Erzeuge eine Revision \u00FCber die Ausf\u00FChrungs-/Monitoring-Sicht oder starte Instanzen.");
+        ? "Geführtes Modellieren: „+“ an einer Kante fügt einen Schritt ein. Einen Schritt anklicken, dann rechts unter „Binden“ ein Datenelement/eine Ressource mit ⊕ zuweisen. Ein angeklickter Schritt zeigt außerdem gestrichelt, woher seine gelesenen Daten stammen. Unzulässiges weist der Kern ab."
+        : "Schema ist freigegeben und damit unveränderlich. Einen Schritt anklicken zeigt gestrichelt, woher seine gelesenen Daten stammen; ein Klick auf ein Datenelement rechts zeigt alle seine Lesestellen. Erzeuge eine Revision über die Ausführungs-/Monitoring-Sicht oder starte Instanzen.");
 
   // Kontrollfluss-Panel mit Maximieren-Knopf oben rechts. Im Vollbild wird das
   // Panel per CSS-Klasse ``graph-max`` zu einem bildschirmfuellenden Overlay
@@ -1490,10 +1959,14 @@ function viewModel() {
     el("div", null, nodeInspectorPanel(), bindingPalette(schema, draft), findingsPanel(), revisionPanel())));
 
   // Nach dem (Neu-)Rendern den ausgewaehlten Knoten in die Mitte der scrollbaren
-  // Canvas ruecken, statt nach links auf den Start zurueckzuspringen.
-  if (state.selectedNode) {
-    const pos = layoutSchema(schema).pos[state.selectedNode];
-    if (pos) requestAnimationFrame(() => centerCanvasOnNode(graph, pos));
+  // Canvas ruecken, statt nach links auf den Start zurueckzuspringen -- und dabei
+  // die gestrichelte Datenherkunft des Knotens mit ins Bild holen. Ohne diesen
+  // zweiten Bezugspunkt zentrierte die Canvas allein auf den Leseknoten und schob
+  // die Schreibseite (und damit den ganzen Bogen) aus dem sichtbaren Ausschnitt:
+  // die Pfeile waren gezeichnet, aber nicht zu sehen.
+  const focusPos = state.selectedNode ? layoutSchema(schema).pos[state.selectedNode] : null;
+  if (focusPos || graph._provBounds) {
+    requestAnimationFrame(() => centerCanvasOnNode(graph, focusPos, graph._provBounds));
   }
 }
 
@@ -1663,6 +2136,829 @@ function resourcePaletteTab(schema, draft, target) {
   return box;
 }
 
+// --------------------------------------------------------------------------
+// Modellieren im Kontrollfluss: die Schritt-Karte
+//
+// Alles, was an einem Schritt getan werden kann, steht in EINER Karte, die zum
+// gewaehlten Schritt gehoert und mit ihm verschwindet. Sie traegt -- wie die
+// klassische Sicht -- keine Korrektheitslogik: jeder Knopf ruft dieselbe
+// Funktion und damit denselben Endpunkt wie zuvor, der Kern validiert vor dem
+// Commit. Konzept: docs/Modellieren-im-Kontrollfluss-Konzept.md
+// --------------------------------------------------------------------------
+
+// Abschnitte, die ohne eigene Wahl aufgeklappt sind: das, was der Kern fuer die
+// Freigabe braucht. Alles Weitere (Maske, Zeit, Mail, Klassifikation) bleibt
+// eingeklappt, bis es gebraucht wird.
+const CARD_DEFAULT_OPEN = ["findings", "flow", "data", "staff", "service"];
+
+/**
+ * Liest die aufgeklappten Abschnitte (localStorage), mit robustem Rueckfall.
+ *
+ * @returns {string[]} Ids der aufgeklappten Abschnitte.
+ */
+function readCardOpen() {
+  if (Array.isArray(state.cardOpen)) return state.cardOpen;
+  try {
+    const raw = JSON.parse(localStorage.getItem("cardOpen") || "null");
+    state.cardOpen = Array.isArray(raw) ? raw : CARD_DEFAULT_OPEN.slice();
+  } catch (_e) {
+    state.cardOpen = CARD_DEFAULT_OPEN.slice();
+  }
+  return state.cardOpen;
+}
+
+/** Ist der Abschnitt ``id`` aufgeklappt? */
+function cardSecOpen(id) { return readCardOpen().includes(id); }
+
+/** Merkt die aufgeklappten Abschnitte im Browser. */
+function persistCardOpen() {
+  try { localStorage.setItem("cardOpen", JSON.stringify(readCardOpen())); } catch (_e) { /* Privatmodus */ }
+}
+
+/** Klappt einen Abschnitt auf/zu und merkt die Wahl. */
+function toggleCardSec(id) {
+  const open = readCardOpen();
+  state.cardOpen = open.includes(id) ? open.filter((x) => x !== id) : open.concat([id]);
+  persistCardOpen();
+  render();
+}
+
+/**
+ * Waehlt einen Schritt und oeffnet gezielt einen Abschnitt seiner Karte.
+ *
+ * Einstiegspunkt fuer die Knoten-Badges, den Befund-Marker und den Schnellring:
+ * Statt in eine andere Sicht zu wechseln, springt die Bedienung an genau die
+ * Stelle der Karte, die gemeint ist.
+ *
+ * @param {string|null} nodeId Zu waehlender Knoten (null = Auswahl behalten).
+ * @param {string} sec Abschnitts-Id (siehe CARD_DEFAULT_OPEN) oder "name".
+ */
+function openCardSection(nodeId, sec) {
+  if (nodeId) state.selectedNode = nodeId;
+  if (sec && sec !== "name" && !cardSecOpen(sec)) {
+    state.cardOpen = readCardOpen().concat([sec]);
+    persistCardOpen();
+  }
+  state.cardFocusSection = sec;
+  render();
+}
+
+/**
+ * Aktion des Schnellrings am Knoten (siehe renderNodeRing).
+ *
+ * Jede Aktion fuehrt auf einen bereits bestehenden Weg -- „danach einfuegen"
+ * ist derselbe Dialog wie das „+" auf der Kante, nur von einem anderen
+ * Ausloeser.
+ *
+ * @param {string} nodeId Der Knoten am Ring.
+ * @param {string} key Aktions-Schluessel aus nodeRingActions.
+ */
+function nodeRingAction(nodeId, key) {
+  if (key === "insert") { openInsertModal(nodeId); return; }
+  if (key === "rename") { openCardSection(nodeId, "name"); return; }
+  if (key === "bind") { openCardSection(nodeId, "data"); return; }
+  if (key === "delete") { deleteNode(nodeId); return; }
+  if (key === "empty-branch") { removeEmptyBranch(nodeId); }
+}
+
+// Pfeiltaste -> Himmelsrichtung fuer die Tastaturnavigation im Kontrollfluss.
+const ARROW_DIRS = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" };
+
+/**
+ * Nachbarknoten in einer Himmelsrichtung bestimmen -- die Grundlage der
+ * Tastaturnavigation im Kontrollfluss (Konzept §5.2, Stufe U4).
+ *
+ * Rein rechnend und layout-agnostisch: gearbeitet wird auf den Kastenmitten,
+ * die das Layout liefert, nicht auf der Kantenliste. Dadurch funktioniert die
+ * Navigation auch im gestapelten Rueckfall-Layout und erreicht auch Knoten, die
+ * zwar sichtbar nebeneinander liegen, aber nicht direkt verbunden sind -- etwa
+ * die Geschwister-Aeste einer Verzweigung, um die es bei ``↑``/``↓`` gerade
+ * geht.
+ *
+ * Vorgehen: Kandidaten sind alle Knoten in der gewuenschten Richtung. Gewaehlt
+ * wird zuerst nach dem Abstand auf der Bewegungsachse (das Spine-Layout legt
+ * Knoten auf ein diskretes Raster aus Spalten und Bahnen, „naechste Spalte"
+ * bzw. „naechste Bahn" ist also wohldefiniert) und erst innerhalb dieses
+ * Abstands nach dem geringsten Versatz auf der Querachse. ``→`` folgt damit dem
+ * Ablauf und steigt an einem Split in den Ast ab, statt den ganzen Block zu
+ * ueberspringen.
+ *
+ * ``↑``/``↓`` bekommen zusaetzlich eine Schranke: es zaehlen nur Knoten, die
+ * sich mit dem aktuellen **waagerecht ueberdecken**. Die Taste wechselt so die
+ * Bahn an Ort und Stelle (Geschwister-Ast), und ohne Nachbarbahn passiert
+ * nichts -- ohne diese Schranke landete man vom Spine aus in einem Zweig weit
+ * hinter oder vor der aktuellen Stelle, weil die naechste Bahn nach oben dort
+ * ueberall verlaeuft.
+ *
+ * @param {object} layout Ergebnis von layoutSchema (``{pos: {id: {x,y,w,h}}}``).
+ * @param {string|null} fromId Aktuell gewaehlter Knoten. Ohne Auswahl (oder bei
+ *   einer Auswahl, die es nicht mehr gibt) liefert jede Richtung den
+ *   Einstiegsknoten links oben -- in einem wohlgeformten Modell der Start.
+ * @param {"left"|"right"|"up"|"down"} dir Bewegungsrichtung.
+ * @returns {string|null} Id des Nachbarn, oder null, wenn es in der Richtung
+ *   keinen gibt (dann bleibt die Auswahl, wo sie ist).
+ */
+function graphNeighbor(layout, fromId, dir) {
+  const pos = (layout && layout.pos) || {};
+  const ids = Object.keys(pos);
+  if (!ids.length) return null;
+  const cx = (id) => pos[id].x + pos[id].w / 2;
+  const cy = (id) => pos[id].y + pos[id].h / 2;
+  if (!fromId || !pos[fromId]) {
+    return ids.slice().sort((a, b) => (cx(a) - cx(b)) || (cy(a) - cy(b)))[0];
+  }
+  const vertical = dir === "up" || dir === "down";
+  const forward = dir === "right" || dir === "down" ? 1 : -1;
+  const main = vertical ? cy : cx;    // Achse, auf der bewegt wird
+  const cross = vertical ? cx : cy;   // Achse, die den Gleichstand bricht
+  // Knoten derselben Spalte/Bahn liegen exakt gleich; EPS faengt nur
+  // Rundungsreste ab und haelt „gleiche Spalte" von „naechste Spalte" getrennt.
+  const EPS = 1;
+  const base = main(fromId), baseCross = cross(fromId);
+  let best = null;
+  ids.forEach((id) => {
+    if (id === fromId) return;
+    const step = (main(id) - base) * forward;
+    if (step <= EPS) return;                       // liegt nicht in Bewegungsrichtung
+    const off = Math.abs(cross(id) - baseCross);
+    // Bahnwechsel nur senkrecht ueber-/untereinander (siehe oben).
+    if (vertical && off >= (pos[fromId].w + pos[id].w) / 2 - EPS) return;
+    if (!best || step < best.step - EPS || (step - best.step <= EPS && off < best.off)) {
+      best = { id, step, off };
+    }
+  });
+  return best ? best.id : null;
+}
+
+/**
+ * Auswahl im Kontrollfluss per Tastatur bewegen (Konzept §5.2, Stufe U4).
+ *
+ * Gemeinsame Operation **beider** Modellier-Oberflaechen (siehe CLAUDE.md): sie
+ * setzt nur ``state.selectedNode``; die jeweilige Sicht zeichnet sich neu und
+ * rueckt den Knoten ueber ``centerCanvasOnNode`` wieder ins Bild -- inklusive
+ * des Kartenrands, damit die Schritt-Karte den frisch gewaehlten Knoten nicht
+ * verdeckt.
+ *
+ * @param {"left"|"right"|"up"|"down"} dir Bewegungsrichtung.
+ * @returns {boolean} true, wenn sich die Auswahl geaendert hat (dann darf der
+ *   Aufrufer die Taste als verbraucht behandeln und das Scrollen unterdruecken).
+ */
+function moveSelection(dir) {
+  const schema = state.schema;
+  if (!schema || !Object.keys(schema.nodes || {}).length) return false;
+  const next = graphNeighbor(layoutSchema(schema), state.selectedNode, dir);
+  if (!next || next === state.selectedNode) return false;
+  state.selectedNode = next;
+  state.cardFocusSection = null;   // neuer Schritt -> Karte oben beginnen
+  render();
+  return true;
+}
+
+/**
+ * Fokus aus dem Kontrollfluss in die Schritt-Karte holen (Enter, §5.2).
+ *
+ * Bevorzugt das Bezeichnungsfeld (der haeufigste naechste Handgriff), sonst das
+ * erste Bedienelement der Karte. Ohne Karte -- klassische Sicht, keine Auswahl
+ * -- passiert nichts, die Taste bleibt dann beim Browser.
+ *
+ * @returns {boolean} true, wenn ein Element den Fokus bekommen hat.
+ */
+function focusStepCard() {
+  const card = document.querySelector(".step-card");
+  if (!card) return false;
+  const name = byId("card-name-input");
+  if (name && name.focus) { name.focus(); if (name.select) name.select(); return true; }
+  const first = card.querySelector("button, input, select, textarea, a[href]");
+  if (first && first.focus) { first.focus(); return true; }
+  return false;
+}
+
+/**
+ * Ob die Taste gerade einem Eingabefeld gehoert.
+ *
+ * Trennt Tastenwege der Oberflaeche vom Tippen: waehrend in einem Feld
+ * geschrieben wird, darf weder Escape die Karte wegraeumen noch eine Pfeiltaste
+ * die Schreibmarke stehlen.
+ *
+ * @returns {boolean} true, wenn der Fokus in einem Text-/Auswahlfeld steht.
+ */
+function isTypingTarget() {
+  const a = document.activeElement;
+  if (!a) return false;
+  if (a.isContentEditable) return true;
+  const tag = a.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+/**
+ * Sichert Fokus und Schreibmarke des Bezeichnungsfeldes vor einem Neuaufbau.
+ *
+ * @returns {{nodeId: string, start: number, end: number}|null} Merker oder null.
+ */
+function captureCardNameFocus() {
+  const inp = byId("card-name-input");
+  if (!inp || document.activeElement !== inp) return null;
+  return {
+    nodeId: state.selectedNode,
+    start: inp.selectionStart != null ? inp.selectionStart : inp.value.length,
+    end: inp.selectionEnd != null ? inp.selectionEnd : inp.value.length,
+  };
+}
+
+/**
+ * Stellt nach dem Neuaufbau Fokus/Schreibmarke wieder her und rollt einen
+ * gezielt geoeffneten Abschnitt in den sichtbaren Bereich der Karte.
+ *
+ * @param {HTMLElement} content Der neu aufgebaute Inhaltsbereich.
+ * @param {{nodeId: string, start: number, end: number}|null} nameFocus Merker.
+ */
+function applyCardFocus(content, nameFocus) {
+  const wanted = state.cardFocusSection;
+  state.cardFocusSection = null;
+  const focusName = (nameFocus && nameFocus.nodeId === state.selectedNode) || wanted === "name";
+  if (focusName) {
+    const inp = byId("card-name-input");
+    if (inp) {
+      inp.focus();
+      if (nameFocus && nameFocus.nodeId === state.selectedNode) {
+        try { inp.setSelectionRange(nameFocus.start, nameFocus.end); } catch (_e) { /* kein Textfeld */ }
+      } else {
+        inp.select();
+      }
+    }
+  }
+  if (wanted && wanted !== "name") {
+    const sec = content.querySelector('.card-sec[data-sec="' + wanted + '"]');
+    if (sec && sec.scrollIntoView) requestAnimationFrame(() => sec.scrollIntoView({ block: "nearest" }));
+  }
+}
+
+/**
+ * Ein aufklappbarer Abschnitt der Schritt-Karte.
+ *
+ * @param {string} id Abschnitts-Id (Merker fuer auf-/zugeklappt).
+ * @param {string} title Ueberschrift.
+ * @param {string|null} summary Kurzstand rechts in der Kopfzeile (z. B. "2").
+ * @param {function(HTMLElement): void} fill Baut den Koerper (nur wenn offen).
+ * @param {string|null} anchor Optionaler ``data-tour``-Anker fuer die Tour.
+ * @returns {HTMLElement} Der Abschnitt.
+ */
+function cardSection(id, title, summary, fill, anchor) {
+  const open = cardSecOpen(id);
+  const head = el("button", {
+    class: "card-sec-h" + (open ? " open" : ""),
+    type: "button",
+    onClick: () => toggleCardSec(id),
+    title: open ? "Abschnitt zuklappen" : "Abschnitt aufklappen",
+  },
+    el("span", { class: "card-sec-caret" }, open ? "▾" : "▸"),
+    el("span", { class: "card-sec-t" }, title),
+    el("span", { class: "spacer", style: "flex:1" }),
+    summary ? el("span", { class: "card-sec-sum" }, summary) : null);
+  if (anchor) head.setAttribute("data-tour", anchor);
+  const sec = el("section", { class: "card-sec", "data-sec": id }, head);
+  if (open) {
+    const body = el("div", { class: "card-sec-b" });
+    fill(body);
+    sec.appendChild(body);
+  }
+  return sec;
+}
+
+/**
+ * Freigabe-Ampel eines Schritts -- eine **Anzeige**, keine Pruefung.
+ *
+ * Rot = der Kern beanstandet diesen Knoten, gelb = keine Beanstandung, aber
+ * etwas fuer die Freigabe Noetiges fehlt noch, gruen = aus Sicht der Karte
+ * vollstaendig. Verbindlich ist ausschliesslich der Kern; die gelbe Stufe ist
+ * bewusst nur ein Hinweis und blockiert nie eine Aktion.
+ *
+ * @param {object} schema Das Schema.
+ * @param {object} node Der Knoten.
+ * @param {Array} findings Befunde dieses Knotens.
+ * @returns {{cls: string, text: string}|null} Ampel oder null (kein Arbeitsschritt).
+ */
+function stepReadiness(schema, node, findings) {
+  if (node.type !== NODE_TYPE.ACTIVITY && node.type !== NODE_TYPE.SUBPROCESS) return null;
+  if (findings.length) return { cls: "red", text: findings.length + " Befund(e) des Kerns an diesem Schritt" };
+  const missing = [];
+  if (node.type === NODE_TYPE.ACTIVITY) {
+    const sb = (schema.service_bindings || {})[node.id];
+    if (!sb) missing.push("Dienst");
+    // Ein automatischer Schritt braucht keinen Bearbeiter.
+    if (!(schema.staff_rules || {})[node.id] && !(sb && sb.automatic)) missing.push("Bearbeiter");
+  } else if (!(schema.sub_process_bindings || {})[node.id]) {
+    missing.push("Submodell");
+  }
+  return missing.length
+    ? { cls: "amber", text: "Für die Freigabe fehlt noch: " + missing.join(", ") }
+    : { cls: "green", text: "Aus Sicht dieser Karte vollständig" };
+}
+
+/**
+ * Die Schritt-Karte des gewaehlten Knotens (Overlay ueber dem Kontrollfluss).
+ *
+ * @param {object} schema Das aktuelle Schema.
+ * @param {boolean} draft Ob bearbeitet werden darf (ENTWURF).
+ * @returns {HTMLElement|null} Die Karte, oder null ohne Auswahl.
+ */
+function stepCard(schema, draft) {
+  const node = state.selectedNode ? schema.nodes[state.selectedNode] : null;
+  if (!node) return null;
+  const findings = findingsByNode()[node.id] || [];
+  const card = el("aside", {
+    class: "step-card",
+    "data-tour": "model.palette",
+    "aria-label": "Schritt " + nodeCaption(node),
+  });
+  card.appendChild(stepCardHead(schema, node, draft, findings));
+  const body = el("div", { class: "step-card-b" });
+  if (findings.length) {
+    body.appendChild(cardSection("findings", "Befunde", String(findings.length), (b) => {
+      findings.forEach((f) => b.appendChild(el("div", { class: "finding" },
+        el("span", { class: "rule" }, f.rule), el("span", null, f.message))));
+    }));
+  }
+  if (!draft) {
+    body.appendChild(el("div", { class: "card-note" },
+      "Schema ist freigegeben – zum Bearbeiten eine neue Revision anlegen (Knoten-IDs bleiben erhalten)."));
+    body.appendChild(newRevisionAction());
+  }
+  const isStep = node.type === NODE_TYPE.ACTIVITY || node.type === NODE_TYPE.SUBPROCESS;
+  if (isStep) {
+    if (draft) body.appendChild(cardSection("flow", "Ablauf", null, (b) => cardFlowSection(b, schema, node)));
+    body.appendChild(cardSection("data", "Daten", cardDataSummary(schema, node),
+      (b) => cardDataSection(b, schema, node, draft), "model.tab.data"));
+    if (node.type === NODE_TYPE.ACTIVITY) {
+      body.appendChild(cardSection("staff", "Bearbeiter", null,
+        (b) => cardStaffSection(b, schema, node, draft), "model.tab.res"));
+      body.appendChild(cardSection("service", "Dienst", null, (b) => cardServiceSection(b, schema, node, draft)));
+      body.appendChild(cardSection("form", "Eingabemaske", null, (b) => cardFormSection(b, schema, node, draft)));
+    } else {
+      body.appendChild(cardSection("sub", "Submodell", null, (b) => cardSubprocessSection(b, schema, node, draft)));
+    }
+    body.appendChild(cardSection("time", "Zeit & Priorität", null, (b) => cardTimeSection(b, schema, node, draft)));
+    if (node.type === NODE_TYPE.ACTIVITY) {
+      body.appendChild(cardSection("mail", "Benachrichtigung", null, (b) => cardMailSection(b, schema, node, draft)));
+    }
+    body.appendChild(cardSection("class", "Klassifikation", null, (b) => cardValueClassSection(b, schema, node, draft)));
+  } else if (SPLIT_TYPES.has(node.type)) {
+    body.appendChild(cardSection("branches", "Verzweigung", null, (b) => cardBranchSection(b, schema, node, draft)));
+  } else {
+    body.appendChild(el("div", { class: "card-note" },
+      node.type === NODE_TYPE.AND_JOIN || node.type === NODE_TYPE.XOR_JOIN
+        ? "Join-Knoten werden über ihren öffnenden Split entfernt."
+        : "Start und Ende sind fester Bestandteil des Modells."));
+  }
+  card.appendChild(body);
+  return card;
+}
+
+/** Kopf der Schritt-Karte: Typ, Bezeichnung (bearbeitbar), Ampel, Schliessen. */
+function stepCardHead(schema, node, draft, findings) {
+  const head = el("div", { class: "step-card-h" });
+  head.appendChild(el("span", { class: "pill pill-gray" }, node.type));
+  const renamable = draft && (node.type === NODE_TYPE.ACTIVITY || node.type === NODE_TYPE.SUBPROCESS);
+  if (renamable) {
+    const input = el("input", { type: "text", id: "card-name-input", value: node.label || "",
+      title: "Bezeichnung – Enter übernimmt" });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") renameNode(node.id, input.value); });
+    head.appendChild(input);
+    head.appendChild(el("button", { class: "btn small", title: "Bezeichnung übernehmen",
+      onClick: () => renameNode(node.id, input.value) }, "✓"));
+  } else {
+    head.appendChild(el("strong", { class: "step-card-name" }, nodeCaption(node)));
+  }
+  const ready = stepReadiness(schema, node, findings);
+  if (ready) head.appendChild(el("span", { class: "step-dot step-dot-" + ready.cls, title: ready.text }));
+  head.appendChild(el("button", { class: "step-card-x", title: "Auswahl aufheben (Esc)",
+    onClick: () => { state.selectedNode = null; render(); } }, "✕"));
+  return head;
+}
+
+/** Abschnitt „Ablauf": Schritt danach einfuegen, entfernen, umwandeln. */
+function cardFlowSection(body, schema, node) {
+  body.appendChild(el("div", { class: "card-hint" },
+    "Neue Schritte entstehen immer relativ zu einem bestehenden – so kann kein loses Ende entstehen."));
+  const row = el("div", { class: "row", style: "gap:8px" },
+    el("button", { class: "btn small primary", onClick: () => openInsertModal(node.id) }, "+ Schritt danach"),
+    el("button", { class: "btn small danger", onClick: () => deleteNode(node.id) }, "Entfernen"));
+  body.appendChild(row);
+  if (node.type === NODE_TYPE.ACTIVITY) {
+    body.appendChild(el("div", { class: "card-hint", style: "margin-top:10px" },
+      "Wiederverwendung: diesen Schritt durch ein freigegebenes Submodell aus der Bibliothek ersetzen – inkl. Datenübergabe."));
+    body.appendChild(el("button", { class: "btn small", onClick: () => openSubprocessBinding(node, "convert") },
+      "In Subprozess umwandeln"));
+  }
+}
+
+/** Kurzstand des Daten-Abschnitts (Anzahl Bindungen). */
+function cardDataSummary(schema, node) {
+  const n = (schema.data_accesses || []).filter((a) => a.node_id === node.id).length;
+  return n ? String(n) : null;
+}
+
+/** Abschnitt „Daten": bestehende Bindungen loesen, neue direkt hier binden. */
+function cardDataSection(body, schema, node, draft) {
+  const accesses = (schema.data_accesses || []).filter((a) => a.node_id === node.id);
+  if (accesses.length) {
+    const list = el("div", { class: "insp-binds" });
+    accesses.forEach((a) => {
+      const e = schema.data_elements[a.element_id];
+      const name = e ? e.name : a.element_id;
+      list.appendChild(el("div", { class: "insp-bind" },
+        el("button", { class: "insp-bind-name link-like", title: "Herkunft dieses Elements im Kontrollfluss zeigen",
+          onClick: () => { state.dataElemFocus = state.dataElemFocus === a.element_id ? null : a.element_id; render(); } }, name),
+        el("span", { class: "insp-bind-mode mode-" + a.mode }, a.mode),
+        a.mandatory ? null : el("span", { class: "muted", style: "font-size:11px" }, "optional"),
+        el("span", { class: "spacer", style: "flex:1" }),
+        draft
+          ? el("button", { class: "insp-bind-del", title: "Bindung lösen",
+              onClick: () => removeDataAccess(node.id, a.element_id, a.mode, name) }, "✕")
+          : null));
+    });
+    body.appendChild(list);
+  } else {
+    body.appendChild(el("div", { class: "card-hint" },
+      "Dieser Schritt liest und schreibt bisher nichts. Gebunden wird hier – Richtung und Pflicht legst du im Dialog fest."));
+  }
+  const row = el("div", { class: "row", style: "gap:8px;margin-top:8px" });
+  if (draft) {
+    row.appendChild(el("button", { class: "btn small primary", onClick: () => bindDataDialog(node.id) },
+      "⊕ Datenelement binden"));
+  }
+  row.appendChild(el("button", { class: "btn small ghost", title: "Alle Datenbindungen des Modells in der Datensicht",
+    onClick: () => focusBindingView("data", node.id) }, "Vollansicht"));
+  body.appendChild(row);
+}
+
+/** Abschnitt „Bearbeiter": die BZR des Schritts (Z1–Z4). */
+function cardStaffSection(body, schema, node, draft) {
+  const rule = (schema.staff_rules || {})[node.id];
+  const sb = (schema.service_bindings || {})[node.id];
+  body.appendChild(el("div", { class: rule ? "" : "card-hint" },
+    rule
+      ? describeRule(rule)
+      : sb && sb.automatic
+        ? "Automatischer Schritt – er wird ohne Bearbeiter ausgeführt."
+        : "Noch niemandem zugeordnet. Ohne Zuordnung landet die Aufgabe in keiner Arbeitsliste."));
+  const row = el("div", { class: "row", style: "gap:8px;margin-top:8px" });
+  if (draft) {
+    row.appendChild(el("button", { class: "btn small primary", onClick: () => bindStaffDialog(node.id) },
+      rule ? "⊕ Zuordnung ändern" : "⊕ Bearbeiter zuordnen"));
+    if (rule) row.appendChild(el("button", { class: "btn small danger", onClick: () => removeStaffRule(node.id) }, "Entfernen"));
+  }
+  row.appendChild(el("button", { class: "btn small ghost", title: "Organisationsmodell in der Ressourcensicht bearbeiten",
+    onClick: () => focusBindingView("org", node.id) }, "Organisation"));
+  body.appendChild(row);
+}
+
+/** Abschnitt „Dienst" (A1–A3): was der Schritt ausfuehrt. */
+function cardServiceSection(body, schema, node, draft) {
+  const sb = (schema.service_bindings || {})[node.id];
+  if (sb) {
+    const tmpl = sb.template_id ? (schema.activity_templates || {})[sb.template_id] : null;
+    body.appendChild(el("div", { style: "font-size:13px" },
+      el("strong", null, sb.name), " · ", sb.automatic ? "automatisch" : "interaktiv",
+      tmpl ? ` · Template „${tmpl.name}“` : ""));
+    if (sb.automatic && sb.automation && sb.automation !== "MANUAL_NONE") {
+      body.appendChild(el("div", { class: "muted", style: "font-size:11px" },
+        "Automatik: " + (AUTOMATION_LABELS[sb.automation] || sb.automation)));
+    }
+  } else {
+    body.appendChild(el("div", { class: "card-hint" },
+      "Kein Dienst – für die Freigabe braucht jeder Schritt einen ausführbaren Dienst (B1)."));
+  }
+  if (!draft) return;
+  const row = el("div", { class: "row", style: "gap:8px;margin-top:8px" },
+    el("button", { class: "btn small" + (sb ? "" : " primary"), onClick: () => assignServiceFor(node.id) },
+      sb ? "Dienst ändern" : "Dienst zuweisen"));
+  if (sb && sb.automatic) row.appendChild(el("button", { class: "btn small", onClick: () => editAutomation(node, sb) }, "Automatik…"));
+  if (sb) row.appendChild(el("button", { class: "btn small danger", onClick: () => removeService(node.id) }, "Entfernen"));
+  body.appendChild(row);
+}
+
+/** Abschnitt „Eingabemaske" (U1–U2). */
+function cardFormSection(body, schema, node, draft) {
+  const form = schema.forms && schema.forms[node.id];
+  body.appendChild(el("div", { class: form ? "" : "card-hint", style: "font-size:13px" },
+    form
+      ? `${form.fields.length} Feld(er)${form.title ? " – „" + form.title + "“" : ""}.`
+      : "Noch keine Eingabemaske – Felder per Auswahl zusammenstellen."));
+  if (!draft) return;
+  const row = el("div", { class: "row", style: "gap:8px;margin-top:8px" },
+    el("button", { class: "btn small", onClick: () => openFormDesigner(node.id) },
+      form ? "Maske bearbeiten" : "Eingabemaske gestalten"));
+  if (form) row.appendChild(el("button", { class: "btn small danger", onClick: () => deleteForm(node.id) }, "Maske entfernen"));
+  body.appendChild(row);
+}
+
+/** Abschnitt „Zeit & Priorität" (T1/T2 und die Arbeitslisten-Reihung). */
+function cardTimeSection(body, schema, node, draft) {
+  const tc = (schema.time_constraints || {})[node.id];
+  const hasFrist = tc && tc.max_duration_seconds != null;
+  body.appendChild(el("div", { class: "insp-h" }, "Frist (max. Dauer)"));
+  body.appendChild(el("div", { class: hasFrist ? "" : "card-hint", style: "font-size:13px" },
+    hasFrist ? formatDuration(tc.max_duration_seconds)
+      : "keine – fließt bei gesetztem Prozess-Termin in die Terminprüfung (T2) ein."));
+  if (tc && tc.target_lead_seconds != null) {
+    body.appendChild(el("div", { style: "font-size:12px;margin-top:4px" },
+      "Soll-Reaktionszeit ab Aktivierung: " + formatDuration(tc.target_lead_seconds)));
+  }
+  if (draft) {
+    body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+      el("button", { class: "btn small", onClick: () => setTimeConstraintFor(node.id, hasFrist ? tc : null) },
+        hasFrist ? "Frist ändern" : "Frist setzen"),
+      hasFrist ? el("button", { class: "btn small danger", onClick: () => removeTimeConstraint(node.id) }, "Entfernen") : null));
+  }
+  const pr = (schema.node_priorities || {})[node.id];
+  body.appendChild(el("div", { class: "hr" }));
+  body.appendChild(el("div", { class: "insp-h" }, "Priorität"));
+  body.appendChild(el("div", { class: pr ? "" : "card-hint", style: "font-size:13px" },
+    pr ? `Auswirkung ${IMPACT_LABELS[pr.impact] || pr.impact} · Dringlichkeit ${IMPACT_LABELS[pr.urgency] || pr.urgency}`
+      : "normal (Standard)"));
+  if (draft) {
+    body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+      el("button", { class: "btn small", onClick: () => setPriorityFor(node.id, pr) }, pr ? "Priorität ändern" : "Priorität setzen"),
+      pr ? el("button", { class: "btn small danger", onClick: () => removePriority(node.id) }, "Entfernen") : null));
+  }
+}
+
+/** Abschnitt „Benachrichtigung" (Regelgruppe N, opt-in je Aktivitaet). */
+function cardMailSection(body, schema, node, draft) {
+  const binding = (schema.mail_bindings || {})[node.id];
+  const hasRule = !!(schema.staff_rules || {})[node.id];
+  if (binding) {
+    body.appendChild(el("div", { style: "font-size:13px" },
+      MAIL_MODE_LABELS[binding.mode] || binding.mode,
+      binding.mode === "TO_ELIGIBLE_AGENTS"
+        ? (binding.include_deputies ? " · inkl. Vertreter" : " · ohne Vertreter") : ""));
+    body.appendChild(el("div", { class: "muted", style: "font-size:11px;margin-top:2px" },
+      "Betreff: " + (binding.subject || "–")));
+  } else if (!hasRule) {
+    // Abhaengigkeit erklaeren statt verstecken (N2) -- mit Sprungmarke auf den
+    // Abschnitt, der das Fehlende beschafft.
+    body.appendChild(el("div", { class: "card-hint" },
+      "Erst einen Bearbeiter zuordnen – ohne Zuordnung gibt es keinen Empfänger (N2). ",
+      el("a", { href: "#", onClick: (e) => { e.preventDefault(); openCardSection(node.id, "staff"); } },
+        "Zum Abschnitt Bearbeiter")));
+  } else {
+    body.appendChild(el("div", { class: "card-hint" },
+      "Aus – bei Aufgabeneingang wird keine Mail gesendet (Standard)."));
+  }
+  if (!draft) return;
+  const row = el("div", { class: "row", style: "gap:8px;margin-top:8px" },
+    el("button", { class: "btn small", disabled: !hasRule && !binding,
+      onClick: () => editMailBinding(node.id, binding) }, binding ? "Mail ändern" : "Mail senden…"));
+  if (binding) row.appendChild(el("button", { class: "btn small danger", onClick: () => removeMailBinding(node.id) }, "Entfernen"));
+  body.appendChild(row);
+}
+
+/** Abschnitt „Klassifikation": Wertklasse (rein beratend, E3). */
+function cardValueClassSection(body, schema, node, draft) {
+  const sel = el("select", null,
+    el("option", { value: "" }, "– keine –"),
+    ...Object.entries(VALUE_CLASS_LABELS).map(([v, l]) => el("option", { value: v }, l)));
+  sel.value = node.value_class || "";
+  sel.disabled = !draft;
+  sel.addEventListener("change", () => setValueClass(node.id, sel.value || null));
+  body.appendChild(el("div", { class: "card-hint" },
+    "Rein beratend – ohne Wirkung auf die Korrektheit oder die Ausführung."));
+  body.appendChild(el("label", { class: "field", style: "font-size:12px;margin-top:6px" }, "Klassifikation", sel));
+}
+
+/** Abschnitt „Submodell" eines Subprozess-Knotens (H1–H4). */
+function cardSubprocessSection(body, schema, node, draft) {
+  const bnd = (schema.sub_process_bindings || {})[node.id];
+  body.appendChild(el("div", { class: bnd ? "" : "card-hint", style: "font-size:13px" },
+    bnd ? `Gebunden an Submodell „${bnd.target_schema_id}“ (v${bnd.target_version}).` : "Noch kein Submodell gebunden."));
+  if (!draft) return;
+  body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:8px" },
+    el("button", { class: "btn small", onClick: () => openSubprocessBinding(node, "rebind") },
+      "Zuordnung / Datenübergabe ändern")));
+}
+
+/** Abschnitt „Verzweigung" eines Splits (K7-Zellen, leerer Zweig, entfernen). */
+function cardBranchSection(body, schema, node, draft) {
+  const branches = (schema.edges || []).filter((e) => e.source === node.id);
+  const list = el("div", { class: "insp-binds" });
+  branches.forEach((e) => {
+    const target = schema.nodes[e.target];
+    const empty = target && (target.type === NODE_TYPE.XOR_JOIN || target.type === NODE_TYPE.AND_JOIN);
+    list.appendChild(el("div", { class: "insp-bind" },
+      el("span", { class: "insp-bind-name" }, empty ? "leerer Zweig" : nodeCaption(target)),
+      e.condition ? el("span", { class: "muted", style: "font-size:11px" }, e.condition) : null));
+  });
+  if (branches.length) body.appendChild(list);
+  if (!draft) return;
+  const emptyJoin = emptyBranchJoin(schema, node.id);
+  if (emptyJoin) {
+    body.appendChild(el("div", { class: "card-hint", style: "margin-top:8px" },
+      "Ein Zweig ist leer – in ihm fällt keine Aktivität an. Entfernen löst bei nur noch einem verbleibenden Zweig die ganze Verzweigung auf."));
+    body.appendChild(el("button", { class: "btn small", onClick: () => removeEmptyBranch(node.id) }, "Leeren Zweig entfernen"));
+  }
+  body.appendChild(el("div", { class: "card-hint", style: "margin-top:8px" },
+    "Entfernen löscht den gesamten Block (Split, Zweige und passenden Join)."));
+  body.appendChild(el("button", { class: "btn small danger", onClick: () => deleteNode(node.id) }, "Verzweigung entfernen"));
+}
+
+// --------------------------------------------------------------------------
+// Binden direkt am Schritt: Auswahl + Optionen in EINEM Dialog
+// --------------------------------------------------------------------------
+
+/**
+ * Alle Knoten, die im Kontrollfluss **vor** ``nodeId`` liegen (Rueckwaerts-BFS).
+ *
+ * Dient nur der Sortierung/Beschriftung im Bindungsdialog: ein Datenelement,
+ * das ein vorgelagerter Schritt schreibt, ist der uebliche Lese-Kandidat.
+ * Verbindlich bleibt der Kern (D1–D4) -- diese Funktion entscheidet nichts.
+ *
+ * @param {object} schema Das Schema.
+ * @param {string} nodeId Zielknoten.
+ * @returns {Set<string>} Ids aller Vorgaenger (transitiv).
+ */
+function ancestorsOf(schema, nodeId) {
+  const inEdges = {};
+  (schema.edges || []).forEach((e) => { (inEdges[e.target] = inEdges[e.target] || []).push(e.source); });
+  const seen = new Set();
+  const queue = (inEdges[nodeId] || []).slice();
+  while (queue.length) {
+    const id = queue.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    (inEdges[id] || []).forEach((p) => { if (!seen.has(p)) queue.push(p); });
+  }
+  return seen;
+}
+
+/**
+ * Auswahlliste mit Suchfeld -- gemeinsamer Baustein der Bindungsdialoge.
+ *
+ * @param {Array<{id: string, label: string, sub: string, group: string}>} items Einträge.
+ * @param {function(string): void} onPick Rueckmeldung der Auswahl (Element-Id).
+ * @returns {{node: HTMLElement, get: function(): string|null}} Steuerelement.
+ */
+function pickList(items, onPick) {
+  let chosen = items.length ? items[0].id : null;
+  const list = el("div", { class: "pick-list" });
+  const search = el("input", { type: "text", placeholder: "Suchen …" });
+  function build() {
+    clear(list);
+    const q = search.value.trim().toLowerCase();
+    let group = null;
+    const hits = items.filter((it) => !q
+      || it.label.toLowerCase().includes(q) || (it.sub || "").toLowerCase().includes(q));
+    if (!hits.length) {
+      list.appendChild(el("div", { class: "muted", style: "font-size:12px;padding:8px" }, "Nichts gefunden."));
+      return;
+    }
+    hits.forEach((it) => {
+      if (it.group && it.group !== group) {
+        group = it.group;
+        list.appendChild(el("div", { class: "pick-group" }, group));
+      }
+      const row = el("button", {
+        class: "pick-row" + (it.id === chosen ? " active" : ""),
+        type: "button",
+        onClick: () => { chosen = it.id; build(); if (onPick) onPick(chosen); },
+      },
+        el("span", { class: "pick-label" }, it.label),
+        it.sub ? el("span", { class: "pick-sub" }, it.sub) : null);
+      list.appendChild(row);
+    });
+  }
+  search.addEventListener("input", build);
+  build();
+  return {
+    node: el("div", { class: "pick" }, search, list),
+    get: () => chosen,
+  };
+}
+
+/**
+ * Bindet ein Datenelement an einen Schritt -- Auswahl, Richtung und Pflicht in
+ * einem Dialog, direkt am gewaehlten Schritt.
+ *
+ * Der Kern prueft die Bindung vor dem Commit (D1–D4): ein Pflichtlesen ohne
+ * vorherige Schreibquelle wird mit HTTP 422 abgewiesen, das Modell bleibt
+ * unveraendert und der Befund erscheint als Meldung.
+ *
+ * @param {string} nodeId Zielschritt.
+ */
+function bindDataDialog(nodeId) {
+  const schema = state.schema;
+  const node = schema.nodes[nodeId];
+  const before = ancestorsOf(schema, nodeId);
+  const writtenBefore = new Set();
+  (schema.data_accesses || []).forEach((a) => {
+    if (before.has(a.node_id) && (a.mode === "WRITE" || a.mode === "READ_WRITE")) writtenBefore.add(a.element_id);
+  });
+  const elems = Object.values(schema.data_elements || {});
+  const items = elems.map((d) => ({
+    id: d.id,
+    label: d.name,
+    sub: d.data_type + (d.source === "EXTERNAL" ? " · extern" : "") + (writtenBefore.has(d.id) ? " · davor gesetzt" : ""),
+    group: writtenBefore.has(d.id) ? "Von einem vorgelagerten Schritt gesetzt" : "Übrige Datenelemente",
+  })).sort((a, b) => (a.group === b.group ? a.label.localeCompare(b.label) : a.group < b.group ? -1 : 1));
+  if (!items.length) {
+    // Ohne Datenelement gibt es nichts zu binden -- direkt das Anlegen anbieten
+    // und danach zurueck in den Bindungsdialog.
+    addDataElement(() => bindDataDialog(nodeId));
+    return;
+  }
+  const picker = pickList(items, null);
+  const modeSel = el("select", null,
+    el("option", { value: "READ" }, "Lesen (liest den Wert)"),
+    el("option", { value: "WRITE" }, "Schreiben (setzt den Wert)"),
+    el("option", { value: "READ_WRITE" }, "Lesen und Schreiben"));
+  const mandBox = el("input", { type: "checkbox" });
+  mandBox.checked = true;
+  openModal(`Datenelement an „${nodeCaption(node)}" binden`,
+    el("div", null,
+      el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Was dieser Schritt liest, muss vorher jemand geschrieben haben – sonst weist der Kern die Bindung ab (D2)."),
+      picker.node,
+      el("div", { class: "form-grid", style: "margin-top:12px" },
+        el("label", { class: "field" }, "Richtung", modeSel),
+        el("label", { class: "row", style: "gap:8px;align-items:center" }, mandBox, "Pflichtbindung")),
+      el("div", { style: "margin-top:10px" },
+        el("button", { class: "btn small ghost", type: "button",
+          onClick: () => addDataElement(() => bindDataDialog(nodeId)) },
+          "＋ Neues Datenelement anlegen"))),
+    async () => {
+      const id = picker.get();
+      if (!id) { toast("err", "Kein Datenelement gewählt"); return false; }
+      const elem = schema.data_elements[id];
+      try {
+        await api.post(`/schemas/${state.schemaId}/data-access`, {
+          node_id: nodeId, element_id: id, mode: modeSel.value, mandatory: mandBox.checked,
+        });
+        await refreshSchema(); render();
+        toast("ok", "Datenbindung gesetzt", [`${elem ? elem.name : id} (${modeSel.value})`]);
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Binden");
+}
+
+/**
+ * Ordnet einem Schritt Bearbeiter zu (BZR) -- Rolle, Abteilung oder Agent,
+ * ausgewaehlt direkt am Schritt.
+ *
+ * Die node-referenzierenden Arten (Bearbeiter/Vorgesetzte:r eines frueheren
+ * Schritts, Z3) haben eine eigene Referenzauswahl und laufen deshalb weiter
+ * ueber den Dialog ``addStaffRule``, der von hier aus erreichbar bleibt.
+ *
+ * @param {string} nodeId Zielschritt.
+ */
+function bindStaffDialog(nodeId) {
+  const schema = state.schema;
+  const node = schema.nodes[nodeId];
+  const org = schema.org_model || { roles: {}, org_units: {}, agents: {} };
+  const current = (schema.staff_rules || {})[nodeId];
+  const items = [];
+  Object.values(org.roles || {}).forEach((r) =>
+    items.push({ id: "ROLE:" + r.id, label: r.name, sub: "Rolle", group: "Rollen" }));
+  Object.values(org.org_units || {}).forEach((u) =>
+    items.push({ id: "ORG_UNIT:" + u.id, label: u.name, sub: "Abteilung", group: "Abteilungen" }));
+  Object.values(org.agents || {}).forEach((a) => {
+    const roleNames = (a.role_ids || []).map((id) => ((org.roles || {})[id] || {}).name).filter(Boolean).join(", ");
+    items.push({ id: "AGENT:" + a.id, label: a.name, sub: roleNames || "ohne Rolle", group: "Agenten" });
+  });
+  if (!items.length) {
+    toast("info", "Noch keine Rollen/Abteilungen/Agenten", ["Zuerst in der Ressourcensicht anlegen."]);
+    focusBindingView("org", nodeId);
+    return;
+  }
+  const recBox = el("input", { type: "checkbox" });
+  const recField = el("label", { class: "row", style: "gap:8px;align-items:center" },
+    recBox, "Abteilung und alle Bereiche darunter");
+  const syncRec = () => {
+    const id = picker.get() || "";
+    recField.style.display = id.startsWith("ORG_UNIT:") ? "" : "none";
+  };
+  const picker = pickList(items, syncRec);
+  syncRec();
+  openModal(`Bearbeiter für „${nodeCaption(node)}"`,
+    el("div", null,
+      current ? el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        `Ersetzt die bestehende Zuordnung: ${describeRule(current)}.`) : null,
+      picker.node,
+      el("div", { style: "margin-top:10px" }, recField),
+      el("div", { style: "margin-top:10px" },
+        el("button", { class: "btn small ghost", type: "button", onClick: () => addStaffRule(nodeId) },
+          "Erweiterte Regel (Bearbeiter/Vorgesetzte:r eines früheren Schritts) …"))),
+    async () => {
+      const picked = picker.get();
+      if (!picked) { toast("err", "Nichts gewählt"); return false; }
+      const [kind, ref] = [picked.slice(0, picked.indexOf(":")), picked.slice(picked.indexOf(":") + 1)];
+      const rule = { kind, ref };
+      if (kind === "ORG_UNIT") rule.recursive = recBox.checked;
+      try {
+        await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId, rule });
+        await refreshSchema(); render(); toast("ok", "Bearbeiter zugeordnet", [describeRule(rule)]);
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Zuordnen");
+}
+
 // Bindet ein Datenelement an den gewaehlten Schritt (⊕ in der Palette): fragt
 // Richtung (Lesen/Schreiben) und Bindungsart (Pflicht/optional) ab und legt die
 // Datenbindung ueber den Kern an (POST /data-access; D1-D4 werden dort geprueft,
@@ -1823,7 +3119,9 @@ function nodePerformSections(body, schema, node) {
       "Soll-Reaktionszeit ab Aktivierung: " + formatDuration(tc.target_lead_seconds)));
   }
   body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
-    el("button", { class: "btn small", onClick: () => setTimeConstraintFor(node.id, hasFrist ? tc.max_duration_seconds : null) }, hasFrist ? "Frist ändern" : "Frist setzen"),
+    // Die ganze Constraint weitergeben, nicht nur die Dauer: der Dialog liest
+    // daraus BEIDE Soll-Zeiten vor (Dauer und Soll-Reaktionszeit).
+    el("button", { class: "btn small", onClick: () => setTimeConstraintFor(node.id, hasFrist ? tc : null) }, hasFrist ? "Frist ändern" : "Frist setzen"),
     hasFrist ? el("button", { class: "btn small danger", onClick: () => removeTimeConstraint(node.id) }, "Entfernen") : null));
 
   // Priorität (E8): Auswirkung + Dringlichkeit -> abgeleitete Arbeitslisten-Stufe.
@@ -2130,11 +3428,12 @@ function setProcessDeadline() {
     }, "Speichern");
 }
 
-function centerCanvasOnNode(wrap, pos) {
+function centerCanvasOnNode(wrap, pos, region) {
   // ``wrap`` ist die .canvas-wrap; der Pan/Zoom-Controller verschiebt den
   // Knoten ueber eine CSS-Transformation in die Mitte des Viewports (statt
-  // ueber nativen Scroll, der durch overflow:hidden entfaellt).
-  if (wrap && wrap._panzoom) wrap._panzoom.centerOn(pos);
+  // ueber nativen Scroll, der durch overflow:hidden entfaellt). ``region``
+  // (optional) haelt zusaetzlich die gestrichelte Datenherkunft im Bild.
+  if (wrap && wrap._panzoom) wrap._panzoom.centerOn(pos, region);
 }
 
 // --------------------------------------------------------------------------
@@ -2934,7 +4233,15 @@ function dFindingsPanel() {
   return el("div", { class: "panel" }, el("div", { class: "panel-h" }, el("h2", null, "Datenfluss-Befunde")), body);
 }
 
-function addDataElement() {
+/**
+ * Legt ein Datenelement an.
+ *
+ * @param {function(): void} [onCreated] Optionaler Rueckweg nach dem Anlegen --
+ *        der Bindungsdialog der Schritt-Karte oeffnet sich damit erneut, jetzt
+ *        mit dem frisch angelegten Element in der Liste, statt den Nutzer nach
+ *        dem Anlegen ohne Bindung stehen zu lassen.
+ */
+function addDataElement(onCreated) {
   const name = el("input", { type: "text", placeholder: "z. B. betrag" });
   const type = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t }, t)));
   openModal("Datenelement", el("div", { class: "form-grid" },
@@ -2944,6 +4251,7 @@ function addDataElement() {
     try {
       await api.post(`/schemas/${state.schemaId}/data-elements`, { name: name.value.trim(), data_type: type.value });
       await refreshSchema(); render(); toast("ok", "Datenelement angelegt");
+      if (typeof onCreated === "function") onCreated();
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Anlegen");
 }
@@ -6523,16 +7831,53 @@ function wireNav() {
   if (burger) burger.addEventListener("click", toggleMobileNav);
   const scrim = byId("nav-scrim");
   if (scrim) scrim.addEventListener("click", closeMobileNav);
-  // Escape verlaesst das Kontrollfluss-Vollbild bzw. schliesst die mobile
-  // Menue-Schublade (nur wenn jeweils aktiv).
+  // Escape verlaesst das Kontrollfluss-Vollbild, hebt die Auswahl in der
+  // Karten-Sicht auf bzw. schliesst die mobile Menue-Schublade (in dieser
+  // Reihenfolge, jeweils nur wenn aktiv). Eingaben in einem Feld bleiben
+  // unberuehrt -- sonst raeumte Escape mitten im Tippen die Karte weg.
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
+    if (isTypingTarget()) return;
+    // Steht ein Dialog offen, gehoert die Taste ihm -- die Sicht dahinter
+    // duerfte sonst umbauen, waehrend der Dialog noch auf ihr arbeitet.
+    const modal = byId("modal-root");
+    if (modal && modal.childElementCount) return;
     if (state.graphMaximized) {
       state.graphMaximized = false;
+      render();
+    } else if (state.view === "model" && modelUx() === "card" && state.selectedNode) {
+      state.selectedNode = null;
       render();
     } else if (document.documentElement.getAttribute("data-mobile-nav") === "open") {
       closeMobileNav();
     }
+  });
+  // Tastaturnavigation im Kontrollfluss (Konzept §5.2, Stufe U4): Pfeiltasten
+  // bewegen die Auswahl entlang des Spine bzw. zwischen den Zweigen, Enter holt
+  // den Fokus in die Schritt-Karte. Gilt in beiden Modellier-Oberflaechen --
+  // beide fuehren dieselbe Auswahl (state.selectedNode) und ruecken den
+  // gewaehlten Knoten ins Bild.
+  document.addEventListener("keydown", (e) => {
+    const dir = ARROW_DIRS[e.key];
+    if (!dir && e.key !== "Enter") return;
+    // Mit Zusatztaste gehoert die Kombination dem Browser (Verlauf, Zeilenende,
+    // Textauswahl) -- die wird nicht uebernommen.
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if (state.view !== "model") return;
+    if (isTypingTarget()) return;
+    const modal = byId("modal-root");
+    if (modal && modal.childElementCount) return;   // Dialog hat Vorrang
+    if (!dir) {
+      // Enter nur aus dem Kontrollfluss heraus: liegt der Fokus schon auf einem
+      // Bedienelement, ist Enter dessen Ausloeser und darf nicht abgefangen
+      // werden.
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === "BUTTON" || tag === "A") return;
+      if (focusStepCard()) e.preventDefault();
+      return;
+    }
+    // Pfeiltasten scrollen sonst die Seite, waehrend die Auswahl wandert.
+    if (moveSelection(dir)) e.preventDefault();
   });
   const apiInput = byId("api-base");
   apiInput.value = state.apiBase;

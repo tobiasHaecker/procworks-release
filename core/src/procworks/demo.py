@@ -157,45 +157,67 @@ def _build_org() -> OrgModel:
 
 
 def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
-    """Released process: a leave request with an approval/rejection decision."""
+    """Released process: a leave request with an approval/rejection decision.
+
+    Fachliche Modellierung der Verzweigung (bewusst so und nicht anders): Der
+    XOR-Split haengt an der **Entscheidung**, nicht an der beantragten Anzahl
+    Urlaubstage. Ein Antrag wird nicht abgelehnt, *weil* er viele Tage umfasst --
+    er wird abgelehnt, weil die vorgesetzte Person so entscheidet. Die Tage sind
+    Entscheidungs*grundlage* (sie werden im Genehmigungsschritt gelesen), nicht
+    das Verzweigungskriterium. Der Schritt "Genehmigung durch Leitung" liegt
+    deshalb **vor** dem Split und schreibt den Diskriminator; die beiden Zweige
+    fuehren die Entscheidung nur noch aus.
+    """
 
     s = ops.create_empty_schema("Urlaubsantrag", schema_id=SCHEMA_URLAUB)
     s = ops.serial_insert(s, "Antrag erfassen", after_node_id="start")
     erfassen = _nid(s, "Antrag erfassen")
     s = ops.serial_insert(s, "Antrag pr\u00fcfen", after_node_id=erfassen)
     pruefen = _nid(s, "Antrag pr\u00fcfen")
+    s = ops.serial_insert(s, "Genehmigung durch Leitung", after_node_id=pruefen)
+    genehmigung = _nid(s, "Genehmigung durch Leitung")
 
-    # The branch discriminator must exist and be guaranteed written before the
-    # split, so the data element and its mandatory write are added first (K7):
-    # "Antrag erfassen" writes the number of days, "Antrag pruefen" reads it.
+    # "Urlaubstage" wandert als Datenobjekt durch den Fluss: erfasst im ersten
+    # Schritt, gelesen von der Pruefung und von der Genehmigung (dort ist es die
+    # Entscheidungsgrundlage). Kein Verzweigungskriterium -- siehe Docstring.
     s = ops.add_data_element(s, "Urlaubstage", DataType.INTEGER, element_id="tage")
     s = ops.connect_data(s, erfassen, "tage", AccessMode.WRITE)
     s = ops.connect_data(s, pruefen, "tage", AccessMode.READ)
+    s = ops.connect_data(s, genehmigung, "tage", AccessMode.READ)
 
-    # Structured XOR partition over "tage" (INTEGER -> THRESHOLD): up to 10 days
-    # is approved by the team lead, 11 or more days is rejected. The two cells
-    # tile the whole number line (< 11 and >= 11), so exactly one branch is ever
-    # enabled -- the engine resolves it automatically from the instance data.
+    # Der Diskriminator muss existieren und vor dem Split garantiert geschrieben
+    # sein (K7), deshalb wird er hier -- vor dem conditional_insert -- angelegt
+    # und im Genehmigungsschritt verbindlich (mandatory) geschrieben.
+    s = ops.add_data_element(s, "Entscheidung", DataType.STRING, element_id="entscheidung")
+    s = ops.connect_data(s, genehmigung, "entscheidung", AccessMode.WRITE)
+
+    # Strukturierte XOR-Partition ueber "entscheidung" (STRING -> ENUM): der
+    # Wert "Genehmigt" fuehrt in den Genehmigungszweig, jeder andere Wert in den
+    # Auffang-Zweig (Ablehnung). Die beiden Zellen decken den gesamten
+    # Wertebereich total und disjunkt ab, also ist immer genau ein Zweig
+    # freigeschaltet -- die Engine loest ihn aus den Instanzdaten selbst auf.
     s = ops.conditional_insert(
         s,
-        after_node_id=pruefen,
-        discriminator="tage",
+        after_node_id=genehmigung,
+        discriminator="entscheidung",
         branches=[
-            ops.BranchSpec(label="Genehmigung durch Leitung", upper=11),
-            ops.BranchSpec(label="Ablehnung dokumentieren"),
+            ops.BranchSpec(label="Urlaub eintragen", values=("Genehmigt",)),
+            ops.BranchSpec(label="Ablehnung dokumentieren", is_else=True),
         ],
     )
     join = _gateway_id(s, NodeType.XOR_JOIN)
     s = ops.serial_insert(s, "Mitarbeiter benachrichtigen", after_node_id=join)
 
     # A second data object that *travels and is enriched along the flow*: the
-    # decision is filled in by whichever XOR branch runs (approval or rejection)
-    # and then consumed by the notification at the end. Because both branches
-    # write it, the value is guaranteed present on every path after the join
-    # (D1 holds via the XOR-join intersection).
-    s = ops.add_data_element(s, "Entscheidung", DataType.STRING, element_id="entscheidung")
-    s = ops.connect_data(s, _nid(s, "Genehmigung durch Leitung"), "entscheidung", AccessMode.WRITE)
-    s = ops.connect_data(s, _nid(s, "Ablehnung dokumentieren"), "entscheidung", AccessMode.WRITE)
+    # message text is filled in by whichever XOR branch runs (the confirmation
+    # on approval, the reason on rejection) and then consumed by the
+    # notification at the end. Because both branches write it, the value is
+    # guaranteed present on every path after the join (D1 holds via the XOR-join
+    # intersection). Die Entscheidung selbst wird ebenfalls mitgelesen.
+    s = ops.add_data_element(s, "Mitteilungstext", DataType.STRING, element_id="mitteilung")
+    s = ops.connect_data(s, _nid(s, "Urlaub eintragen"), "mitteilung", AccessMode.WRITE)
+    s = ops.connect_data(s, _nid(s, "Ablehnung dokumentieren"), "mitteilung", AccessMode.WRITE)
+    s = ops.connect_data(s, _nid(s, "Mitarbeiter benachrichtigen"), "mitteilung", AccessMode.READ)
     s = ops.connect_data(s, _nid(s, "Mitarbeiter benachrichtigen"), "entscheidung", AccessMode.READ)
 
     s = ops.link_org_model(s, ORG_ID, org)
@@ -212,13 +234,14 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
         _nid(s, "Genehmigung durch Leitung"),
         StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR, ref=erfassen),
     )
+    s = ops.assign_staff_rule(s, _nid(s, "Urlaub eintragen"), _role("sachbearbeiter"))
     s = ops.assign_staff_rule(s, _nid(s, "Ablehnung dokumentieren"), _role("sachbearbeiter"))
     s = ops.assign_staff_rule(s, _nid(s, "Mitarbeiter benachrichtigen"), _role("sachbearbeiter"))
 
     # Input mask (form designer, U1-U3): the first step is entered through a
     # designed mask -- a number field for the days plus an optional free-text
     # reason. The mask *is* the data flow (a WRITE field yields a write access),
-    # so "tage" stays guaranteed-written before the split (K7 still holds).
+    # so "tage" stays guaranteed-written before it is read downstream.
     s = ops.add_data_element(s, "Begr\u00fcndung", DataType.STRING, element_id="grund")
     s = ops.set_form(
         s,
@@ -240,11 +263,69 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
         ],
     )
 
+    # Entscheidungs-Maske: die vorgesetzte Person sieht die beantragten Tage
+    # (READ-Feld, zeigt den zuvor geschriebenen Wert an) und waehlt die
+    # Entscheidung aus einer Auswahlliste. Genau dieses Pflichtfeld schreibt den
+    # XOR-Diskriminator -- der Wert "Genehmigt" trifft die Zelle des
+    # Genehmigungszweigs, jeder andere landet im Auffang-Zweig (Ablehnung).
+    s = ops.set_form(
+        s,
+        genehmigung,
+        title="Urlaubsantrag entscheiden",
+        fields=[
+            ops.FormFieldSpec(
+                element_id="tage",
+                widget=WidgetKind.NUMBER,
+                label="Beantragte Urlaubstage",
+                mode=AccessMode.READ,
+                help_text="Entscheidungsgrundlage - hier nur zur Ansicht.",
+            ),
+            ops.FormFieldSpec(
+                element_id="entscheidung",
+                widget=WidgetKind.DROPDOWN,
+                label="Entscheidung",
+                options=("Genehmigt", "Abgelehnt"),
+                help_text="Steuert die Verzweigung: nur \u201eGenehmigt\u201c "
+                "f\u00fchrt in den Genehmigungszweig.",
+            ),
+        ],
+    )
+
+    # Beide Zweige schreiben den Mitteilungstext (Bestaetigung bzw. Begruendung),
+    # den die Benachrichtigung am Ende liest -- garantiert gesetzt auf jedem Pfad.
+    s = ops.set_form(
+        s,
+        _nid(s, "Urlaub eintragen"),
+        title="Urlaub eintragen",
+        fields=[
+            ops.FormFieldSpec(
+                element_id="mitteilung",
+                widget=WidgetKind.TEXTAREA,
+                label="Best\u00e4tigungstext",
+                help_text="Wird der antragstellenden Person mitgeteilt.",
+            )
+        ],
+    )
+    s = ops.set_form(
+        s,
+        _nid(s, "Ablehnung dokumentieren"),
+        title="Ablehnung dokumentieren",
+        fields=[
+            ops.FormFieldSpec(
+                element_id="mitteilung",
+                widget=WidgetKind.TEXTAREA,
+                label="Begr\u00fcndung der Ablehnung",
+                help_text="Wird der antragstellenden Person mitgeteilt.",
+            )
+        ],
+    )
+
     # Value-adding classification (E3) -- all three classes appear so the
     # monitoring value breakdown has something to show.
     s = ops.set_value_class(s, erfassen, ValueClass.BUSINESS_NECESSARY)
     s = ops.set_value_class(s, pruefen, ValueClass.BUSINESS_NECESSARY)
-    s = ops.set_value_class(s, _nid(s, "Genehmigung durch Leitung"), ValueClass.VALUE_ADDING)
+    s = ops.set_value_class(s, genehmigung, ValueClass.VALUE_ADDING)
+    s = ops.set_value_class(s, _nid(s, "Urlaub eintragen"), ValueClass.VALUE_ADDING)
     s = ops.set_value_class(s, _nid(s, "Ablehnung dokumentieren"), ValueClass.NON_VALUE_ADDING)
     s = ops.set_value_class(s, _nid(s, "Mitarbeiter benachrichtigen"), ValueClass.VALUE_ADDING)
 
@@ -255,7 +336,7 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
     )
     s = ops.set_node_priority(
         s,
-        _nid(s, "Genehmigung durch Leitung"),
+        genehmigung,
         WorkItemPriority(impact=ImpactUrgency.HIGH, urgency=ImpactUrgency.HIGH),
     )
 
@@ -263,10 +344,11 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
     # optional *reaction* SLA (``target_lead_seconds``, measured from activation)
     # and a process deadline. The reaction SLA is what the time-based worklist
     # prioritisation reads to derive the criticality bands (the "Faellig" column);
-    # T1 only checks it is >= 0. The critical path (erfassen + pruefen + longest
-    # branch + benachrichtigen) must fit the deadline, which the validator checks
-    # (T2). The two currently-active steps in the seeded instances (erfassen,
-    # Genehmigung) carry a reaction SLA so their worklist bands are populated.
+    # T1 only checks it is >= 0. The critical path (erfassen + pruefen +
+    # Genehmigung + longest branch + benachrichtigen) must fit the deadline,
+    # which the validator checks (T2). The two currently-active steps in the
+    # seeded instances (erfassen, Genehmigung) carry a reaction SLA so their
+    # worklist bands are populated.
     s = ops.set_time_constraint(
         s, erfassen, TimeConstraint(max_duration_seconds=3600, target_lead_seconds=1800)
     )
@@ -275,8 +357,11 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
     )
     s = ops.set_time_constraint(
         s,
-        _nid(s, "Genehmigung durch Leitung"),
+        genehmigung,
         TimeConstraint(max_duration_seconds=86400, target_lead_seconds=43200),
+    )
+    s = ops.set_time_constraint(
+        s, _nid(s, "Urlaub eintragen"), TimeConstraint(max_duration_seconds=3600)
     )
     s = ops.set_time_constraint(
         s, _nid(s, "Ablehnung dokumentieren"), TimeConstraint(max_duration_seconds=3600)
@@ -482,26 +567,36 @@ def _seed_instances(
     ctx = exe.ExecutionContext(make_resolver(_NoopSchemaStore()), instance_store)
     erfassen = _nid(schema, "Antrag erfassen")
     pruefen = _nid(schema, "Antrag pr\u00fcfen")
+    genehmigung = _nid(schema, "Genehmigung durch Leitung")
     ablehnung = _nid(schema, "Ablehnung dokumentieren")
     benachrichtigen = _nid(schema, "Mitarbeiter benachrichtigen")
 
     # 1) Freshly started -- waiting at the very first activity.
     _start(schema, ctx, audit, "urlaub-2026-001")
 
-    # 2) In progress -- captured and checked. With 8 days recorded the XOR split
-    # resolves itself (8 < 11) to the approval branch, so the instance now waits
-    # at "Genehmigung durch Leitung" without any manual decision.
+    # 2) In progress -- captured and checked; the instance now waits at
+    # "Genehmigung durch Leitung", where the supervisor still has to make the
+    # decision that will resolve the XOR split.
     i2 = _start(schema, ctx, audit, "urlaub-2026-002")
     i2 = _complete(schema, i2, erfassen, ctx, audit, agent_id="a-erika", data={"tage": 8})
     _complete(schema, i2, pruefen, ctx, audit, agent_id="a-erika")
 
-    # 3) Finished -- a rejected request that ran all the way to the end. With 20
-    # days recorded the split resolves to the rejection branch (20 >= 11). The
-    # "entscheidung" object is written by the rejection step and then read by
-    # the notification, so the finished instance carries the enriched value.
+    # 3) Finished -- a rejected request that ran all the way to the end. The
+    # supervisor decided "Abgelehnt", so the split resolves into the catch-all
+    # branch; that branch writes the message text, which the notification then
+    # reads (an object enriched along the path).
     i3 = _start(schema, ctx, audit, "urlaub-2026-003")
     i3 = _complete(schema, i3, erfassen, ctx, audit, agent_id="a-erika", data={"tage": 20})
     i3 = _complete(schema, i3, pruefen, ctx, audit, agent_id="a-erika")
+    i3 = _complete(
+        schema,
+        i3,
+        genehmigung,
+        ctx,
+        audit,
+        agent_id="a-tom",
+        data={"entscheidung": "Abgelehnt"},
+    )
     i3 = _complete(
         schema,
         i3,
@@ -509,7 +604,7 @@ def _seed_instances(
         ctx,
         audit,
         agent_id="a-erika",
-        data={"entscheidung": "Abgelehnt: 20 Tage \u00fcberschreiten das Kontingent (max. 10)."},
+        data={"mitteilung": "20 Tage \u00fcberschreiten den Resturlaub (noch 10 Tage offen)."},
     )
     _complete(schema, i3, benachrichtigen, ctx, audit, agent_id="a-erika")
 

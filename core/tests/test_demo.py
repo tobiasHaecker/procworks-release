@@ -34,6 +34,7 @@ from procworks.model import (
     LifecycleState,
     StaffRuleKind,
     ValueClass,
+    XorDecisionKind,
 )
 from procworks.store import (
     InMemoryAbsenceStore,
@@ -145,27 +146,63 @@ def _accessors(schema, element_id, mode):  # type: ignore[no-untyped-def]
     }
 
 
-def test_demo_urlaub_carries_enriched_decision_object() -> None:
-    # The "entscheidung" object is filled by whichever XOR branch runs and read
-    # by the notification afterwards -> a data object that travels and is
-    # enriched across activities (D1 holds via the XOR-join intersection).
+def test_demo_urlaub_branches_on_the_decision_not_on_the_days() -> None:
+    # Fachliche Regression: Ein Urlaubsantrag wird nicht abgelehnt, *weil* er
+    # viele Tage umfasst -- er wird abgelehnt, weil die vorgesetzte Person so
+    # entscheidet. Der XOR-Split haengt deshalb an "entscheidung" (ENUM), nicht
+    # an "tage"; die Tage sind nur Entscheidungsgrundlage (READ im
+    # Genehmigungsschritt).
     ss, ins, orgs, log = _fresh_stores()
     demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
     urlaub = ss.get(demo.SCHEMA_URLAUB)
     assert urlaub is not None
 
-    assert urlaub.data_elements["entscheidung"].data_type is DataType.STRING
+    assert len(urlaub.xor_decisions) == 1
+    decision = next(iter(urlaub.xor_decisions.values()))
+    assert decision.discriminator == "entscheidung"
+    assert decision.kind is XorDecisionKind.ENUM
+
+    # Der Diskriminator wird VOR dem Split geschrieben -- im Genehmigungsschritt.
     genehmigung = _node_id(urlaub, "Genehmigung durch Leitung")
+    assert genehmigung in _accessors(urlaub, "entscheidung", AccessMode.WRITE)
+    assert genehmigung in _accessors(urlaub, "tage", AccessMode.READ)
+    # ... und "tage" steuert nirgends eine Verzweigung.
+    assert all(d.discriminator != "tage" for d in urlaub.xor_decisions.values())
+
+    # Genau ein Wert fuehrt in den Genehmigungszweig, alles andere in den
+    # Auffang-Zweig (total + disjunkt, K7).
+    eintragen = _node_id(urlaub, "Urlaub eintragen")
+    ablehnung = _node_id(urlaub, "Ablehnung dokumentieren")
+    cells = {b.target: b for b in decision.branches}
+    assert cells[eintragen].values == ["Genehmigt"]
+    assert cells[ablehnung].is_else is True
+
+
+def test_demo_urlaub_carries_enriched_message_object() -> None:
+    # The "mitteilung" object is filled by whichever XOR branch runs (the
+    # confirmation on approval, the reason on rejection) and read by the
+    # notification afterwards -> a data object that travels and is enriched
+    # across activities (D1 holds via the XOR-join intersection).
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = ss.get(demo.SCHEMA_URLAUB)
+    assert urlaub is not None
+
+    assert urlaub.data_elements["mitteilung"].data_type is DataType.STRING
+    eintragen = _node_id(urlaub, "Urlaub eintragen")
     ablehnung = _node_id(urlaub, "Ablehnung dokumentieren")
     benachrichtigen = _node_id(urlaub, "Mitarbeiter benachrichtigen")
-    # Both branches write it, the notification reads it.
-    assert {genehmigung, ablehnung} <= _accessors(urlaub, "entscheidung", AccessMode.WRITE)
+    # Both branches write it, the notification reads it (together with the
+    # decision itself).
+    assert {eintragen, ablehnung} <= _accessors(urlaub, "mitteilung", AccessMode.WRITE)
+    assert benachrichtigen in _accessors(urlaub, "mitteilung", AccessMode.READ)
     assert benachrichtigen in _accessors(urlaub, "entscheidung", AccessMode.READ)
 
 
 def test_demo_completed_instance_holds_enriched_values() -> None:
-    # The finished, rejected instance must carry both the captured "tage" and
-    # the "entscheidung" written by the rejection step (object passed along).
+    # The finished, rejected instance must carry the captured "tage", the
+    # supervisor's "entscheidung" (which resolved the split) and the
+    # "mitteilung" written by the rejection branch (object passed along).
     ss, ins, orgs, log = _fresh_stores()
     demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
 
@@ -173,7 +210,46 @@ def test_demo_completed_instance_holds_enriched_values() -> None:
     assert finished is not None
     assert finished.state is InstanceState.COMPLETED
     assert finished.data_values.get("tage") == 20
-    assert "Abgelehnt" in str(finished.data_values.get("entscheidung", ""))
+    assert finished.data_values.get("entscheidung") == "Abgelehnt"
+    assert "Resturlaub" in str(finished.data_values.get("mitteilung", ""))
+
+
+def test_demo_urlaub_approval_path_completes_end_to_end() -> None:
+    # Gegenprobe zum abgelehnten Seed-Fall: entscheidet die Leitung "Genehmigt",
+    # loest der ENUM-Split in den Genehmigungszweig auf und die Instanz laeuft
+    # bis zum Ende durch. Die Entscheidungs-Maske schreibt den Diskriminator.
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = hydrate_org(ss.get(demo.SCHEMA_URLAUB), make_org_resolver(orgs))  # type: ignore[arg-type]
+
+    genehmigung = _node_id(urlaub, "Genehmigung durch Leitung")
+    mask = urlaub.forms.get(genehmigung)
+    assert mask is not None
+    entscheidungsfeld = next(f for f in mask.fields if f.element_id == "entscheidung")
+    assert entscheidungsfeld.options == ["Genehmigt", "Abgelehnt"]
+
+    ctx = ExecutionContext(make_resolver(InMemorySchemaStore()), ins)
+    inst = instantiate(urlaub, instance_id="urlaub-approve-1", context=ctx, is_test=True)
+    inst = complete_activity(
+        inst, urlaub, _node_id(urlaub, "Antrag erfassen"), {"tage": 25}, context=ctx
+    )
+    inst = complete_activity(inst, urlaub, _node_id(urlaub, "Antrag prüfen"), None, context=ctx)
+    # 25 Tage -- und trotzdem genehmigt: die Zahl entscheidet nicht, die Leitung tut es.
+    inst = complete_activity(
+        inst, urlaub, genehmigung, {"entscheidung": "Genehmigt"}, context=ctx
+    )
+    inst = complete_activity(
+        inst,
+        urlaub,
+        _node_id(urlaub, "Urlaub eintragen"),
+        {"mitteilung": "Urlaub ist eingetragen."},
+        context=ctx,
+    )
+    inst = complete_activity(
+        inst, urlaub, _node_id(urlaub, "Mitarbeiter benachrichtigen"), None, context=ctx
+    )
+    assert inst.state is InstanceState.COMPLETED
+    assert inst.data_values["entscheidung"] == "Genehmigt"
 
 
 def test_demo_beschaffung_wires_parallel_data_objects() -> None:

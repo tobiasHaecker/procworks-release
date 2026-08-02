@@ -400,6 +400,20 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .gchip-staff .gchip-txt { fill: var(--purple-txt); }
 .gchip-link:hover .gchip-bg { filter: brightness(1.4); }
 
+/* ---- Schnellring am gewaehlten Schritt (Karten-Sicht) ----
+   Bewusst Teil des SVG: so wandert er bei Pan/Zoom automatisch mit seinem
+   Knoten mit, statt Frame fuer Frame nachgefuehrt werden zu muessen. */
+.gring-bg { fill: var(--bg-elev2); stroke: var(--accent); stroke-width: 1.4px; }
+.gring-txt { fill: var(--txt); font-size: 12px; font-weight: 700; pointer-events: none; }
+.gring:hover .gring-bg { fill: var(--accent-soft); }
+.gring-delete .gring-bg { stroke: var(--red); }
+.gring-delete:hover .gring-bg { fill: var(--red-soft); }
+.gring-delete .gring-txt { fill: var(--red); }
+
+/* ---- Befund-Marker am Knoten: zeigt den Kern-Befund dort, wo er entsteht ---- */
+.gfind-bg { fill: var(--red); stroke: var(--bg); stroke-width: 1.5px; }
+.gfind-txt { fill: var(--on-accent); font-size: 10px; font-weight: 700; pointer-events: none; }
+
 /* ---- Findings ---- */
 .finding { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .finding:last-child { border-bottom: 0; }
@@ -596,6 +610,119 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   font-size: 12px; padding: 0 2px; line-height: 1;
 }
 .insp-bind-del:hover { color: var(--red); }
+
+/* ---- Modellieren im Kontrollfluss: Schritt-Karte ----
+   Die Karte liegt als Overlay UEBER dem Canvas (nicht als Grid-Nachbar), damit
+   die Canvas-Groesse beim Aus-/Abwaehlen konstant bleibt und das Einpassen
+   nicht bei jeder Auswahl neu rechnen muss. Alle Farben ueber die Variablen --
+   sonst bricht die helle Variante (siehe CLAUDE.md). */
+.model-canvas .canvas-wrap { height: clamp(420px, 66vh, 900px); }
+/* Bezugsrahmen der Karte: ohne `position: relative` haengt sie sich an den
+   naechsten positionierten Vorfahren -- im Zweifel das Fenster -- und liegt
+   dann irgendwo auf der Seite statt ueber dem Kontrollfluss. */
+.model-canvas .graph-body { position: relative; }
+/* Der Einpassen-Knopf sitzt oben rechts IM Canvas, also genau dort, wo die
+   Karte einfaehrt. Er weicht ihr aus, solange sie sichtbar ist. */
+.model-canvas .graph-body:has(.step-card) .canvas-fit { right: 384px; }
+.step-card {
+  position: absolute; right: 12px; top: 12px; bottom: 12px; width: 360px; z-index: 4;
+  display: flex; flex-direction: column;
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.step-card-h {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border-bottom: 1px solid var(--line); background: var(--bg-elev2);
+}
+.step-card-h input[type=text] { flex: 1; min-width: 0; font-size: 13px; }
+.step-card-name { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-card-x {
+  border: 0; background: transparent; color: var(--txt-dim); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 2px 4px;
+}
+.step-card-x:hover { color: var(--txt); }
+.step-card-b { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+/* Freigabe-Ampel am Schritt: reine Anzeige abgeleiteter Kern-Aussagen. */
+.step-dot { width: 10px; height: 10px; border-radius: 999px; flex: 0 0 auto; }
+.step-dot-green { background: var(--green); }
+.step-dot-amber { background: var(--amber); }
+.step-dot-red { background: var(--red); }
+
+.card-sec { border-bottom: 1px solid var(--line); }
+.card-sec:last-child { border-bottom: 0; }
+.card-sec-h {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 9px 12px; border: 0; background: transparent; color: var(--txt);
+  font: inherit; font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .5px; cursor: pointer; text-align: left;
+}
+.card-sec-h:hover { background: var(--bg-elev2); }
+.card-sec-h.open { color: var(--txt); }
+.card-sec-caret { color: var(--txt-dim); font-size: 10px; }
+.card-sec-sum {
+  font-size: 11px; font-weight: 700; letter-spacing: 0;
+  background: var(--accent-soft); color: var(--accent-txt);
+  border-radius: 999px; padding: 1px 7px;
+}
+.card-sec-b { padding: 0 12px 14px; }
+.card-note { padding: 12px; font-size: 12px; color: var(--txt-dim); }
+.card-hint { font-size: 12px; color: var(--txt-dim); line-height: 1.45; }
+/* Bindungszeile: der Name ist klickbar (Herkunft hervorheben), sieht aber wie
+   Text aus -- ein Knopf-Rahmen wuerde die Liste unruhig machen. */
+.link-like {
+  border: 0; background: transparent; color: inherit; font: inherit;
+  padding: 0; cursor: pointer; text-align: left;
+}
+.link-like:hover { color: var(--amber); }
+
+/* Leerer Prozess: Einstieg mitten auf der Canvas statt nur ein kleines „+“. */
+.canvas-empty {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 3; max-width: 380px; text-align: center;
+  display: flex; flex-direction: column; gap: 8px; align-items: center;
+  padding: 20px 24px; border-radius: var(--radius);
+  background: var(--bg-elev); border: 1px dashed var(--line);
+}
+.canvas-empty-t { font-size: 15px; font-weight: 700; }
+.canvas-empty-b { font-size: 12px; color: var(--txt-dim); line-height: 1.45; }
+
+/* Statusleiste unter dem Kontrollfluss (Ampel + modellweite Befunde + Hinweis). */
+.model-status {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 16px; border-top: 1px solid var(--line); font-size: 12px;
+}
+.model-status-txt { color: var(--txt-dim); flex: 1 1 320px; line-height: 1.45; }
+/* Tastaturwege der Karten-Sicht -- bewusst zurueckhaltend, aber sichtbar. */
+.model-status-key {
+  color: var(--txt-dim); opacity: .75; white-space: nowrap;
+  border: 1px solid var(--line); border-radius: 8px; padding: 3px 8px;
+}
+.model-status-find {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--red-soft); color: var(--red);
+  border-radius: 8px; padding: 3px 8px;
+}
+
+/* Auswahl-/Bindungsliste in den Dialogen „Datenelement binden"/„Bearbeiter". */
+.pick { display: flex; flex-direction: column; gap: 8px; }
+.pick-list {
+  max-height: 40vh; overflow-y: auto; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--bg);
+}
+.pick-group {
+  font-size: 11px; font-weight: 700; color: var(--txt-dim); text-transform: uppercase;
+  letter-spacing: .4px; padding: 8px 10px 4px;
+}
+.pick-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--txt); font: inherit; font-size: 13px; cursor: pointer; text-align: left;
+}
+.pick-row:hover { background: var(--bg-elev2); }
+.pick-row.active { background: var(--accent-soft); color: var(--accent-txt); }
+.pick-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-sub { font-size: 11px; color: var(--txt-dim); margin-left: auto; white-space: nowrap; }
+.pick-row.active .pick-sub { color: inherit; opacity: .8; }
 
 /* ---- Modellieren: rechte Bindungs-Palette (Tabs + klickbare Listenzeilen) ---- */
 .pal-panel { margin-top: 14px; }
@@ -830,5 +957,22 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   /* Zeilen-Hervorhebung (Sprung aus dem Kontrollfluss) auf der Karte. */
   .content tr.hl-row td:first-child { box-shadow: none; }
   .content tr.hl-row { box-shadow: inset 3px 0 0 var(--accent); }
+
+  /* Schritt-Karte als Bodensheet: seitlich waere sie auf einem Telefon breiter
+     als der Kontrollfluss. Hoehe in `dvh` (nicht `vh`) -- auf iOS meint `vh`
+     die grosse Viewport-Hoehe, das Ende laege sonst hinter der Safari-Leiste.
+     app.js erkennt diese Darstellung an der Breite und setzt dann KEINE
+     seitliche Reserve fuer das Einpassen (siehe reserveCardWidth). */
+  .step-card {
+    left: 8px; right: 8px; top: auto; bottom: 8px; width: auto;
+    height: 55vh; height: 55dvh;
+  }
+  .model-canvas .canvas-wrap { height: clamp(360px, 60vh, 620px); }
+  /* Unten liegend verdeckt die Karte den Einpassen-Knopf nicht mehr. */
+  .model-canvas .graph-body:has(.step-card) .canvas-fit { right: 10px; }
+  /* Groessere Trefferflaeche fuer die Abschnittskoepfe am Telefon. */
+  .card-sec-h { padding: 12px; }
+  /* Ohne Tastatur ist der Tastenhinweis nur Ballast. */
+  .model-status-key { display: none; }
 }
 

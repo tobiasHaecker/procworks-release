@@ -655,9 +655,9 @@ wiederhergestellt.
 `demo.py` enthält einen reproduzierbaren Demo-Datensatz, der alle Funktionen
 greifbar macht: eine geteilte Organisation `org-acme` (Rollen, Abteilungen,
 Agenten mit Vertreter), den **freigegebenen** Prozess `urlaubsantrag`
-(START → erfassen → prüfen → XOR Genehmigung/Ablehnung → benachrichtigen) und
-den **Entwurf** `beschaffung` (AND-Split), dazu **drei Instanzen** an
-unterschiedlichen Punkten:
+(START → erfassen → prüfen → Genehmigung durch Leitung → XOR *Urlaub
+eintragen*/*Ablehnung dokumentieren* → benachrichtigen) und den **Entwurf**
+`beschaffung` (AND-Split), dazu **drei Instanzen** an unterschiedlichen Punkten:
 
 ```text
 urlaub-2026-001  RUNNING    frisch gestartet (erste Aktivität offen)
@@ -665,29 +665,41 @@ urlaub-2026-002  RUNNING    erfasst + geprüft, wartet auf Genehmigung der Leitu
 urlaub-2026-003  COMPLETED  abgelehnt + benachrichtigt (Ende erreicht)
 ```
 
+Die Verzweigung hängt bewusst an der **Entscheidung**, nicht an der beantragten
+Anzahl Urlaubstage: Ein Antrag wird nicht abgelehnt, *weil* er viele Tage
+umfasst, sondern weil die vorgesetzte Person so entscheidet. *Genehmigung durch
+Leitung* liegt deshalb vor dem Split, liest `tage` als Entscheidungsgrundlage
+und schreibt `entscheidung` (Auswahlliste „Genehmigt"/„Abgelehnt"); die
+ENUM-Partition schaltet `Genehmigt` in den einen Zweig, jeden anderen Wert in
+den Auffang-Zweig (total + disjunkt, K7).
+
 Beide Prozesse zeigen **Datenobjekte, die zwischen Aufgaben wandern und befüllt
 werden** (Schreiben-vor-Lesen, D1):
 
 - `urlaubsantrag`: `tage` wird in *Antrag erfassen* geschrieben und in *Antrag
-  prüfen* sowie der XOR-Bedingung gelesen. Zusätzlich wandert ein **angereichertes**
-  Objekt `entscheidung` durch den Fluss: es wird vom jeweils laufenden XOR-Zweig
-  (*Genehmigung* **oder** *Ablehnung*) befüllt und danach von *Mitarbeiter
-  benachrichtigen* gelesen – garantiert vorhanden auf jedem Pfad (XOR-Join-Schnitt).
+  prüfen* sowie *Genehmigung durch Leitung* gelesen; `entscheidung` wird in der
+  Genehmigung geschrieben und steuert den Split. Zusätzlich wandert ein
+  **angereichertes** Objekt `mitteilung` durch den Fluss: es wird vom jeweils
+  laufenden XOR-Zweig (*Urlaub eintragen* **oder** *Ablehnung dokumentieren*)
+  befüllt und danach von *Mitarbeiter benachrichtigen* gelesen – garantiert
+  vorhanden auf jedem Pfad (XOR-Join-Schnitt).
 - `beschaffung`: zwei Objekte werden auf **parallelen** Zweigen befüllt und am
   AND-Join zusammengeführt – `betrag` (*Angebote einholen*) und `budget_ok`
   (*Budget prüfen*) werden beide von *Bestellung freigeben* gelesen (keine
   konkurrierenden Schreibzugriffe, D2).
 
 Die abgeschlossene Instanz `urlaub-2026-003` trägt entsprechend reale Werte
-(`tage=20`, `entscheidung="Abgelehnt: …"`), die über die Aktivitäten
-weitergereicht wurden.
+(`tage=20`, `entscheidung="Abgelehnt"`, `mitteilung="20 Tage überschreiten …"`),
+die über die Aktivitäten weitergereicht wurden.
 
 Damit **jede Sicht** ab dem ersten Start etwas anzeigt, demonstriert der
 Datensatz nahezu den gesamten Funktionsumfang:
 
 - **Eingabemasken** (Formular-Designer): *Antrag erfassen* (Zahlenfeld +
-  optionales Textfeld), *Angebote einholen* (Bestellwert + Lieferantennummer) und
-  *Budget prüfen* (Checkbox).
+  optionales Textfeld), *Genehmigung durch Leitung* (Lesefeld mit den beantragten
+  Tagen + Auswahlliste für die Entscheidung), beide XOR-Zweige (Mitteilungstext),
+  *Angebote einholen* (Bestellwert + Lieferantennummer) und *Budget prüfen*
+  (Checkbox).
 - **Wertschöpfungsklassen** (alle drei), **Arbeitslisten-Priorität** und die
   **Zeitperspektive** (Soll-Dauern je Schritt + Prozessfrist) im Urlaubsprozess.
 - **Integration** im Beschaffungs-Entwurf: ein **Daten-Connector** (`erp`) mit

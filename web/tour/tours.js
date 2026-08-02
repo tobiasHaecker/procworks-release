@@ -114,13 +114,20 @@ const TOURS = [
         anchor: '[data-tour="model.tab.data"]',
         title: "Der Versuch, etwas Unmögliches zu tun",
         body: "Um den Resturlaub zu prüfen, braucht Erika die beantragten Urlaubstage. Aber: Unser neuer Schritt steht ganz vorn — die Tage werden erst danach in „Antrag erfassen“ eingetragen. Er würde also etwas lesen, das es noch gar nicht gibt. Versuchen wir es trotzdem.",
-        hint: "Wähle links den neuen Schritt aus, öffne den Tab Datenelemente und binde „Urlaubstage“ mit ⊕ lesend an ihn.",
+        // Bewusst ohne Namen des Behaelters: die Bindung sitzt je nach
+        // gewaehlter Modellier-Oberflaeche im Abschnitt „Daten" der Schritt-Karte
+        // oder im Tab „Datenelemente" der klassischen Palette. Der Handgriff
+        // (Schritt waehlen, ⊕) ist in beiden derselbe.
+        hint: "Wähle links den neuen Schritt aus und binde „Urlaubstage“ mit ⊕ lesend an ihn.",
         action: "simulate",
         // Der Schritt braucht zwei Stellen: erst den Knoten im Kontrollfluss
-        // wählen, dann in der Palette binden. Ohne den Zusatzbereich läge der
-        // Graph unter dem blockenden Scrim und der neue Schritt liesse sich
-        // nicht auswählen. Die Palette muss GANZ frei sein -- der Tab ist nur
-        // der Umschalter, gebunden wird über das ⊕ in der Liste darunter.
+        // wählen, dann binden. Ohne den Zusatzbereich läge der Graph unter dem
+        // blockenden Scrim und der neue Schritt liesse sich nicht auswählen.
+        // "model.palette" muss GANZ frei sein -- der Anker ist nur der
+        // Abschnittskopf bzw. Tab, gebunden wird über das ⊕ darunter. Der Anker
+        // trägt in der Karten-Sicht die ganze Schritt-Karte und existiert dort
+        // erst, sobald ein Schritt gewählt ist; die Engine zeichnet das Overlay
+        // neu, sobald er auftaucht (paintKey).
         also: ['[data-tour="model.graph"]', '[data-tour="model.palette"]'],
         sim: { reject: true },
         advance: (ctx) => ctx.rejected,
@@ -141,11 +148,11 @@ const TOURS = [
         anchor: '[data-tour="model.tab.res"]',
         title: "Wer macht die Arbeit?",
         body: "„" + TOUR_NEW_STEP_LABEL + "“ ist Arbeit für eine Sachbearbeiterin — die muss jemandem zugeordnet werden, sonst landet sie in keiner Aufgabenliste. Eingetragen wird dabei nicht unbedingt ein Name: Du kannst genauso eine Rolle oder eine Abteilung angeben. Läuft der Prozess später, landet die Aufgabe automatisch bei den passenden Personen — und bei ihrer Vertretung, wenn jemand im Urlaub ist.",
-        hint: "Öffne den Tab Ressourcen und binde die Rolle „Sachbearbeiter“ mit ⊕ an den neuen Schritt.",
+        hint: "Wähle links den neuen Schritt aus und binde ihm mit ⊕ die Rolle „Sachbearbeiter“ zu.",
         action: "simulate",
         // Wie beim Ablehnungs-Schritt: das Bindungsziel ist der im Graph
-        // gewählte Knoten, die Auswahl muss also erreichbar bleiben -- und die
-        // Palette ganz, weil das ⊕ der Rolle unter dem Tab sitzt.
+        // gewählte Knoten, die Auswahl muss also erreichbar bleiben -- und der
+        // Bindungsbereich ganz, weil das ⊕ der Rolle unter dem Anker sitzt.
         also: ['[data-tour="model.graph"]', '[data-tour="model.palette"]'],
         sim: { stage: 2 },
         advance: (ctx) => ctx.stage >= 2,

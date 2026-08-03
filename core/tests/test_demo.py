@@ -9,14 +9,14 @@ demo -- including the RBAC gate and the login-preservation guarantee.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 import procworks.api as api_module
-from procworks import assignment, demo
+from procworks import assignment, demo, demo_o2c
 from procworks.api import app
 from procworks.audit import InMemoryAuditLog, compute_kpis, discover_process_map
 from procworks.auth_password import (
@@ -45,6 +45,7 @@ from procworks.store import (
     make_org_resolver,
     make_resolver,
 )
+from procworks.validator import _possible_agents
 
 client = TestClient(app)
 
@@ -614,3 +615,50 @@ def test_admin_reset_demo_seeds_usable_logins(
     )
     assert tasks.status_code == 200
     assert len(tasks.json()) >= 1
+
+
+@pytest.mark.parametrize(
+    ("loader", "users"),
+    [
+        (demo.load_demo, demo.DEMO_USERS),
+        (demo_o2c.load_o2c, demo_o2c.O2C_USERS),
+    ],
+    ids=["demo", "o2c"],
+)
+def test_every_demo_staff_rule_has_a_seeded_login(
+    loader: Callable[..., None],
+    users: list[tuple[str, str, frozenset[str], str | None]],
+) -> None:
+    """Guard: every step of the shipped demos is reachable by a seeded login.
+
+    A staff rule may be perfectly valid (Z2: it resolves to *some* agent) and the
+    step still be dead in the demo -- namely when none of those agents has a
+    login. The process then starts, activates the step and stalls: the task sits
+    in a worklist nobody can open. That is invisible to the validator, because
+    logins are a boundary concern, and it is exactly what happened with "Angebote
+    einholen" (role Einkauf -> only Paul Klein, who had no login), which made the
+    procurement draft impossible to play through.
+
+    Checked with the validator's own design-time over-approximation, so a rule
+    that only resolves at runtime (NodePerformingAgent, ``None`` = universe) is
+    correctly not flagged.
+    """
+    schemas, instances, orgs, audit = _fresh_stores()
+    loader(schema_store=schemas, instance_store=instances, org_store=orgs, audit_log=audit)
+    with_login = {agent for *_, agent in users if agent}
+
+    unreachable: list[str] = []
+    for schema_id in schemas.list_ids():
+        schema = schemas.get(schema_id)
+        assert schema is not None
+        # A shared org model leaves the embedded copy empty; resolve through the
+        # store whenever the schema references one.
+        org = orgs.get(schema.org_model_id) if schema.org_model_id else schema.org_model
+        assert org is not None
+        for node_id, rule in schema.staff_rules.items():
+            possible = _possible_agents(org, rule)
+            if possible is not None and not (possible & with_login):
+                label = schema.nodes[node_id].label or node_id
+                unreachable.append(f"{schema_id}/{label}: {sorted(possible)}")
+
+    assert not unreachable, "Schritte ohne bedienbaren Login: " + "; ".join(unreachable)

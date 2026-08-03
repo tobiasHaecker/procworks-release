@@ -5,6 +5,11 @@
 #   docker compose -f deploy/docker-compose.full.yml up --build
 # Then open http://localhost (the web container serves the SPA and proxies /api).
 #
+# Start with the example data already loaded (evaluation / live demo -- the
+# switches are ignored once the system holds a process, see the api service):
+#   PROCWORKS_LOAD_DEMO=1 PROCWORKS_LOAD_O2C=1 \
+#     docker compose -f deploy/docker-compose.full.yml up --build -d
+#
 # For a public HTTPS deployment, set SITE_ADDRESS to your domain and ACME_EMAIL
 # to a contact address; Caddy then provisions Let's Encrypt certificates.
 
@@ -38,6 +43,18 @@ services:
       # Pin a known admin instead by setting PROCWORKS_ADMIN_LOGIN +
       # PROCWORKS_ADMIN_PASSWORD.
       PROCWORKS_AUTH: password
+      # Optional, empty (= off) by default: seed the example data at boot, so a
+      # fresh stack comes up ready for a demo instead of an empty system that
+      # first has to be filled from the admin view. Both only fire while no
+      # process is stored yet, so a running installation is never touched:
+      #   PROCWORKS_LOAD_DEMO=1 PROCWORKS_LOAD_O2C=1 docker compose -f … up -d
+      PROCWORKS_LOAD_DEMO: "${PROCWORKS_LOAD_DEMO:-}"
+      PROCWORKS_LOAD_O2C: "${PROCWORKS_LOAD_O2C:-}"
+      # Optional: pin the initial admin instead of reading the one-off password
+      # from the container log. Both must be set; the account still has to
+      # change its password on first login.
+      PROCWORKS_ADMIN_LOGIN: "${PROCWORKS_ADMIN_LOGIN:-}"
+      PROCWORKS_ADMIN_PASSWORD: "${PROCWORKS_ADMIN_PASSWORD:-}"
       # Read-only backup admin view (GET /admin/backups, POST …/run-now): the API
       # only reads the metadata index the backup scheduler publishes here and
       # writes a .run-now trigger. It has NO access to the dump volume (§9).

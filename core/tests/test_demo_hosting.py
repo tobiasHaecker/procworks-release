@@ -406,3 +406,23 @@ def test_demo_image_seeds_both_cosmoses() -> None:
     ).read_text(encoding="utf-8")
     assert "PROCWORKS_LOAD_DEMO=1" in dockerfile
     assert "PROCWORKS_LOAD_O2C=1" in dockerfile
+
+
+def test_full_stack_compose_passes_the_seed_switches_through_defaulting_to_off() -> None:
+    """Guard: the self-hosted stack can seed example data without editing files.
+
+    A fresh ``docker compose ... down -v && up`` leaves an *empty* system: the
+    demo data lives behind the admin view, so a live presentation would begin
+    with a login, a forced password change and a few clicks before there is
+    anything to show. Passing the two boot switches through fixes that with one
+    prefixed command -- but the customer default must stay **off**, hence the
+    empty fallback (``:-``) rather than a hard-coded ``1``: an evaluator who
+    starts the stack plainly still gets a clean system, and the switches only
+    fire while no process is stored.
+    """
+    compose = (
+        Path(__file__).resolve().parents[2] / "deploy" / "docker-compose.full.yml"
+    ).read_text(encoding="utf-8")
+    for var in ("PROCWORKS_LOAD_DEMO", "PROCWORKS_LOAD_O2C"):
+        assert f'{var}: "${{{var}:-}}"' in compose, f"{var} is not passed through"
+        assert f"{var}: 1" not in compose, f"{var} must not default to on"

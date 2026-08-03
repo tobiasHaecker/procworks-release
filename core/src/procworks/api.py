@@ -1551,10 +1551,21 @@ def _demo_logins() -> list[DemoLogin]:
     """
 
     from procworks.demo import DEMO_USERS
+    from procworks.demo import ORG_ID as DEMO_ORG_ID
 
+    # Same reasoning as for the Order-to-Cash logins below: three of the base
+    # logins are RBAC ``operator``, so the box would read "Bearbeiter" three
+    # times and hide what actually distinguishes them (Sachbearbeiter,
+    # Teamleitung, Einkauf). Logins without an agent (modeller, viewer) keep
+    # their RBAC role as the fallback.
+    base_org = _org_store.get(DEMO_ORG_ID)
     logins = [
-        DemoLogin(login=login, name=name, role=next(iter(roles), "viewer"))
-        for login, name, roles, _agent in DEMO_USERS
+        DemoLogin(
+            login=login,
+            name=name,
+            role=_business_role_label(base_org, agent, next(iter(roles), "viewer")),
+        )
+        for login, name, roles, agent in DEMO_USERS
     ]
     if not _env_truthy("PROCWORKS_LOAD_O2C"):
         return logins

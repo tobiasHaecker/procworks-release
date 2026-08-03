@@ -197,7 +197,7 @@ cd deploy/demo/broker && python -c "
 import mailer
 from datetime import datetime, timezone
 print(mailer._welcome_html(first_name='Max', url='https://demo.example',
-  expiry=mailer._format_expiry(datetime.now(timezone.utc)), ttl_phrase='2 Stunden',
+  expiry=mailer._format_expiry(datetime.now(timezone.utc)), ttl_phrase='6 Stunden',
   site_url='https://procworks.de', marketing_consent=True))" > /tmp/mail.html
 ```
 
@@ -236,8 +236,11 @@ curl -X POST https://procworks-demo-broker.fly.dev/trial \
 #   -> {"trial_id":"...","url":"https://trial-....fly.dev","state":"created"}
 ```
 
-Cost caps are set conservatively in `broker/fly.toml` (`DEMO_MAX_ACTIVE=5`,
+Cost caps are set in `broker/fly.toml` (`DEMO_MAX_ACTIVE=15`,
 `DEMO_MAX_PER_DAY=50`, `DEMO_MAX_PER_IP=3`); raise them once you trust the setup.
+The concurrent cap was tripled together with the TTL (2 h → 6 h) — a demo now
+holds its slot three times as long, so the same throughput needs three times
+the slots.
 
 **DNS + button (last mile, on `procworks.de` / IONOS):**
 1. Point `broker.procworks.de` at the broker (`fly certs add broker.procworks.de
@@ -288,7 +291,7 @@ curl -s https://broker.procworks.de/admin/metrics \
 ```
 ```json
 {
-  "active": 2, "max_active": 5, "ttl_seconds": 7200, "uptime_seconds": 1834,
+  "active": 2, "max_active": 15, "ttl_seconds": 21600, "uptime_seconds": 1834,
   "counters": {
     "trials_started": 2, "trials_rejected_cap": 1, "trials_rejected_ratelimit": 0,
     "trials_rejected_gate": 3, "trials_failed": 0, "captcha_rejected": 0,

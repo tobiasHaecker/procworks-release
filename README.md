@@ -118,6 +118,20 @@ Derselbe Bereich enthält **„Auf Null zurücksetzen"**, um jederzeit wieder mi
 einem leeren System zu starten. Alles davon ist **nur für Administratoren**
 sichtbar.
 
+Beim **allerersten Start** geht es auch ohne Anmeldung und ohne Klicks: Stellen
+Sie dem Startbefehl die beiden Schalter voran, dann sind die Beispieldaten schon
+da, sobald die Oberfläche erscheint.
+
+```bash
+PROCWORKS_LOAD_DEMO=1 PROCWORKS_LOAD_O2C=1 \
+  docker compose -f deploy/docker-compose.full.yml up --build -d
+```
+
+In der PowerShell entspricht das `$env:PROCWORKS_LOAD_DEMO="1"` (und dasselbe für
+`PROCWORKS_LOAD_O2C`) **vor** dem `docker compose`-Aufruf. Die Schalter greifen
+**nur, solange noch kein Prozess gespeichert ist** – eine laufende Installation
+bleibt unberührt, ein zweiter Start ändert nichts.
+
 Nach dem Laden können Sie sich mit den **Testbenutzern** anmelden (Passwort für
 alle: `demo-procworks`):
 
@@ -126,6 +140,7 @@ alle: `demo-procworks`):
 | `mara.modell` | Mara Modell | Modellierer | Prozesse modellieren, Daten/Organisation pflegen |
 | `erika.sander` | Erika Sander | Bearbeiter | Aufgaben erledigen (hat offene Urlaubsanträge) |
 | `tom.berger` | Tom Berger | Bearbeiter (Leitung) | Genehmigungen erteilen |
+| `paul.klein` | Paul Klein | Bearbeiter (Einkauf) | Angebote einholen (Beschaffungsantrag) |
 | `vera.viewer` | Vera Viewer | Leser | Monitoring nur ansehen |
 
 > Die Testbenutzer existieren erst **nach** dem Laden der Beispieldaten und nur

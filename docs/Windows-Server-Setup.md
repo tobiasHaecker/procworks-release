@@ -278,7 +278,7 @@ Lieferung → Rechnung → Zahlungseingang → Mahnwesen), sechs Prozessen, eine
 eigenen Beispielfirma und neun vorbereiteten Vorgängen. Beide Datensätze lassen
 sich auch nacheinander laden; jedes Laden setzt vorher alle Daten zurück.
 
-Anschließend stehen vier **Testbenutzer** zum Anmelden bereit (Passwort für alle:
+Anschließend stehen fünf **Testbenutzer** zum Anmelden bereit (Passwort für alle:
 `demo-procworks`):
 
 | Login | Rolle |
@@ -286,6 +286,7 @@ Anschließend stehen vier **Testbenutzer** zum Anmelden bereit (Passwort für al
 | `mara.modell` | Modellierer |
 | `erika.sander` | Bearbeiter (hat offene Aufgaben) |
 | `tom.berger` | Bearbeiter / Leitung (genehmigt) |
+| `paul.klein` | Bearbeiter / Einkauf (Beschaffungsantrag) |
 | `vera.viewer` | Leser (nur Monitoring) |
 
 Über **„Auf Null zurücksetzen"** im selben Bereich werden alle Daten **und** die

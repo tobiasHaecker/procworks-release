@@ -79,6 +79,11 @@ DEMO_USERS: list[tuple[str, str, frozenset[str], str | None]] = [
     ("mara.modell", "Mara Modell", frozenset({"modeler"}), None),
     ("erika.sander", "Erika Sander", frozenset({"operator"}), "a-erika"),
     ("tom.berger", "Tom Berger", frozenset({"operator"}), "a-tom"),
+    # Ohne diesen Login waere die Rolle "Einkauf" unbesetzt -- und damit der
+    # Schritt "Angebote einholen" des Beschaffungsantrags von *niemandem*
+    # bedienbar: der Entwurfsprozess liesse sich zwar starten, aber nie
+    # durchspielen. Waechter: test_every_demo_staff_rule_has_a_seeded_login.
+    ("paul.klein", "Paul Klein", frozenset({"operator"}), "a-paul"),
     ("vera.viewer", "Vera Viewer", frozenset({"viewer"}), None),
 ]
 

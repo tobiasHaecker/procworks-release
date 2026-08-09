@@ -35,6 +35,7 @@ from datetime import datetime, timedelta
 
 from procworks.model import (
     CRITICALITY_RANK,
+    EdgeType,
     ProcessSchema,
     TimeConstraint,
     TimeCriticality,
@@ -62,6 +63,74 @@ def target_seconds(constraint: TimeConstraint | None) -> float | None:
     if constraint.target_lead_seconds is not None:
         return constraint.target_lead_seconds
     return constraint.max_duration_seconds
+
+
+def pause_credit_seconds(
+    constraint: TimeConstraint | None,
+    paused_seconds: float | None,
+    suspended_at: datetime | None,
+    now: datetime,
+) -> float:
+    """Resolve the due-clock credit earned by pauses (net time, E2 Stufe C).
+
+    Returns ``0.0`` unless the modeller opted in via
+    ``TimeConstraint.pause_stops_clock`` -- the default keeps the deliberate
+    anti-loophole stance of the Detailzustaende concept (§4): suspending never
+    defers a deadline. With the opt-in, the credit is the sum of all *closed*
+    pauses of the current activation plus the ongoing pause (if the step is
+    suspended right now), so the elapsed clock freezes for the duration of
+    every pause. Fed by the boundary-stamped
+    ``ProcessInstance.node_paused_seconds`` / ``node_suspended_at``.
+    """
+
+    if constraint is None or not constraint.pause_stops_clock:
+        return 0.0
+    credit = max(0.0, paused_seconds or 0.0)
+    if suspended_at is not None:
+        credit += max(0.0, (now - suspended_at).total_seconds())
+    return credit
+
+
+def effective_clock(
+    constraint: TimeConstraint | None,
+    activated_at: datetime | None,
+    claimed_at: datetime | None,
+    pause_credit: float = 0.0,
+) -> tuple[float | None, datetime | None]:
+    """Resolve the effective (target seconds, clock origin) of an open task.
+
+    The ONE shared due-time computation behind the worklist bands and the
+    escalation sweep (T3/E9), so both always agree on when a task is overdue:
+
+    * **Rule B** (Aktivitaets-Detailzustaende-Konzept §4): once the task is
+      **claimed** and carries a modelled processing duration
+      (``max_duration_seconds``), the clock is t_bearb -- the duration
+      measured from the claim instant.
+    * Otherwise the reaction clock applies unchanged: ``target_lead_seconds``
+      (fallback rule S: ``max_duration_seconds``) measured from activation.
+
+    ``pause_credit`` (net time, E2 Stufe C) shifts the returned origin forward
+    by the credited pause seconds -- callers obtain it from
+    :func:`pause_credit_seconds`, so a step whose constraint opted in via
+    ``pause_stops_clock`` is due later by exactly its pause time. The default
+    ``0.0`` keeps the historical behaviour.
+
+    Returns ``(None, None)``-ish parts when no statement is possible (no
+    constraint, no stamp) -- callers fall back to the NONE band / no sweep.
+    """
+
+    if constraint is None:
+        return None, None
+    origin: datetime | None
+    if claimed_at is not None and constraint.max_duration_seconds is not None:
+        origin = claimed_at
+        target: float | None = constraint.max_duration_seconds
+    else:
+        origin = activated_at
+        target = target_seconds(constraint)
+    if origin is not None and pause_credit > 0:
+        origin = origin + timedelta(seconds=pause_credit)
+    return target, origin
 
 
 def criticality_from_ratio(ratio: float) -> TimeCriticality:
@@ -121,6 +190,8 @@ def remaining_critical_path_seconds(
     succ: dict[str, list[str]] = {nid: [] for nid in nodes}
     outdegree: dict[str, int] = {nid: 0 for nid in nodes}
     for edge in schema.edges:
+        if edge.type is not EdgeType.CONTROL:
+            continue  # SYNC (K4) is ordering-only, not remaining work
         if edge.source in nodes and edge.target in nodes:
             succ[edge.source].append(edge.target)
             outdegree[edge.source] += 1
@@ -172,6 +243,17 @@ class TimeContext:
     started_at: datetime | None = None
     #: Whole-process deadline in seconds (``ProcessSchema.deadline_seconds``).
     deadline_seconds: float | None = None
+    #: Per-node claim time (``ProcessInstance.node_claimed_at``, E1). Feeds
+    #: rule B (Aktivitaets-Detailzustaende-Konzept §4): once claimed, a node
+    #: with a modelled processing duration is measured from its claim.
+    claimed_at: dict[str, datetime] = field(default_factory=dict)
+    #: Accumulated closed pause seconds per node
+    #: (``ProcessInstance.node_paused_seconds``, net time E2 Stufe C). Only
+    #: consumed when the node's constraint opted in via ``pause_stops_clock``.
+    paused_seconds: dict[str, float] = field(default_factory=dict)
+    #: Start of the ongoing pause per node
+    #: (``ProcessInstance.node_suspended_at``); present while suspended.
+    suspended_at: dict[str, datetime] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -200,9 +282,19 @@ def assess(
     a pre-feature instance behaves exactly as before (backward compatible).
     """
 
-    target = target_seconds(schema.time_constraints.get(node_id))
-    activated = ctx.activated_at.get(node_id)
-    if target is None or target <= 0 or activated is None:
+    constraint = schema.time_constraints.get(node_id)
+    target, origin = effective_clock(
+        constraint,
+        ctx.activated_at.get(node_id),
+        ctx.claimed_at.get(node_id),
+        pause_credit_seconds(
+            constraint,
+            ctx.paused_seconds.get(node_id),
+            ctx.suspended_at.get(node_id),
+            ctx.now,
+        ),
+    )
+    if target is None or target <= 0 or origin is None:
         return TimeAssessment(
             target_seconds=target,
             elapsed_seconds=None,
@@ -211,8 +303,8 @@ def assess(
             criticality=TimeCriticality.NONE,
         )
 
-    elapsed = (ctx.now - activated).total_seconds()
-    due_at = activated + timedelta(seconds=target)
+    elapsed = (ctx.now - origin).total_seconds()
+    due_at = origin + timedelta(seconds=target)
     remaining = target - elapsed
     band = criticality_from_ratio(elapsed / target)
 

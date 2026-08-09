@@ -31,6 +31,7 @@ from procworks.model import (
     Cardinality,
     DataSourceKind,
     DataType,
+    EdgeType,
     EscalationKind,
     FilterOperator,
     FollowUpTrigger,
@@ -103,6 +104,7 @@ def validate(
     findings += _check_k2_endpoints_and_degrees(schema)
     findings += _check_k1_gateways(schema)
     findings += _check_k6_loops(schema)
+    findings += _check_k4_sync_edges(schema)
     findings += _check_k7_xor_decisions(schema)
     findings += _check_k3_reachability(schema)
     findings += _check_data_flow(schema)
@@ -449,6 +451,125 @@ def _written_through_body(
     return set()
 
 
+# --- K4: cross-branch synchronisation edges --------------------------------
+
+
+def _check_k4_sync_edges(schema: ProcessSchema) -> list[ValidationFinding]:
+    """K4: sync edges only between activities of different AND branches.
+
+    Fully additive -- a schema without SYNC edges produces no findings. A
+    SYNC edge is an *ordering-only* wait (its target additionally waits until
+    the source is completed or deselected); it never routes tokens, so the
+    structural rules ignore it entirely (``incoming``/``outgoing`` are
+    control-only). Checked here:
+
+    - endpoints exist and are interactive ACTIVITY nodes,
+    - source and target lie in **different branches of the same AND block**
+      (the ADEPT constraint MR5 -- synchronising within one branch is plain
+      control flow, across XOR branches it could dead-wait on a deselected
+      path; the AND restriction plus the engine's completed-or-skipped
+      resolution make a deadlock impossible),
+    - the combined CONTROL+SYNC graph stays acyclic (two opposing sync edges
+      would otherwise wait on each other forever).
+    """
+
+    findings: list[ValidationFinding] = []
+
+    def fail(message: str, node_id: str | None = None) -> None:
+        findings.append(ValidationFinding(rule="K4", node_id=node_id, message=message))
+
+    syncs = [e for e in schema.edges if e.type is EdgeType.SYNC]
+    if not syncs:
+        return findings
+
+    for edge in syncs:
+        source = schema.nodes.get(edge.source)
+        target = schema.nodes.get(edge.target)
+        if source is None or target is None:
+            fail("sync edge references an unknown node", edge.source)
+            continue
+        if source.type is not NodeType.ACTIVITY or target.type is not NodeType.ACTIVITY:
+            fail("a sync edge connects only ACTIVITY nodes (K4)", edge.source)
+            continue
+        if not _in_different_and_branches(schema, edge.source, edge.target):
+            fail(
+                "sync edge must connect activities of different branches of "
+                "the same AND block (K4)",
+                edge.source,
+            )
+
+    if _cycle_with_sync(schema):
+        fail("sync edges must not create a cycle with the control flow (K4)")
+    return findings
+
+
+def _and_branches(schema: ProcessSchema, split_id: str) -> list[set[str]]:
+    """The node sets of each branch of an AND split (depth-counted walk).
+
+    Same nesting-aware forward walk as :func:`procworks.model.loop_block`:
+    a branch ends at the join that closes *this* split (depth 0). Only
+    meaningful on K1-valid structures -- K4 runs after K1, and on a broken
+    structure the resulting findings are noise on top of K1's anyway.
+    """
+
+    branches: list[set[str]] = []
+    for edge in schema.outgoing(split_id):
+        members: set[str] = set()
+        stack: list[tuple[str, int]] = [(edge.target, 0)]
+        while stack:
+            node_id, depth = stack.pop()
+            node = schema.nodes.get(node_id)
+            if node is None or node_id in members:
+                continue
+            if node.type in JOIN_TYPES and depth == 0:
+                continue  # the matching join closes the branch
+            members.add(node_id)
+            next_depth = depth
+            if node.type in SPLIT_TYPES:
+                next_depth += 1
+            elif node.type in JOIN_TYPES:
+                next_depth -= 1
+            for out in schema.outgoing(node_id):
+                stack.append((out.target, next_depth))
+        branches.append(members)
+    return branches
+
+
+def _in_different_and_branches(schema: ProcessSchema, a: str, b: str) -> bool:
+    """True when some AND split holds ``a`` and ``b`` in different branches."""
+
+    for node in schema.nodes.values():
+        if node.type is not NodeType.AND_SPLIT:
+            continue
+        branches = _and_branches(schema, node.id)
+        index_a = next((i for i, m in enumerate(branches) if a in m), None)
+        index_b = next((i for i, m in enumerate(branches) if b in m), None)
+        if index_a is not None and index_b is not None and index_a != index_b:
+            return True
+    return False
+
+
+def _cycle_with_sync(schema: ProcessSchema) -> bool:
+    """True when CONTROL+SYNC together contain a cycle (Kahn over both)."""
+
+    indegree = {nid: 0 for nid in schema.nodes}
+    succ: dict[str, list[str]] = {nid: [] for nid in schema.nodes}
+    for edge in schema.edges:
+        if edge.source in indegree and edge.target in indegree:
+            succ[edge.source].append(edge.target)
+            indegree[edge.target] += 1
+    queue: deque[str] = deque(nid for nid, deg in indegree.items() if deg == 0)
+    visited = 0
+    while queue:
+        current = queue.popleft()
+        visited += 1
+        for nxt in succ[current]:
+            indegree[nxt] -= 1
+            if indegree[nxt] == 0:
+                queue.append(nxt)
+    return visited != len(schema.nodes)
+
+
 # --- K7: complete, overlap-free XOR branch partitions ---------------------
 
 
@@ -627,16 +748,20 @@ def _check_k3_reachability(schema: ProcessSchema) -> list[ValidationFinding]:
 
 
 def _succ_map(schema: ProcessSchema) -> dict[str, list[str]]:
+    # Control flow only: SYNC edges (K4) are ordering-only and must never
+    # influence reachability, blocks or the must-analyses (conservative).
     out: dict[str, list[str]] = {nid: [] for nid in schema.nodes}
     for e in schema.edges:
-        out.setdefault(e.source, []).append(e.target)
+        if e.type is EdgeType.CONTROL:
+            out.setdefault(e.source, []).append(e.target)
     return out
 
 
 def _pred_map(schema: ProcessSchema) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {nid: [] for nid in schema.nodes}
     for e in schema.edges:
-        out.setdefault(e.target, []).append(e.source)
+        if e.type is EdgeType.CONTROL:
+            out.setdefault(e.target, []).append(e.source)
     return out
 
 
@@ -880,6 +1005,8 @@ def _topological_order(schema: ProcessSchema) -> list[str]:
     succ = _succ_map(schema)
     indegree = {nid: 0 for nid in schema.nodes}
     for edge in schema.edges:
+        if edge.type is not EdgeType.CONTROL:
+            continue  # SYNC is ordering-only (K4), not part of the structure
         indegree[edge.target] = indegree.get(edge.target, 0) + 1
     queue: deque[str] = deque(nid for nid, deg in indegree.items() if deg == 0)
     order: list[str] = []
@@ -2847,6 +2974,10 @@ def _critical_path_seconds(schema: ProcessSchema) -> float | None:
     indegree: dict[str, int] = {nid: 0 for nid in nodes}
     succ: dict[str, list[str]] = {nid: [] for nid in nodes}
     for edge in schema.edges:
+        # T2 stays a control-flow bound: SYNC waits (K4) are deliberately not
+        # charged (conservative approximation, documented).
+        if edge.type is not EdgeType.CONTROL:
+            continue
         if edge.source in nodes and edge.target in nodes:
             succ[edge.source].append(edge.target)
             indegree[edge.target] += 1

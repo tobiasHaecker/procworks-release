@@ -992,3 +992,43 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   .model-status-key { display: none; }
 }
 
+
+/* Z4 (Priorisierungs-Konzept §7): ρ-Verbrauchsbalken in Arbeitslisten.
+   Farben ausschließlich über die Themen-Variablen (helle Variante!). */
+.due-wrap { display: inline-flex; flex-direction: column; gap: 3px; }
+.rho-bar { display: block; width: 90px; height: 4px; border-radius: 2px;
+  background: var(--gray-soft); overflow: hidden; }
+.rho-fill { display: block; height: 100%; border-radius: 2px;
+  background: var(--green); }
+.rho-fill.rho-warning { background: var(--amber); }
+.rho-fill.rho-at_risk { background: var(--amber); }
+.rho-fill.rho-overdue { background: var(--red); }
+.task-filter { margin-left: auto; }
+
+/* K4: Sync-Kanten (Warte-Beziehungen zwischen Parallelzweigen) – gestrichelt,
+   deutlich vom Kontrollfluss (durchgezogen) und der Datenherkunft (gepunktet)
+   unterschieden; Farben über die Themen-Variablen. */
+.gsyncedge { fill: none; stroke: var(--amber); stroke-width: 1.6;
+  stroke-dasharray: 7 4; opacity: 0.9; }
+
+/* Simulation: Abspiel-Animation (E6 Stufe B). Gedimmte Knoten treten zurueck,
+   der gerade abgeschlossene Schritt pulsiert in der Akzentfarbe; nach dem
+   Abspielen traegt kein Knoten mehr eine der beiden Klassen. */
+.gnode.sim-dim { opacity: 0.25; transition: opacity 0.3s ease; }
+.gnode.sim-current rect {
+  stroke: var(--accent);
+  stroke-width: 3;
+  animation: sim-pulse 0.7s ease-in-out infinite alternate;
+}
+@keyframes sim-pulse {
+  from { stroke-opacity: 1; }
+  to { stroke-opacity: 0.35; }
+}
+
+/* E2-Status-Overlay in der Prozesslandkarte: angehaltene Schritte tragen einen
+   gestrichelten Bernstein-Rand, gescheiterte einen kraeftigen roten -- der
+   Detailzustand ist damit im Prozessbild sichtbar, nicht erst in der Liste. */
+.gnode.d-suspended rect { stroke: var(--amber); stroke-width: 2; stroke-dasharray: 6 3; }
+.gnode.d-suspended .gstate { fill: var(--amber); }
+.gnode.d-failed rect { stroke: var(--red); stroke-width: 2.5; }
+.gnode.d-failed .gstate { fill: var(--red); }

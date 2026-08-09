@@ -34,6 +34,7 @@ from procworks.model import (
     AbsenceEntry,
     EscalationKind,
     InstanceState,
+    NodeDetailState,
     NodeState,
     NodeType,
     OrgModel,
@@ -93,6 +94,11 @@ class OpenTask(BaseModel):
     #: Fired escalation stages of the current activation (T3/E9); ``0`` while
     #: nothing escalated. Lets worklists mark an escalated task.
     escalated_stage: int = 0
+    #: Runtime detail overlay (E2): SUSPENDED/FAILED, or ``None``. Lets the
+    #: owner's list offer resume/reset and monitoring show the pause/failure.
+    detail: NodeDetailState | None = None
+    #: Reason text of a FAILED detail (empty otherwise).
+    detail_reason: str = ""
 
 
 def absent_agent_ids(
@@ -240,6 +246,8 @@ def open_tasks(
             claimed_by=instance.claimed_by.get(node_id),
             claimed_at=instance.node_claimed_at.get(node_id),
             escalated_stage=instance.escalated_stages.get(node_id, 0),
+            detail=instance.node_details.get(node_id),
+            detail_reason=instance.node_detail_reason.get(node_id, ""),
         )
         if ctx is not None:
             view = worklist_priority.assess(schema, node_id, ctx)

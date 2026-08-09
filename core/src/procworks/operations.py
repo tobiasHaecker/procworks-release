@@ -34,6 +34,7 @@ from procworks.model import (
     DataElement,
     DataSourceKind,
     DataType,
+    EdgeType,
     EscalationPolicy,
     ExecutorKind,
     ExternalBinding,
@@ -563,6 +564,205 @@ def set_loop_decision(
     candidate.loop_decisions[loop_end_id] = _build_loop_decision(
         candidate, discriminator, repeat_value, cells, max_iterations
     )
+    return raise_if_invalid(candidate)
+
+
+def add_sync_edge(
+    schema: ProcessSchema, source_id: str, target_id: str
+) -> ProcessSchema:
+    """Add a K4 synchronisation edge between two parallel activities.
+
+    The target then additionally waits until the source is completed or
+    deselected -- an ordering-only constraint that never routes tokens.
+    Whether the pair really lies in different branches of one AND block and
+    whether the combined graph stays acyclic is the validator's job (K4,
+    validate-before-commit): an ill-placed sync edge can never be stored.
+
+    requires: schema editable (R0); both nodes exist; no duplicate edge.
+    ensures:  the SYNC edge is stored and the full rule catalogue holds.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    _require_node(candidate, source_id)
+    _require_node(candidate, target_id)
+    if source_id == target_id:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=source_id,
+                    message="a sync edge cannot connect a node with itself",
+                )
+            ]
+        )
+    if any(
+        e.type is EdgeType.SYNC and e.source == source_id and e.target == target_id
+        for e in candidate.edges
+    ):
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=source_id,
+                    message="this sync edge already exists",
+                )
+            ]
+        )
+    candidate.edges.append(
+        ControlEdge(source=source_id, target=target_id, type=EdgeType.SYNC)
+    )
+    return raise_if_invalid(candidate)
+
+
+def remove_sync_edge(
+    schema: ProcessSchema, source_id: str, target_id: str
+) -> ProcessSchema:
+    """Remove a K4 synchronisation edge (inverse of :func:`add_sync_edge`)."""
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    before = len(candidate.edges)
+    candidate.edges = [
+        e
+        for e in candidate.edges
+        if not (
+            e.type is EdgeType.SYNC
+            and e.source == source_id
+            and e.target == target_id
+        )
+    ]
+    if len(candidate.edges) == before:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=source_id,
+                    message="no such sync edge",
+                )
+            ]
+        )
+    return raise_if_invalid(candidate)
+
+
+def _and_block_of(
+    schema: ProcessSchema, member_ids: set[str]
+) -> tuple[str, str] | None:
+    """Innermost AND block (split, join) whose branches cover ``member_ids``.
+
+    Walks every AND split's branches (depth-counted, like the K4 checker) and
+    picks the smallest block that contains all members -- the innermost one.
+    ``None`` when no single AND block covers the set.
+    """
+
+    best: tuple[int, str, str] | None = None
+    for node in schema.nodes.values():
+        if node.type is not NodeType.AND_SPLIT:
+            continue
+        covered: set[str] = set()
+        join_id: str | None = None
+        stack = [(e.target, 0) for e in schema.outgoing(node.id)]
+        while stack:
+            current, depth = stack.pop()
+            member = schema.nodes.get(current)
+            if member is None or current in covered:
+                continue
+            if member.type in JOIN_TYPES and depth == 0:
+                join_id = current
+                continue
+            covered.add(current)
+            next_depth = depth
+            if member.type in SPLIT_TYPES:
+                next_depth += 1
+            elif member.type in JOIN_TYPES:
+                next_depth -= 1
+            for out in schema.outgoing(current):
+                stack.append((out.target, next_depth))
+        if join_id is not None and member_ids <= covered:
+            size = len(covered)
+            if best is None or size < best[0]:
+                best = (size, node.id, join_id)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def insert_between_node_sets(
+    schema: ProcessSchema,
+    label: str,
+    source_ids: list[str],
+    target_ids: list[str],
+) -> ProcessSchema:
+    """Insert an activity between two node sets (ADEPT ``insertBetweenNodeSets``).
+
+    The new activity becomes a **fresh branch** of the innermost AND block
+    that contains all sources and targets, and is wired with K4 sync edges:
+    it starts only after every source is resolved and every target
+    additionally waits for it. Because the new branch differs from every
+    existing one, each sync edge crosses branches by construction (K4); the
+    acyclicity of the requested ordering is validated before commit.
+
+    requires: schema editable (R0); both sets non-empty; all set members are
+              existing ACTIVITY nodes inside one common AND block.
+    ensures:  new branch ``split -> activity -> join`` plus the sync wiring;
+              the full rule catalogue holds.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    if not label.strip():
+        raise CorrectnessError(
+            [ValidationFinding(rule="OP", message="the new activity needs a label")]
+        )
+    if not source_ids or not target_ids:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message="insert_between_node_sets needs a non-empty source "
+                    "and target set",
+                )
+            ]
+        )
+    members = set(source_ids) | set(target_ids)
+    for node_id in sorted(members):
+        node = _require_node(candidate, node_id)
+        if node.type is not NodeType.ACTIVITY:
+            raise CorrectnessError(
+                [
+                    ValidationFinding(
+                        rule="OP",
+                        node_id=node_id,
+                        message="source/target sets may only contain ACTIVITY nodes",
+                    )
+                ]
+            )
+    block = _and_block_of(candidate, members)
+    if block is None:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=(
+                        "all sources and targets must lie inside one common "
+                        "AND block (K4)"
+                    ),
+                )
+            ]
+        )
+    split_id, join_id = block
+    activity = Node(id=_new_id("act"), type=NodeType.ACTIVITY, label=label)
+    candidate.nodes[activity.id] = activity
+    candidate.edges.append(ControlEdge(source=split_id, target=activity.id))
+    candidate.edges.append(ControlEdge(source=activity.id, target=join_id))
+    for source_id in source_ids:
+        candidate.edges.append(
+            ControlEdge(source=source_id, target=activity.id, type=EdgeType.SYNC)
+        )
+    for target_id in target_ids:
+        candidate.edges.append(
+            ControlEdge(source=activity.id, target=target_id, type=EdgeType.SYNC)
+        )
     return raise_if_invalid(candidate)
 
 

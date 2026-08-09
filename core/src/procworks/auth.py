@@ -157,4 +157,8 @@ def create_auth_backend() -> AuthBackend:
         from procworks.auth_password import PasswordAuthBackend
 
         return PasswordAuthBackend.from_env()
+    if mode == "jwt":
+        from procworks.auth_jwt import JwtAuthBackend
+
+        return JwtAuthBackend.from_env()
     return OpenAuthBackend()

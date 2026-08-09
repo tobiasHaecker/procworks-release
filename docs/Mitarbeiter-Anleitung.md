@@ -86,6 +86,16 @@ Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt s
    Übernehmen lohnt sich, sobald mehrere Personen dieselbe Liste sehen. Die
    Aufgabe verschwindet danach aus der Liste; Folgeaufgaben erscheinen
    automatisch.
+   - **Anhalten:** Eine übernommene Aufgabe kannst du **anhalten** (Status
+     „angehalten") und später mit **„Weiterarbeiten"** fortsetzen. In der
+     Regel läuft die Frist dabei weiter – das Anhalten macht die Pause nur
+     sichtbar. Nur wenn der Prozessmodellierer für den Schritt ausdrücklich
+     **Netto-Zeit** vorgesehen hat, hält die Pause auch die Frist-Uhr an.
+   - **Problem melden:** Kommst du nicht weiter (z. B. Unterlagen fehlen),
+     melde die Aufgabe mit Begründung als **gescheitert**. Sie ist dann
+     eingefroren, bis du oder eine Führungskraft den **Wiederanlauf**
+     auslöst – danach wird sie wieder allen Berechtigten angeboten, mit
+     frischer Frist.
 
 7. **Abwesenheit eintragen (Urlaub / Vertretung).**
    Unten in **„Meine Aufgaben"** findest du den Bereich

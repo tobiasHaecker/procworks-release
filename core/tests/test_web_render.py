@@ -488,6 +488,121 @@ def test_escalation_editor_is_shared_by_both_surfaces() -> None:
     )
 
 
+def test_activity_detail_actions_are_wired_in_the_tasks_view() -> None:
+    """E2: Anhalten/Weiterarbeiten/Problem/Wiederanlauf sind bedienbar.
+
+    Die vier geteilten Funktionen existieren genau einmal und sprechen die
+    E2-Endpunkte an; die Aufgabenliste zeigt die Detailzustaende (angehalten/
+    gescheitert) und bietet je Zustand die passenden Aktionen; die
+    Instanz-Sicht nennt Detail samt Begruendung. Die Regeln (V1-V4) leben im
+    Kern (test_activity_detail.py).
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    for fn, endpoint in (
+        ("suspendTask", "/suspend"),
+        ("resumeTask", "/resume"),
+        ("failTask", "/fail"),
+        ("resetTask", "/reset"),
+    ):
+        assert src.count(f"function {fn}(") == 1, f"{fn} fehlt/doppelt"
+        assert endpoint in _fn_body(fn), f"{fn} spricht {endpoint} nicht an"
+    view = _fn_body("viewTasks")
+    for needle in ("SUSPENDED", "FAILED", "resumeTask(t, agentId)", "resetTask(t, agentId)"):
+        assert needle in view, f"Der Aufgabenliste fehlt {needle}"
+    assert "node_details" in src and "node_detail_reason" in src, (
+        "Die Instanz-Sicht kennt die Detailzustaende nicht"
+    )
+
+
+def test_simulation_panel_is_wired_into_the_test_view() -> None:
+    """E6: die Was-waere-wenn-Simulation ist in der Pruefinstanz-Sicht.
+
+    simulationPanel existiert genau einmal, erscheint in BEIDEN Zustaenden
+    der Sicht (Startkarte ohne Instanz und Cockpit mit Instanz), spricht den
+    simulate-Endpunkt an und rendert das Ergebnis mit demselben renderGraph
+    wie jede Laufzeit-Sicht (synthetische Instanz). Die Semantik (Weg, Kappe,
+    Dauer, Reinheit) ist im Kern getestet (test_simulation.py).
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert src.count("function simulationPanel(") == 1, "simulationPanel fehlt/doppelt"
+    view = _fn_body("viewTestRun")
+    assert view.count("simulationPanel(") == 2, (
+        "Die Simulation muss in beiden Zustaenden der Pruefinstanz-Sicht stehen"
+    )
+    assert "/simulate" in _fn_body("simulationPanel"), (
+        "Das Panel spricht den simulate-Endpunkt nicht an"
+    )
+    assert "renderGraph(schema, { instance: sim })" in _fn_body("renderSimulationResult"), (
+        "Das Ergebnis nutzt nicht die geteilte Laufzeit-Darstellung"
+    )
+
+
+def test_z4_filter_rho_bar_and_overdue_summary_are_wired() -> None:
+    """Z4 (Priorisierungs-Konzept §7): die drei UI-Verfeinerungen sind da.
+
+    Kritikalitaets-Filter in "Meine Aufgaben" (persistiert, rein clientseitig
+    ueber die vorhandenen API-Felder), Rho-Verbrauchsbalken in der
+    Faellig-Zelle (Farbe = Band, ueber Themen-Variablen) und die
+    Ueberfaellig-Kachel im Monitoring.
+    """
+
+    view = _fn_body("viewTasks")
+    assert 'localStorage.getItem("taskFilter")' in view, "Filter wird nicht gemerkt"
+    assert '"overdue"' in view and '"critical"' in view, "Filterstufen fehlen"
+    assert "visible.map((t)" in view, "Die Tabelle nutzt die gefilterte Liste nicht"
+    due = _fn_body("dueCell")
+    assert "rho-bar" in due and "target_seconds" in due, "Rho-Balken fehlt in dueCell"
+    monitor = _fn_body("viewMonitor")
+    assert "OVERDUE" in monitor, "Monitoring zaehlt keine ueberfaelligen Aufgaben"
+    css = (APP_JS.parent / "styles.css").read_text(encoding="utf-8")
+    assert ".rho-fill" in css and "var(--" in css.split(".rho-fill", 1)[1][:200], (
+        "Rho-Balken-Stile fehlen oder nutzen keine Themen-Variablen"
+    )
+
+
+def test_sync_edges_are_drawn_and_editable_in_both_surfaces() -> None:
+    """K4: Sync-Kanten sind sichtbar und in beiden Oberflaechen bedienbar.
+
+    controlEdges/syncEdges trennen Struktur- von Warte-Kanten (jede
+    Strukturlogik -- Layout, Schleifenpaarung, Verschiebe-Ziele, Nachbarn --
+    arbeitet kontrollfluss-rein), renderGraph zeichnet Sync gestrichelt,
+    syncBlock ist die EINE geteilte Bedienung (Karte + klassischer
+    Inspektor), und der Querschritt (insertBetweenNodeSets) haengt an beiden
+    AND-Split-Panels. Regeln (K4) und Warte-Semantik sind im Kern getestet
+    (test_sync_edges.py).
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert src.count("function controlEdges(") == 1, "controlEdges fehlt/doppelt"
+    assert src.count("function syncEdges(") == 1, "syncEdges fehlt/doppelt"
+    assert "gsyncedge" in _fn_body("renderGraph"), "Sync-Kanten werden nicht gezeichnet"
+    for fn in ("loopPairsOf", "moveTargetsFor", "emptyBranchJoin", "ancestorsOf"):
+        assert "controlEdges(schema)" in _fn_body(fn), (
+            f"{fn} arbeitet nicht kontrollfluss-rein"
+        )
+    assert src.count("function syncBlock(") == 1, "syncBlock fehlt/doppelt"
+    assert 'cardSection("sync"' in _fn_body("stepCard"), (
+        "Die Schritt-Karte zeigt die Synchronisation nicht"
+    )
+    assert "syncBlock(body, schema, node, true)" in _fn_body("nodePerformSections"), (
+        "Der klassische Inspektor zeigt die Synchronisation nicht"
+    )
+    assert "/sync-edge" in _fn_body("addSyncEdgeFor"), "Setzen-Dialog ohne Endpunkt"
+    assert "/sync-edge/remove" in _fn_body("removeSyncEdgeFor"), "Loesen ohne Endpunkt"
+    assert src.count("insertBetweenDialog()") >= 2, (
+        "Der Querschritt-Dialog haengt nicht an beiden Split-Panels"
+    )
+    assert "/insert-between" in _fn_body("insertBetweenDialog"), (
+        "Der Querschritt-Dialog spricht den Endpunkt nicht an"
+    )
+    css = (APP_JS.parent / "styles.css").read_text(encoding="utf-8")
+    assert ".gsyncedge" in css and "var(--" in css.split(".gsyncedge", 1)[1][:200], (
+        "Sync-Kanten-Stil fehlt oder nutzt keine Themen-Variablen"
+    )
+
+
 def test_model_hints_are_visible_in_both_surfaces() -> None:
     """Die beratenden Modellhinweise (G-Gruppe, /metrics) sind sichtbar.
 
@@ -925,4 +1040,146 @@ def test_status_bar_separates_correctness_from_release_readiness() -> None:
     assert "releaseFindings()" in code, "Stufe B fehlt in der Leiste"
     assert "pill-amber" in code, (
         "Die Freigabe-Reife wird nicht als eigener, milderer Zustand gezeigt"
+    )
+
+
+def test_time_dialog_offers_the_net_time_opt_in() -> None:
+    """Der geteilte Frist-Dialog traegt das Netto-Zeit-Opt-in (E2 Stufe C).
+
+    ``pause_stops_clock`` ist ein bewusstes Opt-in des Modellierers: ohne
+    Haekchen laeuft die Uhr in Pausen weiter (Anti-Schlupfloch-Linie des
+    Detailzustaende-Konzepts §4). Der Waechter sichert zu, dass das Feld im
+    EINEN geteilten Dialog ``setTimeConstraintFor`` lebt -- beide
+    Modellier-Oberflaechen rufen ihn auf, keine formuliert ihn selbst aus.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    dialog = re.search(r"function setTimeConstraintFor\(.*?\n\}", src, re.S)
+    assert dialog, "setTimeConstraintFor() nicht gefunden -- Waechter angleichen"
+    body = dialog.group(0)
+    assert "pause_stops_clock" in body, "Das Netto-Zeit-Opt-in fehlt im Frist-Dialog"
+    assert "Netto-Zeit" in body, "Die Beschriftung des Opt-ins fehlt"
+    # Beide Oberflaechen nutzen den geteilten Dialog (keine Drift).
+    assert src.count("setTimeConstraintFor(") >= 3, (
+        "setTimeConstraintFor muss von beiden Modellier-Oberflaechen aufgerufen werden"
+    )
+
+
+def test_monitoring_shows_the_escalation_view() -> None:
+    """Das Monitoring traegt die Eskalations-Sicht (Eskalations-Konzept §8 C).
+
+    Kachel „Eskalierte Aufgaben" + Panel „Eskalationen" (Aufgaben mit
+    gefeuerten Stufen, klickbar zur Instanz) leben in ``viewMonitor`` und
+    speisen sich aus denselben Task-Listen wie die Ueberfaellig-Kachel --
+    keine neue Datenquelle, rein anzeigend.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    monitor = re.search(r"async function viewMonitor\(\) \{.*?\n\}", src, re.S)
+    assert monitor, "viewMonitor() nicht gefunden -- Waechter angleichen"
+    body = monitor.group(0)
+    assert "escalated_stage" in body, "Die Eskalations-Sicht fehlt im Monitoring"
+    assert "Eskalierte Aufgaben" in body, "Die Kachel 'Eskalierte Aufgaben' fehlt"
+    assert "Eskalationen" in body, "Das Panel 'Eskalationen' fehlt"
+    assert "openInstanceFromMonitor" in body, (
+        "Eskalierte Aufgaben muessen zur Instanz verlinken"
+    )
+
+
+def test_simulation_playback_animates_the_executed_order() -> None:
+    """Die Simulation traegt die Abspiel-Animation (Simulations-Konzept §6 B).
+
+    Zusagen: (1) ``renderGraph`` adressiert jede Knoten-Gruppe ueber
+    ``data-node-id`` -- darauf baut die Animation auf. (2) Das
+    Simulationsergebnis bietet ``simulationPlaybackControls`` an, das die
+    Abschlussreihenfolge ``executed`` abspielt. (3) Der Takt raeumt sich
+    selbst, wenn das SVG den DOM verlaesst (kein Timer-Leck nach einem
+    Re-Render). (4) Die CSS-Klassen der Animation existieren.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert '"data-node-id": id' in src, (
+        "renderGraph muss die Knoten-Gruppen per data-node-id adressierbar machen"
+    )
+    controls = re.search(
+        r"function simulationPlaybackControls\(.*?\n\}", src, re.S
+    )
+    assert controls, "simulationPlaybackControls() fehlt"
+    body = controls.group(0)
+    assert "executed" in body and "setInterval" in body
+    assert "isConnected" in body, (
+        "Die Animation muss abbrechen, wenn das SVG den DOM verlaesst (Timer-Leck)"
+    )
+    result_fn = re.search(r"function renderSimulationResult\(.*?\n\}", src, re.S)
+    assert result_fn and "simulationPlaybackControls(" in result_fn.group(0), (
+        "Das Simulationsergebnis bietet die Abspiel-Animation nicht an"
+    )
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    assert ".gnode.sim-dim" in css and ".gnode.sim-current" in css, (
+        "Die CSS-Klassen der Abspiel-Animation fehlen"
+    )
+
+
+def test_oidc_redirect_login_is_wired_with_pkce() -> None:
+    """Der OIDC-Redirect-Login (Auth-Konzept §12.4, Opt-in) haengt korrekt.
+
+    Zusagen: (1) PKCE mit S256 -- der Verifier verlaesst den Browser nie
+    unhehasht Richtung Authorize-Endpunkt. (2) Der Ruecksprung wird gegen den
+    gespeicherten State geprueft (CSRF-Schutz des Code-Flows). (3) Der Code
+    wird per grant_type=authorization_code am konfigurierten Token-Endpunkt
+    eingeloest und das Token landet im EINEN bestehenden Bearer-Weg
+    (state.token + localStorage). (4) boot() loest den Ruecksprung ein, BEVOR
+    eine Gate-Entscheidung faellt, und zeigt ohne Token die Anmeldekarte nur
+    im JWT-Modus mit Konfiguration.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    start = re.search(r"async function startOidcLogin\(\) \{.*?\n\}", src, re.S)
+    assert start, "startOidcLogin() fehlt"
+    assert "SHA-256" in start.group(0) and "S256" in start.group(0), (
+        "PKCE muss den S256-Challenge-Hash nutzen"
+    )
+    assert "code_challenge" in start.group(0)
+
+    complete = re.search(r"async function completeOidcLogin\(\) \{.*?\n\}", src, re.S)
+    assert complete, "completeOidcLogin() fehlt"
+    body = complete.group(0)
+    assert "returnedState !== expected" in body, "Die State-Pruefung fehlt (CSRF)"
+    assert "authorization_code" in body and "code_verifier" in body
+    assert "localStorage.setItem(\"authToken\"" in body, (
+        "Das eingeloeste Token muss in den bestehenden Bearer-Weg"
+    )
+
+    boot_body = re.search(r"async function boot\(\) \{.*?\n\}", src, re.S)
+    assert boot_body, "boot() nicht gefunden"
+    b = boot_body.group(0)
+    assert b.find("completeOidcLogin()") != -1, "boot() loest den Ruecksprung nicht ein"
+    assert b.find("completeOidcLogin()") < b.find("showOidcLoginOverlay()"), (
+        "Der Ruecksprung muss vor der Anmeldekarte eingeloest werden"
+    )
+    assert b.find("completeOidcLogin()") < b.find("state.passwordLogin && !state.token"), (
+        "Der Ruecksprung muss vor der Passwort-Gate-Entscheidung liegen"
+    )
+
+
+def test_detail_states_are_visible_in_the_process_map() -> None:
+    """Angehalten/gescheitert erscheinen direkt in der Prozesslandkarte (E2 C).
+
+    ``renderGraph`` liest ``instance.node_details`` und markiert den Knoten
+    (Statustext + Randklasse) -- der Detailzustand ist damit in JEDER
+    Laufzeit-Sicht sichtbar, die den Kontrollfluss zeichnet (Instanz-Detail,
+    Monitoring), nicht nur in der Aufgabenliste.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    graph = re.search(r"function renderGraph\(schema, opts\) \{.*?\n\}", src, re.S)
+    assert graph, "renderGraph() nicht gefunden -- Waechter angleichen"
+    body = graph.group(0)
+    assert "node_details" in body, "renderGraph liest die Detailzustaende nicht"
+    assert "angehalten" in body and "gescheitert" in body, (
+        "Die Statustexte des Overlays fehlen"
+    )
+    css = STYLES_CSS.read_text(encoding="utf-8")
+    assert ".gnode.d-suspended" in css and ".gnode.d-failed" in css, (
+        "Die CSS-Klassen des Status-Overlays fehlen"
     )

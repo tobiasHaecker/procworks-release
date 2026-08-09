@@ -50,6 +50,9 @@ const state = {
   principal: null,
   authMode: "open",
   passwordLogin: false,
+  // OIDC-Redirect-Login (JWT-Modus, Opt-in): Endpunkte/Client-Id aus
+  // /auth/config, oder null -> die SPA zeigt nur das Token-Feld (§12.4).
+  oidc: null,
   // Public-demo login conveniences, filled from /auth/config in demo mode only
   // (PROCWORKS_DEMO_MODE on the server). Empty/false in every real deployment.
   demo: false,
@@ -513,6 +516,18 @@ const LAYOUT_BRANCH_GAP = 0.25;
 // wohlgeformte Kanten, Zyklus, Ueberlappung), faellt es verlustfrei auf das
 // bisherige, robuste gestapelte Layout (layoutSchemaStacked) zurueck.
 // Stabilitaet vor Optik: eine fehlerhafte Zeichnung darf nie entstehen.
+// K4: SYNC-Kanten sind reine Warte-Beziehungen (Ziel wartet, bis die Quelle
+// abgeschlossen oder abgewählt ist) und für JEDE Strukturlogik unsichtbar –
+// Layout, Zweig-/Schleifenerkennung, Verschiebe-Ziele und Nachbarschaft
+// arbeiten ausschließlich auf controlEdges. Gezeichnet werden Sync-Kanten
+// separat (renderGraph, gestrichelt).
+function controlEdges(schema) {
+  return (schema.edges || []).filter((e) => e.type !== "SYNC");
+}
+function syncEdges(schema) {
+  return (schema.edges || []).filter((e) => e.type === "SYNC");
+}
+
 function layoutSchema(schema) {
   try {
     return layoutSchemaSpine(schema);
@@ -539,11 +554,11 @@ function layoutSchema(schema) {
 function layoutSchemaSpine(schema) {
   const nodes = schema.nodes || {};
   const ids = Object.keys(nodes);
-  if (!ids.length) return { pos: {}, edges: schema.edges || [], width: 560, height: 160 };
+  if (!ids.length) return { pos: {}, edges: controlEdges(schema), width: 560, height: 160 };
 
   const out = {}, inc = {};
   ids.forEach((id) => { out[id] = []; inc[id] = []; });
-  (schema.edges || []).forEach((e) => {
+  controlEdges(schema).forEach((e) => {
     if (out[e.source] && nodes[e.target]) out[e.source].push(e.target);
     if (inc[e.target] && nodes[e.source]) inc[e.target].push(e.source);
   });
@@ -675,7 +690,7 @@ function layoutSchemaSpine(schema) {
 
   const width = LAYOUT_PAD * 2 + (maxCol + 1) * LAYOUT_NW + maxCol * LAYOUT_HGAP;
   const height = maxBottom + LAYOUT_PAD;
-  return { pos, edges: schema.edges || [], width: Math.max(width, 560), height: Math.max(height, 160) };
+  return { pos, edges: controlEdges(schema), width: Math.max(width, 560), height: Math.max(height, 160) };
 }
 
 // Prueft, ob sich zwei Knoten-Kaesten (Rechteck inkl. darunter haengendem
@@ -702,7 +717,7 @@ function layoutSchemaStacked(schema) {
   const ids = Object.keys(schema.nodes);
   const inc = {}, out = {};
   ids.forEach((id) => { inc[id] = []; out[id] = []; });
-  (schema.edges || []).forEach((e) => {
+  controlEdges(schema).forEach((e) => {
     if (out[e.source]) out[e.source].push(e);
     if (inc[e.target]) inc[e.target].push(e);
   });
@@ -742,7 +757,7 @@ function layoutSchemaStacked(schema) {
     });
   });
   const width = PAD * 2 + colKeys.length * NW + (colKeys.length - 1) * HGAP;
-  return { pos, edges: schema.edges || [], width: Math.max(width, 560), height: Math.max(height, 160) };
+  return { pos, edges: controlEdges(schema), width: Math.max(width, 560), height: Math.max(height, 160) };
 }
 
 function nodeClass(node, instance) {
@@ -810,7 +825,7 @@ function computeProvenance(schema, focus) {
 // Rücksprungkante existiert bewusst nicht als Datum.
 function loopPairsOf(schema) {
   const out = {};
-  (schema.edges || []).forEach((e) => { (out[e.source] = out[e.source] || []).push(e.target); });
+  controlEdges(schema).forEach((e) => { (out[e.source] = out[e.source] || []).push(e.target); });
   const pairs = [];
   Object.values(schema.nodes || {}).forEach((n) => {
     if (n.type !== NODE_TYPE.LOOP_START) return;
@@ -922,6 +937,19 @@ function renderGraph(schema, opts) {
   // taucht unter die tiefste Bahn des Blocks (dort hängen auch die Badges);
   // ragt er unter die viewBox hinaus, wird sie nach unten erweitert –
   // das Spiegelbild der Herkunfts-Erweiterung nach oben (s. u.).
+  // K4: Sync-Kanten gestrichelt zwischen den Zweigen zeichnen (Warte-
+  // Beziehung; deutlich unterschieden von Kontrollfluss und Datenherkunft).
+  syncEdges(schema).forEach((e) => {
+    const ps = L.pos[e.source], pt = L.pos[e.target];
+    if (!ps || !pt) return;
+    const down = pt.y >= ps.y + ps.h;
+    const x1 = ps.x + ps.w / 2, y1 = down ? ps.y + ps.h : ps.y;
+    const x2 = pt.x + pt.w / 2, y2 = down ? pt.y : pt.y + pt.h;
+    const ym = (y1 + y2) / 2;
+    root.appendChild(svg("path", { class: "gsyncedge", "marker-end": "url(#arrow)",
+      d: `M ${x1} ${y1} C ${x1} ${ym}, ${x2} ${ym}, ${x2} ${y2}` }));
+  });
+
   let vbBottom = L.height;
   loopPairsOf(schema).forEach(({ start, end, body }) => {
     const ps = L.pos[start], pe = L.pos[end];
@@ -1047,12 +1075,22 @@ function renderGraph(schema, opts) {
     const node = schema.nodes[id];
     let cls = nodeClass(node, opts.instance);
     if (opts.selectedId === id) cls += " selected";
-    const g = svg("g", { class: cls, style: opts.onSelectNode ? "cursor:pointer" : "",
+    // data-node-id: adressierbare Knoten-Gruppe (z. B. für die
+    // Simulations-Abspielanimation, die Schritte nacheinander hervorhebt).
+    const g = svg("g", { class: cls, "data-node-id": id,
+      style: opts.onSelectNode ? "cursor:pointer" : "",
       onClick: opts.onSelectNode ? () => opts.onSelectNode(id) : null });
     g.appendChild(svg("rect", { x: p.x, y: p.y, width: p.w, height: p.h, rx: 10 }));
     g.appendChild(svg("text", { class: "glabel", x: p.x + p.w / 2, y: p.y + p.h / 2 - 2, "text-anchor": "middle" },
       document.createTextNode(truncate(nodeCaption(node), 18))));
-    const sub = opts.instance && opts.instance.node_states ? (opts.instance.node_states[id] || "") : node.type;
+    // E2-Status-Overlay (Detailzustaende-Konzept §7 Stufe C): ein angehaltener
+    // oder gescheiterter Schritt ist direkt in der Prozesslandkarte sichtbar,
+    // nicht erst in der Aufgabenliste -- Statustext + Randfarbe am Knoten.
+    const detail = opts.instance && opts.instance.node_details
+      ? opts.instance.node_details[id] : null;
+    let sub = opts.instance && opts.instance.node_states ? (opts.instance.node_states[id] || "") : node.type;
+    if (detail === "SUSPENDED") { sub += " · angehalten"; g.classList.add("d-suspended"); }
+    else if (detail === "FAILED") { sub += " · gescheitert"; g.classList.add("d-failed"); }
     g.appendChild(svg("text", { class: "gstate", x: p.x + p.w / 2, y: p.y + p.h / 2 + 14, "text-anchor": "middle" },
       document.createTextNode(sub)));
     // Iterationszähler (K6, rein beobachtend): Wie oft hat diese Schleife
@@ -2639,6 +2677,7 @@ function stepCard(schema, draft) {
       body.appendChild(cardSection("staff", "Bearbeiter", null,
         (b) => cardStaffSection(b, schema, node, draft), "model.tab.res"));
       body.appendChild(cardSection("service", "Dienst", null, (b) => cardServiceSection(b, schema, node, draft)));
+      body.appendChild(cardSection("sync", "Synchronisation", null, (b) => syncBlock(b, schema, node, draft)));
       body.appendChild(cardSection("form", "Eingabemaske", null, (b) => cardFormSection(b, schema, node, draft)));
     } else {
       body.appendChild(cardSection("sub", "Submodell", null, (b) => cardSubprocessSection(b, schema, node, draft)));
@@ -2893,7 +2932,7 @@ function cardSubprocessSection(body, schema, node, draft) {
 
 /** Abschnitt „Verzweigung" eines Splits (K7-Zellen, leerer Zweig, entfernen). */
 function cardBranchSection(body, schema, node, draft) {
-  const branches = (schema.edges || []).filter((e) => e.source === node.id);
+  const branches = controlEdges(schema).filter((e) => e.source === node.id);
   const list = el("div", { class: "insp-binds" });
   branches.forEach((e) => {
     const target = schema.nodes[e.target];
@@ -2909,6 +2948,11 @@ function cardBranchSection(body, schema, node, draft) {
     body.appendChild(el("div", { class: "card-hint", style: "margin-top:8px" },
       "Ein Zweig ist leer – in ihm fällt keine Aktivität an. Entfernen löst bei nur noch einem verbleibenden Zweig die ganze Verzweigung auf."));
     body.appendChild(el("button", { class: "btn small", onClick: () => removeEmptyBranch(node.id) }, "Leeren Zweig entfernen"));
+  }
+  if (node.type === NODE_TYPE.AND_SPLIT) {
+    body.appendChild(el("div", { class: "card-hint", style: "margin-top:8px" },
+      "Querschritt: ein neuer Schritt als eigener Parallelzweig, per Sync-Kanten nach/vor gewählten Schritten (K4)."));
+    body.appendChild(el("button", { class: "btn small", onClick: () => insertBetweenDialog() }, "Querschritt einfügen…"));
   }
   body.appendChild(el("div", { class: "card-hint", style: "margin-top:8px" },
     "Entfernen löscht den gesamten Block (Split, Zweige und passenden Join)."));
@@ -2932,7 +2976,7 @@ function cardBranchSection(body, schema, node, draft) {
  */
 function ancestorsOf(schema, nodeId) {
   const inEdges = {};
-  (schema.edges || []).forEach((e) => { (inEdges[e.target] = inEdges[e.target] || []).push(e.source); });
+  controlEdges(schema).forEach((e) => { (inEdges[e.target] = inEdges[e.target] || []).push(e.source); });
   const seen = new Set();
   const queue = (inEdges[nodeId] || []).slice();
   while (queue.length) {
@@ -3237,6 +3281,7 @@ function nodePerformSections(body, schema, node) {
   const isActivity = node.type === NODE_TYPE.ACTIVITY;
 
   if (isActivity) {
+    syncBlock(body, schema, node, true);
     const sb = (schema.service_bindings || {})[node.id];
     body.appendChild(el("div", { class: "hr" }));
     body.appendChild(el("div", { class: "insp-h" }, "Dienst"));
@@ -3499,6 +3544,11 @@ function setTimeConstraintFor(nodeId, current) {
   const tc = current || {};
   const dur = durationControls(tc.max_duration_seconds != null ? tc.max_duration_seconds : null);
   const lead = durationControls(tc.target_lead_seconds != null ? tc.target_lead_seconds : null);
+  // Netto-Zeit (E2 Stufe C, Opt-in): hält eine Pause die Fällig-Uhr an?
+  // Default aus – ohne bewusste Entscheidung des Modellierers bleibt Anhalten
+  // reine Transparenz und verschiebt weder Frist noch Eskalation.
+  const pauseBox = el("input", { type: "checkbox" });
+  pauseBox.checked = !!tc.pause_stops_clock;
   openModal(`Frist – ${nodeCaption(state.schema.nodes[nodeId])}`,
     el("div", null,
       el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
@@ -3507,7 +3557,11 @@ function setTimeConstraintFor(nodeId, current) {
       el("div", { class: "muted", style: "font-size:12px;margin:12px 0 8px" },
         "Optionale Soll-Reaktionszeit ab Aktivierung: bis wann die Aufgabe angefasst/erledigt sein soll. " +
         "Steuert die automatische Reihung der Arbeitsliste (überfällige oben). Leer = die Bearbeitungsdauer gilt."),
-      lead.node),
+      lead.node,
+      el("label", { class: "row", style: "gap:8px;align-items:center;font-size:12px;margin-top:12px;cursor:pointer" },
+        pauseBox,
+        el("span", null, "Pause hält die Uhr an (Netto-Zeit): angehaltene Zeit zählt nicht auf Frist und Eskalation. " +
+          "Ohne Häkchen läuft die Uhr in Pausen bewusst weiter."))),
     async () => {
       const sec = dur.read();
       if (sec == null) { toast("err", "Bitte eine Dauer > 0 angeben"); return false; }
@@ -3515,7 +3569,8 @@ function setTimeConstraintFor(nodeId, current) {
       try {
         await api.post(`/schemas/${state.schemaId}/time-constraint`, {
           node_id: nodeId,
-          constraint: { max_duration_seconds: sec, target_lead_seconds: leadSec },
+          constraint: { max_duration_seconds: sec, target_lead_seconds: leadSec,
+            pause_stops_clock: pauseBox.checked },
         });
         await refreshSchema(); render(); toast("ok", "Frist gesetzt");
       } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
@@ -3527,6 +3582,105 @@ async function removeTimeConstraint(nodeId) {
     await api.post(`/schemas/${state.schemaId}/time-constraint`, { node_id: nodeId, constraint: null });
     await refreshSchema(); render(); toast("ok", "Frist entfernt");
   } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+// --- Synchronisation (K4) --------------------------------------------------
+// EINE geteilte Blockfunktion für beide Modellier-Oberflächen: zeigt die
+// Sync-Kanten eines Schritts (wartet auf / kommt vor) und bietet Setzen/
+// Lösen an. Zulässigkeit (verschiedene Zweige EINES AND-Blocks, keine
+// Zyklen) prüft der Kern (K4, Validate-before-Commit) – der Client zeigt
+// Befunde nur an.
+function syncBlock(body, schema, node, draft) {
+  if (node.type !== NODE_TYPE.ACTIVITY) return;
+  const touching = syncEdges(schema).filter((e) => e.source === node.id || e.target === node.id);
+  if (!touching.length && !draft) return;
+  body.appendChild(el("div", { class: "hr" }));
+  body.appendChild(el("div", { class: "insp-h" }, "Synchronisation (parallel)"));
+  if (touching.length) {
+    touching.forEach((e) => {
+      const otherId = e.source === node.id ? e.target : e.source;
+      const other = schema.nodes[otherId];
+      const caption = other ? nodeCaption(other) : otherId;
+      const label = e.source === node.id
+        ? `läuft vor „${caption}“ (der wartet)`
+        : `wartet auf „${caption}“`;
+      body.appendChild(el("div", { class: "row", style: "gap:6px;align-items:center;font-size:12px" },
+        el("span", null, label),
+        draft ? el("button", { class: "btn small danger",
+          onClick: () => removeSyncEdgeFor(e.source, e.target) }, "Lösen") : null));
+    });
+  } else {
+    body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
+      "keine – eine Sync-Kante ordnet diesen Schritt zeitlich gegen einen Schritt eines anderen Parallelzweigs (warten auf Abschluss oder Abwahl)."));
+  }
+  if (draft) {
+    body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+      el("button", { class: "btn small", onClick: () => addSyncEdgeFor(node.id) }, "Sync-Kante hinzufügen…")));
+  }
+}
+
+function addSyncEdgeFor(nodeId) {
+  const acts = Object.values(state.schema.nodes)
+    .filter((n) => n.type === NODE_TYPE.ACTIVITY && n.id !== nodeId)
+    .sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+  if (!acts.length) { toast("err", "Keine weitere Aktivität vorhanden"); return; }
+  const target = el("select", null, ...acts.map((n) => el("option", { value: n.id }, nodeCaption(n))));
+  const dir = el("select", null,
+    el("option", { value: "waits" }, "dieser Schritt wartet auf den gewählten"),
+    el("option", { value: "before" }, "der gewählte Schritt wartet auf diesen"));
+  openModal(`Sync-Kante – ${nodeCaption(state.schema.nodes[nodeId])}`,
+    el("div", null,
+      el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Ordnet zwei Schritte verschiedener Parallelzweige zeitlich: Der wartende Schritt beginnt erst, wenn der andere abgeschlossen (oder abgewählt) ist. Zulässig nur zwischen verschiedenen Zweigen desselben UND-Blocks (K4); der Kern prüft vor dem Speichern."),
+      el("label", { class: "field" }, "Anderer Schritt", target),
+      el("label", { class: "field" }, "Richtung", dir)),
+    async () => {
+      const src = dir.value === "waits" ? target.value : nodeId;
+      const dst = dir.value === "waits" ? nodeId : target.value;
+      try {
+        await api.post(`/schemas/${state.schemaId}/sync-edge`, { source_id: src, target_id: dst });
+        await refreshSchema(); render(); toast("ok", "Sync-Kante gesetzt");
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Hinzufügen");
+}
+
+async function removeSyncEdgeFor(sourceId, targetId) {
+  try {
+    await api.post(`/schemas/${state.schemaId}/sync-edge/remove`, { source_id: sourceId, target_id: targetId });
+    await refreshSchema(); render(); toast("ok", "Sync-Kante gelöst");
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+// Querschritt zwischen Knotenmengen (ADEPT insertBetweenNodeSets): neuer
+// Parallelzweig, per Sync-Kanten nach den Quellen und vor den Zielen.
+function insertBetweenDialog() {
+  const acts = Object.values(state.schema.nodes)
+    .filter((n) => n.type === NODE_TYPE.ACTIVITY)
+    .sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+  if (acts.length < 2) { toast("err", "Dafür braucht es mindestens zwei Aktivitäten"); return; }
+  const label = el("input", { type: "text", placeholder: "z. B. Zwischenprüfung" });
+  const mk = () => el("select", { multiple: true, size: "5" },
+    ...acts.map((n) => el("option", { value: n.id }, nodeCaption(n))));
+  const src = mk(), dst = mk();
+  openModal("Querschritt einfügen (zwischen Knotenmengen)",
+    el("div", null,
+      el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Der neue Schritt läuft als eigener Parallelzweig dieses UND-Blocks: erst nachdem alle Quell-Schritte erledigt (oder abgewählt) sind, und vor allen Ziel-Schritten (Sync-Kanten, K4). Quellen und Ziele müssen im selben UND-Block liegen; der Kern prüft vor dem Speichern."),
+      el("label", { class: "field" }, "Bezeichnung", label),
+      el("label", { class: "field" }, "Nach diesen Schritten (Quellen, Mehrfachauswahl)", src),
+      el("label", { class: "field" }, "Vor diesen Schritten (Ziele, Mehrfachauswahl)", dst)),
+    async () => {
+      const sources = [...src.selectedOptions].map((o) => o.value);
+      const targets = [...dst.selectedOptions].map((o) => o.value);
+      if (!label.value.trim() || !sources.length || !targets.length) {
+        toast("err", "Bezeichnung, Quellen und Ziele angeben"); return false;
+      }
+      try {
+        await api.post(`/schemas/${state.schemaId}/insert-between`,
+          { label: label.value.trim(), source_ids: sources, target_ids: targets });
+        await refreshSchema(); render(); toast("ok", "Querschritt eingefügt");
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Einfügen");
 }
 
 // --- Eskalation (T3/E9) ----------------------------------------------------
@@ -3684,7 +3838,7 @@ const SPLIT_TYPES = new Set([NODE_TYPE.AND_SPLIT, NODE_TYPE.XOR_SPLIT]);
 function emptyBranchJoin(schema, splitId) {
   const node = schema.nodes[splitId];
   if (!node || node.type !== NODE_TYPE.XOR_SPLIT) return null;
-  for (const e of schema.edges || []) {
+  for (const e of controlEdges(schema)) {
     if (e.source !== splitId) continue;
     const t = schema.nodes[e.target];
     if (t && t.type === NODE_TYPE.XOR_JOIN) return e.target;
@@ -3833,6 +3987,11 @@ function nodeInspectorPanel() {
       body.appendChild(el("button", { class: "btn small", onClick: () => removeEmptyBranch(node.id) }, "Leeren Zweig entfernen"));
       body.appendChild(el("div", { class: "hr" }));
     }
+    if (node.type === NODE_TYPE.AND_SPLIT) {
+      body.appendChild(el("button", { class: "btn small", style: "margin-bottom:8px",
+        onClick: () => insertBetweenDialog() }, "Querschritt einf\u00FCgen\u2026"));
+      body.appendChild(el("div", { class: "hr" }));
+    }
     body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
       "Verzweigung: Entfernen l\u00F6scht den gesamten Block (Split, Zweige und passenden Join)."));
     body.appendChild(el("button", { class: "btn small danger", onClick: () => deleteNode(node.id) }, "Verzweigung entfernen"));
@@ -3897,8 +4056,8 @@ function deleteNode(nodeId) {
 function moveTargetsFor(nodeId) {
   const schema = state.schema;
   const outCount = {};
-  (schema.edges || []).forEach((e) => { outCount[e.source] = (outCount[e.source] || 0) + 1; });
-  const pred = (schema.edges || []).find((e) => e.target === nodeId);
+  controlEdges(schema).forEach((e) => { outCount[e.source] = (outCount[e.source] || 0) + 1; });
+  const pred = controlEdges(schema).find((e) => e.target === nodeId);
   return Object.values(schema.nodes).filter((n) =>
     n.id !== nodeId &&
     n.type !== NODE_TYPE.END &&
@@ -5542,14 +5701,22 @@ async function renderInstanceDetail(container, withActions) {
   } else {
     (wl.ready_activities || []).forEach((nid) => {
       const node = runSchema.nodes[nid];
-      // E1: Transparenz statt Verstecken \u2013 die Instanz-Sicht zeigt alle
-      // bereiten Schritte samt Inhaber (die pers\u00F6nlichen Listen filtern).
+      // E1/E2: Transparenz statt Verstecken \u2013 die Instanz-Sicht zeigt alle
+      // bereiten Schritte samt Inhaber und Detailzustand (Pause/Scheitern
+      // inkl. Begr\u00FCndung); die pers\u00F6nlichen Listen filtern.
       const owner = (inst.claimed_by || {})[nid];
+      const nodeDetail = (inst.node_details || {})[nid];
+      const detailTag = nodeDetail === "SUSPENDED"
+        ? el("span", { class: "tag" }, "angehalten")
+        : nodeDetail === "FAILED"
+          ? el("span", { class: "tag" }, "gescheitert: " + ((inst.node_detail_reason || {})[nid] || "ohne Begr\u00FCndung"))
+          : null;
       wlBody.appendChild(el("div", { class: "worklist-item" },
         el("span", { class: "name" }, node ? nodeCaption(node) : nid),
         owner
           ? el("span", { class: "tag" }, "\u00FCbernommen von " + agentNameOf(owner))
           : el("span", { class: "tag" }, "bereit"),
+        detailTag,
         withActions ? el("button", { class: "btn small green", onClick: () => completeActivity(nid, node) }, "Abschlie\u00DFen") : null));
     });
     if (!(wl.ready_activities || []).length) {
@@ -5873,12 +6040,49 @@ async function viewMonitor() {
   try { report = await api.get("/monitoring/kpis"); } catch (e) { /* ignore */ }
   try { pmap = await api.get("/monitoring/process-map"); } catch (e) { /* ignore */ }
 
+  // Z4 (Priorisierungs-Konzept \u00A77): \u00DCberf\u00E4llig-Zusammenfassung \u00FCber alle
+  // laufenden Vorg\u00E4nge \u2013 best-effort aus den vorhandenen Task-Endpunkten.
+  // Dieselbe Sammlung tr\u00E4gt die Eskalations-Sicht (T3/E9 Stufe C): welche
+  // Aufgaben haben bereits Stufen gefeuert.
+  let overdueTasks = 0;
+  let escalatedTasks = [];
+  try {
+    const lists = await Promise.all(instances
+      .filter((i) => i.state === "RUNNING")
+      .map((i) => api.get(`/instances/${i.id}/tasks`).catch(() => [])));
+    const allTasks = lists.flat();
+    overdueTasks = allTasks.filter((t) => t.time_criticality === "OVERDUE").length;
+    escalatedTasks = allTasks.filter((t) => (t.escalated_stage || 0) > 0);
+  } catch (e) { /* best-effort: Kacheln zeigen dann 0 */ }
+
   const kpis = el("div", { class: "kpis" },
     kpi("Instanzen gesamt", instances.length),
     kpi("Laufend", running),
     kpi("Abgeschlossen", done),
+    kpi("\u00DCberf\u00E4llige Aufgaben", overdueTasks),
+    kpi("Eskalierte Aufgaben", escalatedTasks.length),
     kpi("\u00D8 Durchlaufzeit", report ? fmtDuration(report.avg_cycle_seconds) : "\u2013"));
   content.appendChild(kpis);
+
+  // Eskalations-Sicht (Eskalations-Konzept \u00A78 Stufe C): jede Aufgabe mit
+  // gefeuerten Stufen, klickbar zur Instanz. Nur sichtbar, wenn es etwas zu
+  // zeigen gibt \u2013 ein Betrieb ohne Eskalationen bekommt kein leeres Panel.
+  if (escalatedTasks.length) {
+    const escRows = escalatedTasks.map((t) => el("tr",
+      { class: "clickable", onClick: () => openInstanceFromMonitor(t.instance_id) },
+      el("td", null, t.instance_id),
+      el("td", null, t.label || t.node_id),
+      el("td", null, `Stufe ${t.escalated_stage}`),
+      el("td", null, criticalityBadge(t) || "\u2013"),
+      el("td", null, t.claimed_by || "\u2013")));
+    content.appendChild(el("div", { class: "panel" },
+      el("div", { class: "panel-h" }, el("h2", null, "Eskalationen"),
+        el("span", { class: "sub" }, "Aufgaben mit gefeuerten Eskalationsstufen")),
+      el("div", { class: "panel-b" },
+        el("table", null,
+          el("thead", null, el("tr", null, ...["Instanz", "Schritt", "Eskalation", "Kritikalit\u00E4t", "Inhaber"].map((h) => el("th", null, h)))),
+          el("tbody", null, ...escRows)))));
+  }
 
   const rows = instances.map((i) => {
     const total = Object.keys(i.node_states || {}).length || 1;
@@ -6372,37 +6576,92 @@ async function viewTasks() {
   // Announce tasks that arrived while this list was open (self-dismissing).
   announceNewTasks(agentId, tasks);
 
+  // Z4 (Priorisierungs-Konzept \u00A77): clientseitiger Kritikalit\u00E4ts-Filter.
+  // Rein additiv \u00FCber die vorhandenen API-Felder; Wahl wird gemerkt.
+  const taskFilter = localStorage.getItem("taskFilter") || "all";
+  const visible = taskFilter === "critical"
+    ? tasks.filter((t) => t.time_criticality === "AT_RISK" || t.time_criticality === "OVERDUE")
+    : taskFilter === "overdue"
+      ? tasks.filter((t) => t.time_criticality === "OVERDUE")
+      : tasks;
+  const hiddenCount = tasks.length - visible.length;
+  const filterSel = el("select", { class: "task-filter" },
+    el("option", { value: "all" }, "Alle Aufgaben"),
+    el("option", { value: "critical" }, "Nur kritische (wird knapp + \u00FCberf\u00E4llig)"),
+    el("option", { value: "overdue" }, "Nur \u00FCberf\u00E4llige"));
+  filterSel.value = taskFilter;
+  filterSel.addEventListener("change", () => {
+    localStorage.setItem("taskFilter", filterSel.value);
+    render();
+  });
+
   const body = el("div", { class: "panel-b" });
   if (!tasks.length) {
     body.appendChild(el("div", { class: "ok-banner" }, "\u2713 Keine offenen Aufgaben f\u00FCr " + agentNameOf(agentId) + "."));
+  } else if (!visible.length) {
+    body.appendChild(el("div", { class: "ok-banner" },
+      `\u2713 Keine ${taskFilter === "overdue" ? "\u00FCberf\u00E4lligen" : "kritischen"} Aufgaben \u2013 ${hiddenCount} weitere unter \u201EAlle Aufgaben\u201C.`));
   } else {
     // E1 (Zustandsmaschine): Eine unübernommene Aufgabe bietet „Übernehmen“
     // an (sie verschwindet dann aus den Listen aller anderen), eine selbst
     // übernommene „Zurücklegen“. Fremd Übernommenes taucht hier gar nicht
     // erst auf – das filtert der Kern (Withdrawn-Sicht). „Erledigen“ geht
     // weiterhin auch ohne Übernahme (Ein-Klick-Fluss).
-    const rows = tasks.map((t) => {
+    const rows = visible.map((t) => {
       const elig = (t.eligible_agents || []).map(agentNameOf).join(", ");
       const mine = t.claimed_by === agentId;
       const status = el("div", { class: "row", style: "gap:4px" },
         mine
           ? el("span", { class: "pill pill-amber" }, "übernommen")
           : el("span", { class: "pill pill-gray" }, "angeboten"),
+        // E2: Detailzustand (Pause/Scheitern) direkt am Eintrag.
+        t.detail === "SUSPENDED" ? el("span", { class: "pill pill-blue" }, "angehalten") : null,
+        t.detail === "FAILED"
+          ? el("span", { class: "pill pill-red", title: t.detail_reason || "" }, "gescheitert")
+          : null,
         // T3/E9: eine gefeuerte Eskalationsstufe ist am Eintrag ablesbar.
         t.escalated_stage > 0
           ? el("span", { class: "pill pill-red" }, `eskaliert (${t.escalated_stage})`)
           : null);
-      const actions = el("div", { class: "row", style: "gap:6px" },
-        el("button", { class: "btn small green", onClick: () => completeTask(t, agentId) }, "Erledigen"),
-        mine
-          ? el("button", { class: "btn small ghost", onClick: () => returnTask(t, agentId) }, "Zurücklegen")
-          : el("button", { class: "btn small ghost", onClick: () => claimTask(t, agentId) }, "Übernehmen"));
+      // E2-Aktionen je Detailzustand: gescheitert → nur Wiederanlauf;
+      // angehalten → Weiterarbeiten/Zurücklegen; sonst wie gehabt, für den
+      // Inhaber ergänzt um Anhalten und Problem melden.
+      let actions;
+      if (t.detail === "FAILED") {
+        actions = el("div", { class: "row", style: "gap:6px" },
+          el("button", { class: "btn small", onClick: () => resetTask(t, agentId) }, "Wiederanlauf"));
+      } else if (t.detail === "SUSPENDED") {
+        actions = el("div", { class: "row", style: "gap:6px" },
+          el("button", { class: "btn small green", onClick: () => resumeTask(t, agentId) }, "Weiterarbeiten"),
+          el("button", { class: "btn small ghost", onClick: () => returnTask(t, agentId) }, "Zurücklegen"));
+      } else {
+        actions = el("div", { class: "row", style: "gap:6px" },
+          el("button", { class: "btn small green", onClick: () => completeTask(t, agentId) }, "Erledigen"),
+          mine
+            ? el("button", { class: "btn small ghost", onClick: () => returnTask(t, agentId) }, "Zurücklegen")
+            : el("button", { class: "btn small ghost", onClick: () => claimTask(t, agentId) }, "Übernehmen"),
+          mine
+            ? el("button", { class: "btn small ghost", title: "Arbeit pausieren (Frist läuft weiter)",
+                onClick: () => suspendTask(t, agentId) }, "Anhalten")
+            : null,
+          mine
+            ? el("button", { class: "btn small ghost", title: "Als gescheitert melden",
+                onClick: () => failTask(t, agentId) }, "Problem")
+            : null);
+      }
       return [t.label || t.node_id, schemaLabel(t.schema_id, t.schema_version), dueCell(t), elig, status, actions];
     });
     body.appendChild(table(["Aufgabe", "Prozess", "Fällig", "Berechtigte", "Status", ""], rows));
+    if (hiddenCount > 0) {
+      body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-top:6px" },
+        `${hiddenCount} Aufgabe(n) durch den Filter ausgeblendet.`));
+    }
   }
   content.appendChild(el("div", { class: "panel", "data-tour": "tasks.list" },
-    el("div", { class: "panel-h" }, el("h2", null, "Offene Aufgaben"), el("span", { class: "sub" }, tasks.length + " Eintr\u00E4ge")),
+    el("div", { class: "panel-h" }, el("h2", null, "Offene Aufgaben"),
+      el("span", { class: "sub" },
+        hiddenCount > 0 ? `${visible.length} von ${tasks.length} Eintr\u00E4gen` : tasks.length + " Eintr\u00E4ge"),
+      filterSel),
     body));
 
   content.appendChild(await absencePanel(agentId));
@@ -6504,6 +6763,51 @@ async function returnTask(task, agentId) {
   } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 }
 
+// --- Detailzustände (E2): Anhalten / Weiterarbeiten / Problem / Wiederanlauf.
+// Geteilte Funktionen; die Regeln (nur Inhaber, gescheitert wartet auf
+// Wiederanlauf, §4-Automat) erzwingt der Kern mit 409 – hier nur Anzeige.
+async function suspendTask(task, agentId) {
+  try {
+    await api.post(`/instances/${task.instance_id}/suspend`, { node_id: task.node_id, agent_id: agentId });
+    toast("ok", "Aufgabe angehalten", ["Die Frist läuft weiter – Anhalten ist Transparenz, kein Fristen-Stopp."]);
+    render();
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+async function resumeTask(task, agentId) {
+  try {
+    await api.post(`/instances/${task.instance_id}/resume`, { node_id: task.node_id, agent_id: agentId });
+    toast("ok", "Weiter geht's");
+    render();
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+function failTask(task, agentId) {
+  const reason = el("input", { type: "text", placeholder: "z. B. Unterlagen unvollständig" });
+  openModal(`Problem melden – ${task.label || task.node_id}`,
+    el("div", null,
+      el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Der Schritt wird als gescheitert markiert und wartet auf den Wiederanlauf – erst dann wird er wieder allen Berechtigten angeboten (mit frischer Frist). Der Vorgang bleibt dabei in einem definierten Zustand."),
+      el("label", { class: "field" }, "Begründung", reason)),
+    async () => {
+      if (!reason.value.trim()) { toast("err", "Bitte eine Begründung angeben"); return false; }
+      try {
+        await api.post(`/instances/${task.instance_id}/fail`,
+          { node_id: task.node_id, agent_id: agentId, reason: reason.value.trim() });
+        toast("ok", "Problem gemeldet");
+        render();
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Melden");
+}
+
+async function resetTask(task, agentId) {
+  try {
+    await api.post(`/instances/${task.instance_id}/reset`, { node_id: task.node_id, agent_id: agentId });
+    toast("ok", "Wiederanlauf", ["Die Aufgabe wird wieder allen Berechtigten angeboten – mit frischer Frist."]);
+    render();
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
 async function completeTask(task, agentId) {
   // Die Instanz wird ohnehin geladen (fuer ein moegliches Ad-hoc-Schema); ihre
   // Datenwerte belegen zugleich die Maske vor -- siehe promptComplete.
@@ -6540,7 +6844,11 @@ async function viewTestRun() {
   if (!state.schema) { content.appendChild(emptyState("Kein Schema ausgew\u00E4hlt.")); return; }
   const schema = state.schema;
 
-  if (!state.testInstanceId) { renderTestStartCard(content, schema); return; }
+  if (!state.testInstanceId) {
+    renderTestStartCard(content, schema);
+    content.appendChild(simulationPanel(schema));
+    return;
+  }
 
   let inst;
   try { inst = await loadTestInstance(state.testInstanceId); }
@@ -6567,6 +6875,152 @@ async function viewTestRun() {
     el("div", { class: "quad-cell" }, testStarterPanel(runSchema)),
     el("div", { class: "quad-cell" }, testAgentPanel("A", inst, runSchema, agents, instanceTasks)),
     el("div", { class: "quad-cell" }, testAgentPanel("B", inst, runSchema, agents, instanceTasks))));
+  content.appendChild(simulationPanel(runSchema));
+}
+
+// --- Simulation (E6): seiteneffektfreier Was-wäre-wenn-Durchlauf -----------
+// Ergänzt die interaktive Prüfinstanz um die schnelle Vorab-Frage „Welchen
+// Weg nimmt der Prozess mit diesen Werten?“. Jeder Lauf ist ein frischer
+// Aufruf von POST /schemas/{id}/simulate – der Kern spielt rein und ohne
+// jede Spur durch (kein Store, kein Audit, keine Mails); der Client zeigt
+// das Ergebnis mit demselben renderGraph wie jede Laufzeit-Sicht.
+function simulationPanel(schema) {
+  const elems = Object.values(schema.data_elements || {})
+    .filter((d) => d.source === "INSTANCE")
+    .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const inputs = {};
+  const fields = elems.map((d) => {
+    let input;
+    if (d.data_type === "BOOLEAN") {
+      input = el("select", null,
+        el("option", { value: "" }, "– nicht gesetzt –"),
+        el("option", { value: "true" }, "wahr"),
+        el("option", { value: "false" }, "falsch"));
+    } else if (d.data_type === "INTEGER" || d.data_type === "FLOAT") {
+      input = el("input", { type: "number", placeholder: "– nicht gesetzt –" });
+    } else {
+      input = el("input", { type: "text", placeholder: "– nicht gesetzt –" });
+    }
+    inputs[d.id] = { input, type: d.data_type };
+    return el("label", { class: "field" }, `${d.name} (${d.data_type})`, input);
+  });
+  const result = el("div", null);
+  async function run() {
+    const data = {};
+    Object.entries(inputs).forEach(([id, { input, type }]) => {
+      const v = (input.value || "").trim();
+      if (v === "") return;  // leer = nicht gesetzt (bewusst, s. Konzept §3)
+      if (type === "BOOLEAN") data[id] = v === "true";
+      else if (type === "INTEGER") data[id] = parseInt(v, 10);
+      else if (type === "FLOAT") data[id] = Number(v);
+      else data[id] = v;
+    });
+    clear(result);
+    try {
+      const sim = await api.post(`/schemas/${state.schemaId}/simulate`, { data });
+      result.appendChild(renderSimulationResult(schema, sim));
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  }
+  return el("div", { class: "panel" },
+    el("div", { class: "panel-h" }, el("h2", null, "Simulation"),
+      el("span", { class: "sub" }, "Was-wäre-wenn: Weg und Dauer mit diesen Werten – ohne Seiteneffekte")),
+    el("div", { class: "panel-b" },
+      el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Die Simulation spielt den Prozess mit den angegebenen Werten automatisch durch – gewählte Zweige, Schleifenrunden, erwartete Dauer. Es wird nichts gespeichert; fehlt ein entscheidender Wert, bricht der Lauf mit Begründung ab."),
+      fields.length
+        ? el("div", { class: "form-grid" }, ...fields)
+        : el("div", { class: "muted", style: "font-size:13px" }, "Keine Instanz-Datenelemente – die Simulation läuft ohne Eingaben."),
+      el("div", { class: "row", style: "margin-top:8px" },
+        el("button", { class: "btn small primary", onClick: run }, "Simulieren")),
+      result));
+}
+
+function renderSimulationResult(schema, sim) {
+  const box = el("div", { style: "margin-top:12px" });
+  const badge = sim.completed
+    ? el("span", { class: "pill pill-green" }, "Ende erreicht")
+    : el("span", { class: "pill pill-red" }, "nicht bis zum Ende");
+  const dur = sim.expected_duration_seconds != null
+    ? formatDuration(sim.expected_duration_seconds) : "–";
+  box.appendChild(el("div", { class: "row", style: "gap:8px;align-items:center;margin-bottom:8px" },
+    badge,
+    el("span", { class: "muted", style: "font-size:12px" }, `erwartete Dauer: ${dur}`),
+    el("span", { class: "muted", style: "font-size:12px" }, `${(sim.executed || []).length} Schritte ausgeführt`)));
+  (sim.findings || []).forEach((f) => box.appendChild(el("div", { class: "warn-banner" }, f)));
+  // Markierungsbild: dieselbe Kontrollfluss-Darstellung wie jede Laufzeit-
+  // Sicht, gespeist aus der synthetischen Instanz des Simulationsergebnisses
+  // (node_states + loop_iterations reichen renderGraph als „Instanz“).
+  const graphWrap = renderGraph(schema, { instance: sim });
+  // Abspiel-Animation (Konzept §6 Stufe B): die Abschlussreihenfolge
+  // ``executed`` Schritt für Schritt über dem Markierungsbild nachspielen.
+  if ((sim.executed || []).length) {
+    box.appendChild(simulationPlaybackControls(graphWrap, schema, sim.executed));
+  }
+  box.appendChild(graphWrap);
+  const dec = Object.entries(sim.decisions || {});
+  if (dec.length) {
+    box.appendChild(el("div", { class: "sub-h", style: "margin-top:8px" }, el("h3", null, "Gewählte Zweige")));
+    box.appendChild(table(["Verzweigung", "Zweig"], dec.map(([split, target]) => {
+      const s = schema.nodes[split], t = schema.nodes[target];
+      return [s ? nodeCaption(s) : split, t ? nodeCaption(t) : target];
+    })));
+  }
+  return box;
+}
+
+// Abspiel-Animation der Simulation (Konzept §6 Stufe B): spielt die
+// Abschlussreihenfolge ``executed`` über dem fertigen Markierungsbild nach –
+// rein visuell im Client (CSS-Klassen auf den ``data-node-id``-Gruppen des
+// SVG), kein weiterer Kern-Aufruf, keine erfundenen Zwischen-Markierungen:
+// Zu Beginn werden alle Knoten gedimmt, dann leuchtet Schritt für Schritt der
+// jeweils abgeschlossene auf und bleibt sichtbar; am Ende ist wieder exakt
+// das ungefilterte Endbild zu sehen. Der Takt bricht selbstständig ab, wenn
+// das SVG den DOM verlässt (Panel neu gerendert) – kein Timer-Leck.
+const SIM_PLAY_TICK_MS = 700;
+
+function simulationPlaybackControls(graphWrap, schema, executed) {
+  const readout = el("span", { class: "muted", style: "font-size:12px" }, "");
+  let timer = null;
+  let btn = null;
+
+  function groupOf(nodeId) {
+    return graphWrap.querySelector(`g[data-node-id="${nodeId}"]`);
+  }
+  function allGroups() {
+    return Array.from(graphWrap.querySelectorAll("g[data-node-id]"));
+  }
+  function stop(finished) {
+    if (timer) { clearInterval(timer); timer = null; }
+    allGroups().forEach((g) => g.classList.remove("sim-dim", "sim-current"));
+    readout.textContent = finished ? `abgespielt – ${executed.length} Schritte` : "";
+    btn.textContent = "▶ Abspielen";
+  }
+  function play() {
+    if (timer) { stop(false); return; }  // der Knopf ist zugleich „Stopp"
+    let i = -1;
+    allGroups().forEach((g) => { g.classList.add("sim-dim"); g.classList.remove("sim-current"); });
+    btn.textContent = "■ Stopp";
+    const step = () => {
+      if (!graphWrap.isConnected) { clearInterval(timer); timer = null; return; }
+      if (i >= 0) {
+        const prev = groupOf(executed[i]);
+        if (prev) prev.classList.remove("sim-current");
+      }
+      i += 1;
+      if (i >= executed.length) { stop(true); return; }
+      const g = groupOf(executed[i]);
+      if (g) {
+        g.classList.remove("sim-dim");
+        g.classList.add("sim-current");
+      }
+      const node = schema.nodes[executed[i]];
+      readout.textContent = `Schritt ${i + 1}/${executed.length}: ${node ? nodeCaption(node) : executed[i]}`;
+    };
+    timer = setInterval(step, SIM_PLAY_TICK_MS);
+    step();  // sofort starten, nicht erst nach dem ersten Takt
+  }
+  btn = el("button", { class: "btn small", onClick: play }, "▶ Abspielen");
+  return el("div", { class: "row", style: "gap:8px;align-items:center;margin:4px 0" }, btn, readout);
 }
 
 // Startkarte, solange keine (gültige) Prüfinstanz geladen ist.
@@ -6888,11 +7342,22 @@ function dueLabel(t) {
   return s < 0 ? ("überfällig seit " + humanDuration(-s)) : ("in " + humanDuration(s));
 }
 
-// Die "Fällig"-Zelle: relative Restzeit plus farbiges Band-Badge.
+// Die "Fällig"-Zelle: relative Restzeit plus farbiges Band-Badge und – bei
+// vorhandener Soll-Zeit – der ρ-Verbrauchsbalken (Z4 des Priorisierungs-
+// Konzepts): wie viel der Soll-Zeit ist verbraucht, Farbe = Band. Rein
+// abgeleitet aus den API-Feldern, kein eigener Zustand.
 function dueCell(t) {
   const badge = criticalityBadge(t);
   const label = el("span", { class: "due-label" }, dueLabel(t));
-  return badge ? el("span", { class: "due-cell" }, label, badge) : label;
+  const cell = badge ? el("span", { class: "due-cell" }, label, badge) : label;
+  if (t && t.target_seconds > 0 && t.elapsed_seconds != null) {
+    const ratio = Math.max(0, Math.min(1, t.elapsed_seconds / t.target_seconds));
+    const band = (t.time_criticality || "NONE").toLowerCase();
+    return el("span", { class: "due-wrap" }, cell,
+      el("span", { class: "rho-bar", title: Math.round(ratio * 100) + "% der Soll-Zeit verbraucht" },
+        el("span", { class: "rho-fill rho-" + band, style: `width:${Math.round(ratio * 100)}%` })));
+  }
+  return cell;
 }
 
 // --------------------------------------------------------------------------
@@ -7822,6 +8287,12 @@ async function loadAuthConfig() {
     state.demoAutologin = cfg.demo_autologin || "";
     state.demoLogins = Array.isArray(cfg.demo_logins) ? cfg.demo_logins : [];
     state.demoFeedbackUrl = cfg.demo_feedback_url || "";
+    // OIDC-Redirect-Login (JWT-Modus, Opt-in per Server-Konfiguration):
+    // nur wenn alle drei Angaben da sind, bietet die SPA den Firmen-Login an.
+    state.oidc = (cfg.mode === "jwt" && cfg.oidc_authorize_url && cfg.oidc_token_url && cfg.oidc_client_id)
+      ? { authorizeUrl: cfg.oidc_authorize_url, tokenUrl: cfg.oidc_token_url,
+          clientId: cfg.oidc_client_id, scopes: cfg.oidc_scopes || "openid profile email" }
+      : null;
   } catch (_e) {
     state.authMode = "open";
     state.passwordLogin = false;
@@ -7830,9 +8301,109 @@ async function loadAuthConfig() {
     state.demoAutologin = "";
     state.demoLogins = [];
     state.demoFeedbackUrl = "";
+    state.oidc = null;
   }
   const tokenField = byId("token-field");
   if (tokenField) tokenField.style.display = state.passwordLogin ? "none" : "";
+}
+
+// --- OIDC-Redirect-Login (Auth-Konzept §12.4, Opt-in) ----------------------
+// Authorization Code + PKCE, komplett im Client: der Kern rendert weiterhin
+// keinen IdP-spezifischen Fluss, er reicht nur die konfigurierten Endpunkte
+// über /auth/config durch. Ohne Konfiguration bleibt das Token-Feld der
+// dokumentierte Weg. PKCE (S256) statt Client-Secret: die SPA ist ein
+// öffentlicher Client; Verifier und State leben nur im sessionStorage des
+// laufenden Anmeldevorgangs.
+
+function _oidcRandom() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return _b64url(bytes);
+}
+
+function _b64url(bytes) {
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Die eigene Rücksprung-Adresse: Origin + Pfad ohne Query/Fragment. Muss beim
+// IdP als Redirect-URI des Clients registriert sein.
+function _oidcRedirectUri() {
+  return location.origin + location.pathname;
+}
+
+async function startOidcLogin() {
+  if (!state.oidc) return;
+  const verifier = _oidcRandom();
+  const stateVal = _oidcRandom();
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  const challenge = _b64url(new Uint8Array(digest));
+  sessionStorage.setItem("oidcVerifier", verifier);
+  sessionStorage.setItem("oidcState", stateVal);
+  const q = new URLSearchParams({
+    response_type: "code",
+    client_id: state.oidc.clientId,
+    redirect_uri: _oidcRedirectUri(),
+    scope: state.oidc.scopes,
+    state: stateVal,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+  });
+  location.assign(state.oidc.authorizeUrl + (state.oidc.authorizeUrl.includes("?") ? "&" : "?") + q.toString());
+}
+
+// Rücksprung vom IdP: ?code=…&state=… gegen den Verifier einlösen. Liefert
+// true, wenn ein Token übernommen wurde; räumt Query-Parameter und Merker in
+// jedem Fall (auch ein abgebrochener Versuch hinterlässt keinen Zustand).
+async function completeOidcLogin() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get("code");
+  const returnedState = params.get("state");
+  if (!code || !state.oidc) return false;
+  const verifier = sessionStorage.getItem("oidcVerifier");
+  const expected = sessionStorage.getItem("oidcState");
+  sessionStorage.removeItem("oidcVerifier");
+  sessionStorage.removeItem("oidcState");
+  history.replaceState(null, "", _oidcRedirectUri());
+  if (!verifier || !expected || returnedState !== expected) {
+    toast("err", "Anmeldung abgebrochen", ["Der Rücksprung passt nicht zum gestarteten Anmeldevorgang (State-Prüfung)."]);
+    return false;
+  }
+  try {
+    const res = await fetch(state.oidc.tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: _oidcRedirectUri(),
+        client_id: state.oidc.clientId,
+        code_verifier: verifier,
+      }).toString(),
+    });
+    if (!res.ok) throw new Error("token endpoint " + res.status);
+    const body = await res.json();
+    if (!body.access_token) throw new Error("kein access_token in der Antwort");
+    state.token = String(body.access_token);
+    localStorage.setItem("authToken", state.token);
+    return true;
+  } catch (err) {
+    toast("err", "Anmeldung fehlgeschlagen", ["Der Identitätsanbieter hat den Code nicht eingelöst.", String(err && err.message || err)]);
+    return false;
+  }
+}
+
+// Vollbild-Anmeldekarte des JWT-Modus mit konfiguriertem Firmen-Login. Der
+// manuelle Weg (Token ins Seitenleisten-Feld) bleibt als Ausweich erhalten.
+function showOidcLoginOverlay() {
+  const card = el("div", { class: "auth-card" },
+    authBrand("Anmeldung über Ihren Firmen-Identitätsanbieter."),
+    el("button", { class: "btn primary", onClick: () => startOidcLogin() },
+      "Über Firmenkonto anmelden"),
+    el("p", { class: "auth-hint", style: "margin-top:10px" },
+      "Alternativ können Sie ein Zugangs-Token direkt in das Feld „API-Token“ der Seitenleiste eintragen. ",
+      el("a", { href: "#", onClick: (e) => { e.preventDefault(); hideOverlay(); } }, "Ohne Anmeldung fortfahren")));
+  showOverlay(card);
 }
 
 function showOverlay(card) {
@@ -8470,6 +9041,15 @@ async function boot() {
     setConnected(true);
     showVersion(health && health.version);
     await loadAuthConfig();
+    // OIDC-Rücksprung (JWT-Modus): einen mitgebrachten ?code= sofort gegen
+    // ein Token einlösen, bevor irgendeine Gate-Entscheidung fällt.
+    if (state.oidc) await completeOidcLogin();
+    // JWT-Modus mit konfiguriertem Firmen-Login: ohne Token die Anmeldekarte
+    // zeigen (der manuelle Token-Weg bleibt über die Seitenleiste offen).
+    if (state.authMode === "jwt" && state.oidc && !state.token) {
+      showOidcLoginOverlay();
+      return;
+    }
     // In password mode an unauthenticated visitor must log in first; the rest
     // of the app stays hidden behind the overlay until /auth/me succeeds.
     if (state.passwordLogin && !state.token) {

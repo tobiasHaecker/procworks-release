@@ -53,9 +53,20 @@ LOOP_TYPES = frozenset({NodeType.LOOP_START, NodeType.LOOP_END})
 
 
 class EdgeType(StrEnum):
-    """Control edge types (SYNC/LOOP reserved for later roadmap steps)."""
+    """Edge types (ADEPT): normal flow and cross-branch synchronisation.
+
+    ``CONTROL`` is the ordinary flow edge every structural rule reasons
+    about. ``SYNC`` (K4) is an *ordering-only* constraint between activities
+    of different AND branches: the target additionally waits until the source
+    is resolved (completed **or** deselected) -- it never routes tokens, never
+    counts towards node degrees, block structure, data-flow guarantees or the
+    critical path (conservative), and only the engine's wait logic and the K4
+    rule know it. A LOOP type stays deliberately absent: the loop-back edge
+    is derived from the K6 pairing and never stored (Schleifen-Konzept §2).
+    """
 
     CONTROL = "CONTROL"
+    SYNC = "SYNC"
 
 
 class ValueClass(StrEnum):
@@ -300,6 +311,20 @@ class NodeState(StrEnum):
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     SKIPPED = "SKIPPED"
+
+
+class NodeDetailState(StrEnum):
+    """Runtime *detail* state overlaid on the base node marking (E2, §4).
+
+    §4 lists SELECTED/SUSPENDED/FAILED as detail states *in addition to* the
+    NS marking -- so they live as an overlay, never as new ``NodeState``
+    members: underneath, a suspended or failed step is simply ``RUNNING``
+    (nothing propagates), and every engine invariant stays literally true.
+    ``SELECTED`` needs no member here -- it is the E1 claim (``claimed_by``).
+    """
+
+    SUSPENDED = "SUSPENDED"
+    FAILED = "FAILED"
 
 
 class EdgeState(StrEnum):
@@ -753,6 +778,15 @@ class TimeConstraint(BaseModel):
 
     max_duration_seconds: float | None = None
     target_lead_seconds: float | None = None
+    #: Opt-in net-time accounting (E2 Stufe C): when ``True``, a pause
+    #: (``SUSPENDED`` overlay) stops this step's due clock -- the accumulated
+    #: pause time is credited to the due instant, for the worklist bands AND
+    #: the escalation sweep (one shared computation). Default ``False`` keeps
+    #: the deliberate anti-loophole stance of the Detailzustaende concept (§4):
+    #: without the modeller's explicit opt-in, suspending never defers a
+    #: deadline or an escalation. Purely additive -- no validator rule needed
+    #: (a bool is always well-formed, T1 stays untouched).
+    pause_stops_clock: bool = False
 
 
 # --- escalation (T3/E9, Eskalations-Konzept) ------------------------------
@@ -1341,10 +1375,38 @@ class ProcessSchema(BaseModel):
         return next(n for n in self.nodes.values() if n.type is NodeType.END)
 
     def outgoing(self, node_id: str) -> list[ControlEdge]:
-        return [e for e in self.edges if e.source == node_id]
+        """Control-flow edges leaving ``node_id``.
+
+        SYNC edges (K4) are deliberately excluded: they are ordering-only and
+        invisible to every structural rule/analysis (degrees, blocks, data
+        flow, layout). Only the engine's wait logic and the K4 checker read
+        them, via :meth:`sync_outgoing`/:meth:`sync_incoming`.
+        """
+
+        return [
+            e
+            for e in self.edges
+            if e.source == node_id and e.type is EdgeType.CONTROL
+        ]
 
     def incoming(self, node_id: str) -> list[ControlEdge]:
-        return [e for e in self.edges if e.target == node_id]
+        """Control-flow edges entering ``node_id`` (SYNC excluded, see above)."""
+
+        return [
+            e
+            for e in self.edges
+            if e.target == node_id and e.type is EdgeType.CONTROL
+        ]
+
+    def sync_outgoing(self, node_id: str) -> list[ControlEdge]:
+        return [
+            e for e in self.edges if e.source == node_id and e.type is EdgeType.SYNC
+        ]
+
+    def sync_incoming(self, node_id: str) -> list[ControlEdge]:
+        return [
+            e for e in self.edges if e.target == node_id and e.type is EdgeType.SYNC
+        ]
 
     def accesses_of(self, node_id: str) -> list[DataAccess]:
         return [a for a in self.data_accesses if a.node_id == node_id]
@@ -1526,6 +1588,25 @@ class ProcessInstance(BaseModel):
     #: loop-iteration reset clears the body's entries (each round starts
     #: unescalated). Additive with a safe default.
     escalated_stages: dict[str, int] = Field(default_factory=dict)
+    #: Runtime detail overlay per node id (E2): SUSPENDED (work paused) or
+    #: FAILED (aborted, awaiting recovery). Absent entry = no detail. Cleared
+    #: like claims on completion, return, reset and the loop-iteration reset.
+    node_details: dict[str, NodeDetailState] = Field(default_factory=dict)
+    #: Reason text of a FAILED detail (shown in worklists/monitoring; audit
+    #: carries it too). Cleared together with the detail.
+    node_detail_reason: dict[str, str] = Field(default_factory=dict)
+    #: Net-time bookkeeping (E2 Stufe C, opt-in via
+    #: ``TimeConstraint.pause_stops_clock``): accumulated seconds of *closed*
+    #: pauses of the current activation, keyed by node id. Stamped/booked at
+    #: the API boundary (the engine stays clock-free); cleared wherever claims
+    #: are (completion, return, reset, loop-iteration reset) -- pause credit
+    #: belongs to one activation. Additive with a safe default.
+    node_paused_seconds: dict[str, float] = Field(default_factory=dict)
+    #: Start instant of the *ongoing* pause per node id (present only while
+    #: the node is SUSPENDED). Boundary-stamped on suspend; on resume the
+    #: closed interval moves into ``node_paused_seconds``. Cleared like the
+    #: detail overlay.
+    node_suspended_at: dict[str, datetime] = Field(default_factory=dict)
 
 
 # --- integration runtime entities (roadmap E10-E13) ----------------------

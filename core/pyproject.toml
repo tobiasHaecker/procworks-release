@@ -1,6 +1,6 @@
 [project]
 name = "procworks"
-version = "1.14.0"
+version = "1.15.0"
 description = "Headless, block-structured process engine kernel with correctness-by-construction (ADEPT-/BPMN-inspired)."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,6 +27,12 @@ dev = [
 postgres = [
     "psycopg[binary]>=3.1",
     "alembic>=1.13",
+]
+# RS256/JWKS validation of the JwtAuthBackend (PROCWORKS_AUTH=jwt with a
+# JWKS URL). Same lazy policy as the ``license`` extra: absent -> the RS256
+# path refuses with a clear error at startup; HS256 works stdlib-only.
+jwt = [
+    "cryptography>=42",
 ]
 # Ed25519 verification for the licensing layer (dormant by default). Optional:
 # without it, and without a configured licensor public key, licensing stays off.

@@ -46,6 +46,7 @@ from procworks.worklist_priority import (
     TimeContext,
     assess,
     criticality_from_ratio,
+    pause_credit_seconds,
     remaining_critical_path_seconds,
     target_seconds,
 )
@@ -244,3 +245,97 @@ def test_negative_target_lead_is_rejected() -> None:
     with pytest.raises(CorrectnessError) as exc:
         set_time_constraint(schema, act, TimeConstraint(target_lead_seconds=-1))
     assert any(f.rule == "T1" for f in exc.value.findings)
+
+
+# --- net time (E2 Stufe C): opt-in pause credit ---------------------------
+
+
+def _net_time_schema(*, opt_in: bool):
+    schema = create_empty_schema("Z", schema_id=f"w-net-{opt_in}")
+    schema = serial_insert(schema, "A", after_node_id="start")
+    act = _activity_id(schema, "A")
+    schema = set_time_constraint(
+        schema,
+        act,
+        TimeConstraint(max_duration_seconds=100, pause_stops_clock=opt_in),
+    )
+    return schema, act
+
+
+def test_pause_credit_requires_the_explicit_opt_in() -> None:
+    on = TimeConstraint(max_duration_seconds=100, pause_stops_clock=True)
+    off = TimeConstraint(max_duration_seconds=100)
+    # Without the opt-in (the default): no credit, ever -- suspending never
+    # defers a deadline (the concept's anti-loophole stance, §4).
+    assert pause_credit_seconds(off, 60.0, _NOW - timedelta(seconds=40), _NOW) == 0.0
+    assert pause_credit_seconds(None, 60.0, None, _NOW) == 0.0
+    # With it: sum of closed pauses plus the ongoing one.
+    assert pause_credit_seconds(on, 60.0, None, _NOW) == pytest.approx(60)
+    assert pause_credit_seconds(
+        on, 60.0, _NOW - timedelta(seconds=40), _NOW
+    ) == pytest.approx(100)
+    assert pause_credit_seconds(on, None, None, _NOW) == 0.0
+
+
+def test_assess_pause_credit_defers_due_and_freezes_elapsed() -> None:
+    schema, act = _net_time_schema(opt_in=True)
+    activated = _NOW - timedelta(seconds=90)
+    # 60s of closed pauses: only 30s really elapsed -> ON_TRACK instead of
+    # AT_RISK, and the due instant moves out by exactly the pause time.
+    ctx = TimeContext(
+        now=_NOW, activated_at={act: activated}, paused_seconds={act: 60.0}
+    )
+    view = assess(schema, act, ctx)
+    assert view.criticality is TimeCriticality.ON_TRACK
+    assert view.elapsed_seconds == pytest.approx(30)
+    assert view.due_at == activated + timedelta(seconds=160)
+
+
+def test_assess_ongoing_pause_freezes_the_clock() -> None:
+    schema, act = _net_time_schema(opt_in=True)
+    activated = _NOW - timedelta(seconds=90)
+    suspended = _NOW - timedelta(seconds=40)
+    # Paused since 40s: the clock froze at 50s elapsed and stays there for as
+    # long as the pause lasts (the due instant keeps receding with ``now``).
+    ctx = TimeContext(
+        now=_NOW, activated_at={act: activated}, suspended_at={act: suspended}
+    )
+    assert assess(schema, act, ctx).elapsed_seconds == pytest.approx(50)
+    later = TimeContext(
+        now=_NOW + timedelta(seconds=1000),
+        activated_at={act: activated},
+        suspended_at={act: suspended},
+    )
+    assert assess(schema, act, later).elapsed_seconds == pytest.approx(50)
+
+
+def test_assess_without_opt_in_ignores_pauses() -> None:
+    schema, act = _net_time_schema(opt_in=False)
+    activated = _NOW - timedelta(seconds=90)
+    ctx = TimeContext(
+        now=_NOW,
+        activated_at={act: activated},
+        paused_seconds={act: 60.0},
+        suspended_at={act: _NOW - timedelta(seconds=40)},
+    )
+    view = assess(schema, act, ctx)  # booked pauses exist, but do not count
+    assert view.criticality is TimeCriticality.AT_RISK
+    assert view.elapsed_seconds == pytest.approx(90)
+    assert view.due_at == activated + timedelta(seconds=100)
+
+
+def test_pause_credit_applies_to_the_claim_clock_too() -> None:
+    schema, act = _net_time_schema(opt_in=True)
+    activated = _NOW - timedelta(seconds=500)
+    claimed = _NOW - timedelta(seconds=90)
+    # Rule B origin (claim) shifts by the credit exactly like the activation
+    # origin -- one shared computation for both clock variants.
+    ctx = TimeContext(
+        now=_NOW,
+        activated_at={act: activated},
+        claimed_at={act: claimed},
+        paused_seconds={act: 60.0},
+    )
+    view = assess(schema, act, ctx)
+    assert view.elapsed_seconds == pytest.approx(30)
+    assert view.due_at == claimed + timedelta(seconds=160)

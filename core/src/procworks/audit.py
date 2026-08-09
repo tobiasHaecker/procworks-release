@@ -38,6 +38,13 @@ class EventType(StrEnum):
     #: per-instance history; type-filtered like the claim events, so it never
     #: distorts a KPI or the mined process map.
     TASK_ESCALATED = "TASK_ESCALATED"
+    #: Detail-state transitions of one activity (E2, §4): pause/continue,
+    #: failure report (reason in ``detail``) and the recovery reset. Type-
+    #: filtered like the claim events -- no KPI/mining impact.
+    ACTIVITY_SUSPENDED = "ACTIVITY_SUSPENDED"
+    ACTIVITY_RESUMED = "ACTIVITY_RESUMED"
+    ACTIVITY_FAILED = "ACTIVITY_FAILED"
+    ACTIVITY_RESET = "ACTIVITY_RESET"
     BRANCH_DECIDED = "BRANCH_DECIDED"
     ADHOC_INSERTED = "ADHOC_INSERTED"
     ADHOC_DELETED = "ADHOC_DELETED"

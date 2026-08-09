@@ -137,7 +137,8 @@ def export_bpmn(schema: ProcessSchema) -> str:
             if binding is not None:
                 attrib["calledElement"] = binding.target_schema_id
         ET.SubElement(process, f"{{{BPMN_NS}}}{_EXPORT_TAG[node.type]}", attrib)
-    for index, edge in enumerate(schema.edges, start=1):
+    control_edges = [e for e in schema.edges if e.type is EdgeType.CONTROL]
+    for index, edge in enumerate(control_edges, start=1):
         flow = ET.SubElement(
             process,
             f"{{{BPMN_NS}}}sequenceFlow",
@@ -208,6 +209,7 @@ def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
     still-correct schema.
     """
 
+    sync_edges = [e for e in schema.edges if e.type is EdgeType.SYNC]
     if not (
         schema.data_elements
         or schema.data_accesses
@@ -215,6 +217,7 @@ def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
         or schema.loop_decisions
         or schema.forms
         or schema.connectors
+        or sync_edges
     ):
         return
     extensions = ET.SubElement(process, f"{{{BPMN_NS}}}extensionElements")
@@ -227,6 +230,11 @@ def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
         "loop_decisions": {
             nid: d.model_dump(mode="json") for nid, d in schema.loop_decisions.items()
         },
+        # K4 sync edges are no BPMN sequence flows (ordering-only); they
+        # round-trip through the extension like the structured decisions.
+        "sync_edges": [
+            {"source": e.source, "target": e.target} for e in sync_edges
+        ],
         "forms": {nid: f.model_dump(mode="json") for nid, f in schema.forms.items()},
         "connectors": {
             cid: c.model_dump(mode="json") for cid, c in schema.connectors.items()
@@ -287,6 +295,23 @@ def _condition_of(flow: ET.Element) -> str | None:
             text = (child.text or "").strip()
             return text or None
     return None
+
+
+def _sync_edges_of(process: ET.Element) -> list[dict[str, str]]:
+    """Parse the K4 sync-edge list from the ProcWorks extension (or [])."""
+
+    model = _procworks_model_of(process)
+    entries = model.get("sync_edges", [])
+    result: list[dict[str, str]] = []
+    if isinstance(entries, list):
+        for entry in entries:
+            if (
+                isinstance(entry, dict)
+                and isinstance(entry.get("source"), str)
+                and isinstance(entry.get("target"), str)
+            ):
+                result.append({"source": entry["source"], "target": entry["target"]})
+    return result
 
 
 def _procworks_model_of(process: ET.Element) -> dict[str, object]:
@@ -376,6 +401,12 @@ def import_bpmn(
         ControlEdge(source=s, target=t, type=EdgeType.CONTROL, condition=c)
         for s, t, c in flows
     ]
+    for entry in _sync_edges_of(process):
+        edges.append(
+            ControlEdge(
+                source=entry["source"], target=entry["target"], type=EdgeType.SYNC
+            )
+        )
     model = _procworks_model_of(process)
     data_elements = {
         e.id: e for e in _DATA_ELEMENTS.validate_python(model.get("data_elements", []))

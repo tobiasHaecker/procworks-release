@@ -35,6 +35,7 @@ from procworks import (
     mail_runtime,
     metrics,
     migration,
+    simulation,
     worklist_priority,
 )
 from procworks import bpmn as bpmn_io
@@ -117,6 +118,7 @@ from procworks.model import (
     MailBinding,
     MailOutboxEntry,
     MailOutboxState,
+    NodeDetailState,
     NodeState,
     NodeType,
     OrderBy,
@@ -163,7 +165,7 @@ from procworks.validator import (
     check_executable,
     validate,
 )
-from procworks.worklist_priority import TimeContext, target_seconds
+from procworks.worklist_priority import TimeContext
 
 
 def _env_truthy(name: str) -> bool:
@@ -531,6 +533,10 @@ def _auth_mode() -> str:
         return "password"
     if isinstance(_auth_backend, OpenAuthBackend):
         return "open"
+    from procworks.auth_jwt import JwtAuthBackend
+
+    if isinstance(_auth_backend, JwtAuthBackend):
+        return "jwt"
     return "token"
 
 
@@ -643,6 +649,19 @@ class AuthConfig(BaseModel):
     #: Broker endpoint the SPA POSTs the post-demo survey to (``PROCWORKS_DEMO_FEEDBACK_URL``).
     #: null/absent -> the SPA shows no "end demo & give feedback" flow. Demo-only.
     demo_feedback_url: str | None = None
+    # --- OIDC redirect login (jwt mode only, opt-in via configuration) ------
+    #: IdP authorization endpoint for the SPA's Authorization-Code+PKCE login.
+    #: Populated only in jwt mode when ``PROCWORKS_JWT_AUTHORIZE_URL``,
+    #: ``PROCWORKS_JWT_TOKEN_URL`` and ``PROCWORKS_JWT_CLIENT_ID`` are all set;
+    #: otherwise the SPA keeps the plain bearer-token field (Auth-Konzept
+    #: §12.4). No secrets: a public SPA client uses PKCE, not a client secret.
+    oidc_authorize_url: str | None = None
+    #: IdP token endpoint the SPA exchanges the authorization code at.
+    oidc_token_url: str | None = None
+    #: Public (PKCE) client id registered at the IdP for the SPA.
+    oidc_client_id: str | None = None
+    #: Scopes the SPA requests (``PROCWORKS_JWT_OIDC_SCOPES``).
+    oidc_scopes: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -1076,6 +1095,27 @@ class LinkFollowUpRequest(BaseModel):
     mode: FollowUpMode = FollowUpMode.ASYNC
 
 
+class SyncEdgeRequest(BaseModel):
+    """A K4 synchronisation edge between two parallel activities."""
+
+    source_id: str = Field(..., examples=["act_1"])
+    target_id: str = Field(..., examples=["act_2"])
+
+
+class InsertBetweenRequest(BaseModel):
+    """ADEPT insertBetweenNodeSets: activity between two node sets (K4)."""
+
+    label: str = Field(..., examples=["Zwischenprüfung"])
+    source_ids: list[str] = Field(..., examples=[["act_1"]])
+    target_ids: list[str] = Field(..., examples=[["act_2"]])
+
+
+class SimulateRequest(BaseModel):
+    """Seed values for one side-effect-free what-if run (E6)."""
+
+    data: dict[str, object] = Field(default_factory=dict)
+
+
 class SetEscalationPolicyRequest(BaseModel):
     """Modelled overdue reaction of a node (T3/E9); ``policy: null`` clears."""
 
@@ -1088,6 +1128,21 @@ class StartActivityRequest(BaseModel):
     #: Acting agent (E1: starting presupposes ownership, W4). A bound login
     #: always acts as itself; open dev mode must name the agent.
     agent_id: str | None = Field(default=None, examples=["agent_erika"])
+
+
+class ActivityDetailRequest(BaseModel):
+    """Suspend/resume/reset a started activity (E2, detail-state overlay)."""
+
+    node_id: str = Field(..., examples=["act_1"])
+    agent_id: str | None = Field(default=None, examples=["agent_erika"])
+
+
+class FailActivityRequest(BaseModel):
+    """Report a started activity as failed (E2, V3) -- with a reason."""
+
+    node_id: str = Field(..., examples=["act_1"])
+    agent_id: str | None = Field(default=None, examples=["agent_erika"])
+    reason: str = Field(..., examples=["Unterlagen unvollständig"])
 
 
 class ClaimActivityRequest(BaseModel):
@@ -1497,6 +1552,9 @@ def _time_context(instance: ProcessInstance, schema: ProcessSchema) -> TimeConte
         activated_at=dict(instance.node_activated_at),
         started_at=instance.started_at,
         deadline_seconds=schema.deadline_seconds,
+        claimed_at=dict(instance.node_claimed_at),
+        paused_seconds=dict(instance.node_paused_seconds),
+        suspended_at=dict(instance.node_suspended_at),
     )
 
 
@@ -1661,6 +1719,22 @@ def get_auth_config() -> AuthConfig:
     """
     mode = _auth_mode()
     cfg = AuthConfig(mode=mode, password_login=mode == "password")
+    if mode == "jwt":
+        # OIDC redirect login (Auth-Konzept §12.4, opt-in): only when all
+        # three endpoints/ids are configured does the SPA offer the
+        # "Über Firmenkonto anmelden" flow; otherwise the token field stays
+        # the (documented) default. Values are public client metadata.
+        authorize = os.environ.get("PROCWORKS_JWT_AUTHORIZE_URL", "").strip()
+        token_url = os.environ.get("PROCWORKS_JWT_TOKEN_URL", "").strip()
+        client_id = os.environ.get("PROCWORKS_JWT_CLIENT_ID", "").strip()
+        if authorize and token_url and client_id:
+            cfg.oidc_authorize_url = authorize
+            cfg.oidc_token_url = token_url
+            cfg.oidc_client_id = client_id
+            cfg.oidc_scopes = (
+                os.environ.get("PROCWORKS_JWT_OIDC_SCOPES", "").strip()
+                or "openid profile email"
+            )
     if mode == "password" and _demo_mode():
         from procworks.demo import DEMO_AUTOLOGIN, DEMO_PASSWORD
 
@@ -3244,6 +3318,72 @@ def post_set_deadline(schema_id: str, req: SetDeadlineRequest) -> ProcessSchema:
 
 
 @app.post(
+    "/schemas/{schema_id}/sync-edge",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_add_sync_edge(schema_id: str, req: SyncEdgeRequest) -> ProcessSchema:
+    """Add a K4 sync edge (target waits for the source's resolution).
+
+    Validate-before-commit: endpoints outside different branches of one AND
+    block, or an ordering cycle, are rejected with HTTP 422.
+    """
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.add_sync_edge(schema, req.source_id, req.target_id)
+    )
+
+
+@app.post(
+    "/schemas/{schema_id}/sync-edge/remove",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_remove_sync_edge(schema_id: str, req: SyncEdgeRequest) -> ProcessSchema:
+    """Remove a K4 sync edge (inverse of the add endpoint)."""
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.remove_sync_edge(schema, req.source_id, req.target_id)
+    )
+
+
+@app.post(
+    "/schemas/{schema_id}/insert-between",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_insert_between(schema_id: str, req: InsertBetweenRequest) -> ProcessSchema:
+    """Insert an activity between two node sets (ADEPT, K4 sync wiring)."""
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.insert_between_node_sets(
+            schema, req.label, req.source_ids, req.target_ids
+        )
+    )
+
+
+@app.post(
+    "/schemas/{schema_id}/simulate",
+    response_model=simulation.SimulationResult,
+    dependencies=[_read],
+)
+def post_simulate(schema_id: str, req: SimulateRequest) -> simulation.SimulationResult:
+    """Run a side-effect-free what-if walk over the schema (E6).
+
+    Pure and read-only: the walk uses the operational engine semantics on a
+    throw-away instance that never touches a store -- no audit, no mail, no
+    tasks, nothing persisted. Drafts are allowed (semantic validation happens
+    while modelling).
+    """
+
+    schema = _get_or_404(schema_id)
+    return simulation.simulate(schema, req.data)
+
+
+@app.post(
     "/schemas/{schema_id}/escalation-policy",
     response_model=ProcessSchema,
     dependencies=[_model],
@@ -3560,11 +3700,29 @@ def _escalation_sweep(now: datetime | None = None) -> int:
                 NodeState.RUNNING,
             ):
                 continue
-            activated = instance.node_activated_at.get(node_id)
-            target = target_seconds(schema.time_constraints.get(node_id))
-            if activated is None or target is None:
+            if instance.node_details.get(node_id) is NodeDetailState.FAILED:
+                # E2: a failed step waits for its recovery -- the failure is
+                # already loud, escalating further would only add noise.
+                continue
+            # Shared due computation with the worklist bands (rule B): once
+            # claimed, a modelled processing duration counts from the claim.
+            # The pause credit (net time, opt-in) shifts the due instant the
+            # same way it shifts the bands -- one computation, two consumers.
+            constraint = schema.time_constraints.get(node_id)
+            target, origin = worklist_priority.effective_clock(
+                constraint,
+                instance.node_activated_at.get(node_id),
+                instance.node_claimed_at.get(node_id),
+                worklist_priority.pause_credit_seconds(
+                    constraint,
+                    instance.node_paused_seconds.get(node_id),
+                    instance.node_suspended_at.get(node_id),
+                    moment,
+                ),
+            )
+            if origin is None or target is None:
                 continue  # no stamped clock (legacy instance) -> no due instant
-            due = activated + timedelta(seconds=target)
+            due = origin + timedelta(seconds=target)
             already = instance.escalated_stages.get(node_id, 0)
             for index in range(already, len(policy.stages)):
                 stage = policy.stages[index]
@@ -3931,6 +4089,171 @@ def post_return_activity(
             label=_label_of(schema, req.node_id),
             agent_id=acting,
         )
+    return after
+
+
+def _detail_audit(
+    event: EventType,
+    instance: ProcessInstance,
+    after: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str | None,
+    detail: dict[str, str] | None = None,
+) -> None:
+    """Append one E2 detail-state audit event (skipped for test instances)."""
+
+    if instance.is_test:
+        return
+    _audit.append(
+        event,
+        after.id,
+        after.schema_id,
+        schema_version=after.schema_version,
+        node_id=node_id,
+        label=_label_of(schema, node_id),
+        agent_id=agent_id,
+        detail=detail,
+    )
+
+
+@app.post("/instances/{instance_id}/suspend", response_model=ProcessInstance)
+def post_suspend_activity(
+    instance_id: str,
+    req: ActivityDetailRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> ProcessInstance:
+    """Pause a started activity (E2, V1) -- owner-only, base marking stays.
+
+    The pause is transparency, not a deadline stop: clocks and escalation
+    keep running (Aktivitaets-Detailzustaende-Konzept §4).
+    """
+
+    instance = _get_instance_or_404(instance_id)
+    schema = _effective_schema_for(instance)
+    acting = _require_acting_agent(principal, req.agent_id)
+
+    def _suspend_and_stamp() -> ProcessInstance:
+        after = exe.suspend_activity(
+            instance,
+            schema,
+            req.node_id,
+            acting,
+            absent_agents=_current_absent_agents(),
+        )
+        # Net-time bookkeeping (E2 Stufe C): stamp the pause start at this
+        # boundary (the engine stays clock-free). ``setdefault`` keeps an
+        # idempotent re-suspend from restarting the ongoing pause.
+        after.node_suspended_at.setdefault(req.node_id, datetime.now(UTC))
+        return after
+
+    after = _run_or_409(_suspend_and_stamp)
+    _detail_audit(EventType.ACTIVITY_SUSPENDED, instance, after, schema, req.node_id, acting)
+    return after
+
+
+@app.post("/instances/{instance_id}/resume", response_model=ProcessInstance)
+def post_resume_activity(
+    instance_id: str,
+    req: ActivityDetailRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> ProcessInstance:
+    """Continue a suspended activity (E2, V2) -- owner-only."""
+
+    instance = _get_instance_or_404(instance_id)
+    schema = _effective_schema_for(instance)
+    acting = _require_acting_agent(principal, req.agent_id)
+
+    def _resume_and_book() -> ProcessInstance:
+        after = exe.resume_activity(instance, schema, req.node_id, acting)
+        # Net-time bookkeeping (E2 Stufe C): close the pause interval opened
+        # by suspend -- the elapsed span moves into the accumulated credit.
+        # Booked unconditionally (cheap, additive); whether it *counts* is
+        # decided at read time by the constraint's ``pause_stops_clock``.
+        opened = after.node_suspended_at.pop(req.node_id, None)
+        if opened is not None:
+            span = (datetime.now(UTC) - opened).total_seconds()
+            if span > 0:
+                after.node_paused_seconds[req.node_id] = (
+                    after.node_paused_seconds.get(req.node_id, 0.0) + span
+                )
+        return after
+
+    after = _run_or_409(_resume_and_book)
+    _detail_audit(EventType.ACTIVITY_RESUMED, instance, after, schema, req.node_id, acting)
+    return after
+
+
+@app.post("/instances/{instance_id}/fail", response_model=ProcessInstance)
+def post_fail_activity(
+    instance_id: str,
+    req: FailActivityRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> ProcessInstance:
+    """Report a started activity as failed (E2, V3) -- with a reason.
+
+    The step freezes (not completable, not workable) and waits for its
+    recovery reset -- the instance is never in an undefined state.
+    """
+
+    instance = _get_instance_or_404(instance_id)
+    schema = _effective_schema_for(instance)
+    acting = _require_acting_agent(principal, req.agent_id)
+    after = _run_or_409(
+        lambda: exe.fail_activity(
+            instance,
+            schema,
+            req.node_id,
+            acting,
+            req.reason,
+            absent_agents=_current_absent_agents(),
+        )
+    )
+    _detail_audit(
+        EventType.ACTIVITY_FAILED,
+        instance,
+        after,
+        schema,
+        req.node_id,
+        acting,
+        detail={"reason": req.reason.strip()},
+    )
+    return after
+
+
+@app.post("/instances/{instance_id}/reset", response_model=ProcessInstance)
+def post_reset_activity(
+    instance_id: str,
+    req: ActivityDetailRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> ProcessInstance:
+    """Recover a failed activity (E2, V4): fresh offer, fresh clocks.
+
+    The owner may reset their own failure; for someone else's the same
+    supervisory authority applies as for the E1 return. The activation clock
+    is re-stamped at this boundary, so the second attempt gets a fresh
+    deadline and a fresh escalation ladder.
+    """
+
+    instance = _get_instance_or_404(instance_id)
+    schema = _effective_schema_for(instance)
+    acting = _resolve_acting_agent(principal, req.agent_id)
+    holder = instance.claimed_by.get(req.node_id)
+    if holder is not None and acting != holder:
+        _require_agent_self_or_supervisor(principal, holder)
+        force = True
+    else:
+        force = False
+
+    def _reset_and_stamp() -> ProcessInstance:
+        after = exe.reset_activity(
+            instance, schema, req.node_id, acting or "", force=force
+        )
+        after.node_activated_at[req.node_id] = datetime.now(UTC)
+        return after
+
+    after = _run_or_409(_reset_and_stamp)
+    _detail_audit(EventType.ACTIVITY_RESET, instance, after, schema, req.node_id, acting)
     return after
 
 

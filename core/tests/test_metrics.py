@@ -14,7 +14,9 @@ from procworks import (
     BranchSpec,
     DataType,
     TimeConstraint,
+    add_agent,
     add_data_element,
+    add_role,
     assign_service,
     conditional_insert,
     connect_data,
@@ -24,12 +26,21 @@ from procworks import (
     model_report,
     parallel_insert,
     serial_insert,
+    set_escalation_policy,
     set_time_constraint,
     set_value_class,
     value_class_breakdown,
 )
 from procworks.metrics import _nesting_depth
-from procworks.model import NodeType, ValueClass
+from procworks.model import (
+    EscalationKind,
+    EscalationPolicy,
+    EscalationStage,
+    NodeType,
+    StaffRule,
+    StaffRuleKind,
+    ValueClass,
+)
 
 
 def _activity_id(schema, label):
@@ -181,3 +192,76 @@ def test_g8_disappears_once_the_lead_time_is_set() -> None:
 
     schema = set_time_constraint(schema, b, TimeConstraint(target_lead_seconds=7200))
     assert [h for h in model_hints(schema) if h.code == "G8"] == []
+
+
+# --- G9: Frist ohne modellierte Eskalations-Reaktion (T3 Stufe C) -----------
+
+
+def _escalation_world():
+    """Zwei befristete interaktive Schritte, einer traegt eine Eskalation."""
+
+    schema = create_empty_schema("Eskalation", schema_id="m-esc")
+    schema = serial_insert(schema, "A", after_node_id="start")
+    schema = serial_insert(schema, "B", after_node_id=_activity_id(schema, "A"))
+    schema = add_role(schema, "Leitung", role_id="r-lead")
+    schema = add_agent(schema, "Lena", role_ids=["r-lead"], agent_id="a-lena")
+    a = _activity_id(schema, "A")
+    b = _activity_id(schema, "B")
+    schema = set_time_constraint(schema, a, TimeConstraint(target_lead_seconds=3600))
+    schema = set_time_constraint(schema, b, TimeConstraint(max_duration_seconds=1800))
+    return schema, a, b
+
+
+def test_g9_silent_without_any_escalation_policy() -> None:
+    """Additive Stille: Wer Eskalation nicht nutzt, bekommt keinen G9-Hinweis.
+
+    Beide Schritte tragen Fristen, aber solange keine einzige Policy
+    modelliert ist, ist eine fehlende Reaktion keine Ueberraschung.
+    """
+
+    schema, _a, _b = _escalation_world()
+    assert [h for h in model_hints(schema) if h.code == "G9"] == []
+
+
+def test_g9_flags_timed_steps_without_a_policy() -> None:
+    """Nutzt das Schema Eskalation, werden befristete Luecken benannt."""
+
+    schema, a, b = _escalation_world()
+    schema = set_escalation_policy(
+        schema,
+        a,
+        EscalationPolicy(stages=[EscalationStage(
+            after_seconds=0,
+            kind=EscalationKind.HIERARCHICAL,
+            rule=StaffRule(kind=StaffRuleKind.ROLE, ref="r-lead"),
+        )]),
+    )
+    hints = [h for h in model_hints(schema) if h.code == "G9"]
+    assert [h.node_id for h in hints] == [b]
+    assert "Eskalations-Stufen" in hints[0].message
+
+
+def test_g9_exempts_automatic_and_unfristed_steps() -> None:
+    """Automatikschritte (Incidents statt Eskalation) und fristlose Schritte
+    loesen keinen G9 aus -- es gibt keinen Ausloesezeitpunkt bzw. keinen
+    menschlichen Eskalationsweg."""
+
+    schema, a, b = _escalation_world()
+    schema = serial_insert(schema, "C", after_node_id=b)
+    c = _activity_id(schema, "C")  # ohne Frist
+    schema = set_time_constraint(schema, c, None)
+    schema = serial_insert(schema, "D", after_node_id=c)
+    d = _activity_id(schema, "D")
+    schema = set_time_constraint(schema, d, TimeConstraint(max_duration_seconds=60))
+    schema = assign_service(schema, d, "Roboter", automatic=True)
+    schema = set_escalation_policy(
+        schema,
+        a,
+        EscalationPolicy(stages=[EscalationStage(
+            after_seconds=0,
+            kind=EscalationKind.HIERARCHICAL,
+            rule=StaffRule(kind=StaffRuleKind.ROLE, ref="r-lead"),
+        )]),
+    )
+    hints = [h.node_id for h in model_hints(schema) if h.code == "G9"]
+    assert hints == [b]  # C (fristlos) und D (automatisch) bleiben still

@@ -42,6 +42,7 @@ from procworks.model import (
     InstanceState,
     LifecycleState,
     Node,
+    NodeDetailState,
     NodeState,
     NodeType,
     ProcessInstance,
@@ -255,6 +256,12 @@ def return_activity(
 
     _require_running(instance)
     node = _require_activity(schema, node_id)
+    if instance.node_details.get(node_id) is NodeDetailState.FAILED:
+        # E2 (V4): a failed step is recovered via reset (fresh offer +
+        # re-stamped clock), never silently returned.
+        raise ExecutionError(
+            f"activity '{node_id}' is marked FAILED -- use its reset instead (V4)"
+        )
     holder = instance.claimed_by.get(node.id)
     if holder is None:
         raise ExecutionError(f"activity '{node_id}' is not claimed")
@@ -265,6 +272,9 @@ def return_activity(
     result = instance.model_copy(deep=True)
     result.claimed_by.pop(node.id, None)
     result.node_claimed_at.pop(node.id, None)
+    result.node_details.pop(node.id, None)  # returning ends a pause (E2)
+    result.node_paused_seconds.pop(node.id, None)  # net-time credit too
+    result.node_suspended_at.pop(node.id, None)
     if result.node_states[node.id] is NodeState.RUNNING:
         result.node_states[node.id] = NodeState.ACTIVATED
     return result
@@ -291,6 +301,160 @@ def start_activity(
     )
     claimed.node_states[node_id] = NodeState.RUNNING
     return claimed
+
+
+def _require_started_owner(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str,
+    absent_agents: frozenset[str],
+) -> ProcessInstance:
+    """Collapse to the Started state under ``agent_id`` (V1/V3 helper).
+
+    Suspend/fail act on a *started, owned* step; a merely offered or claimed
+    step is started implicitly (the same §6.2.1 collapse ``start_activity``
+    performs), while a step owned by someone else is refused there (W1).
+    A FAILED step is frozen until its recovery (V4) and refuses everything.
+    """
+
+    if instance.node_details.get(node_id) is NodeDetailState.FAILED:
+        raise ExecutionError(
+            f"activity '{node_id}' is marked FAILED and awaits its reset (V4)"
+        )
+    if instance.node_states.get(node_id) is NodeState.RUNNING:
+        holder = instance.claimed_by.get(node_id)
+        if holder != agent_id:
+            raise ExecutionError(
+                f"activity '{node_id}' is worked on by '{holder}', not "
+                f"'{agent_id}' (V1)"
+            )
+        return instance.model_copy(deep=True)
+    return start_activity(
+        instance, schema, node_id, agent_id, absent_agents=absent_agents
+    )
+
+
+def suspend_activity(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str,
+    *,
+    absent_agents: frozenset[str] = frozenset(),
+) -> ProcessInstance:
+    """Pause a started ACTIVITY: RUNNING -> SUSPENDED overlay (E2, V1).
+
+    Owner-only; idempotent for a re-suspend by the owner. The base marking
+    stays RUNNING (nothing propagates), the overlay blocks completion until
+    ``resume_activity`` (V2) -- the §4 automaton only finishes from RUNNING.
+    By default the clock deliberately keeps running (a pause is transparency,
+    not a deadline stop -- otherwise suspending would dodge the escalation);
+    only a constraint with the explicit ``pause_stops_clock`` opt-in earns
+    net-time credit, booked at the API boundary (the engine stays clock-free).
+    """
+
+    _require_running(instance)
+    _require_activity(schema, node_id)
+    if instance.node_details.get(node_id) is NodeDetailState.SUSPENDED:
+        if instance.claimed_by.get(node_id) != agent_id:
+            raise ExecutionError(
+                f"activity '{node_id}' is suspended by its owner, not '{agent_id}'"
+            )
+        return instance.model_copy(deep=True)
+    result = _require_started_owner(instance, schema, node_id, agent_id, absent_agents)
+    result.node_details[node_id] = NodeDetailState.SUSPENDED
+    return result
+
+
+def resume_activity(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str,
+) -> ProcessInstance:
+    """Continue a suspended ACTIVITY: SUSPENDED -> RUNNING (E2, V2)."""
+
+    _require_running(instance)
+    _require_activity(schema, node_id)
+    if instance.node_details.get(node_id) is not NodeDetailState.SUSPENDED:
+        raise ExecutionError(f"activity '{node_id}' is not suspended")
+    if instance.claimed_by.get(node_id) != agent_id:
+        raise ExecutionError(
+            f"activity '{node_id}' can only be resumed by its owner (V2)"
+        )
+    result = instance.model_copy(deep=True)
+    result.node_details.pop(node_id, None)
+    return result
+
+
+def fail_activity(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str,
+    reason: str,
+    *,
+    absent_agents: frozenset[str] = frozenset(),
+) -> ProcessInstance:
+    """Mark a started ACTIVITY as failed: RUNNING -> FAILED overlay (E2, V3).
+
+    Owner-only (implicit start collapse like V1); a suspended step resumes
+    first (the §4 automaton aborts only from RUNNING). The failed step is
+    frozen -- not completable, not workable -- until its recovery
+    (``reset_activity``, V4): the instance waits *defined*, never undefined.
+    """
+
+    _require_running(instance)
+    _require_activity(schema, node_id)
+    if instance.node_details.get(node_id) is NodeDetailState.SUSPENDED:
+        raise ExecutionError(
+            f"activity '{node_id}' is suspended -- resume before failing (V3)"
+        )
+    result = _require_started_owner(instance, schema, node_id, agent_id, absent_agents)
+    result.node_details[node_id] = NodeDetailState.FAILED
+    result.node_detail_reason[node_id] = reason.strip()
+    return result
+
+
+def reset_activity(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str,
+    *,
+    force: bool = False,
+) -> ProcessInstance:
+    """Recover a failed ACTIVITY: FAILED -> ACTIVATED, fresh offer (E2, V4).
+
+    Owner may always reset their own failure; ``force`` is the boundary's
+    supervisory override (like the E1 return). The reset clears overlay,
+    reason, claim and fired escalation stages, and puts the base marking back
+    to ACTIVATED -- the task becomes a fresh offer to every eligible agent;
+    the boundary re-stamps the activation clock (fresh deadline and a fresh
+    escalation ladder for the second attempt).
+    """
+
+    _require_running(instance)
+    _require_activity(schema, node_id)
+    if instance.node_details.get(node_id) is not NodeDetailState.FAILED:
+        raise ExecutionError(f"activity '{node_id}' is not marked FAILED")
+    holder = instance.claimed_by.get(node_id)
+    if not force and holder != agent_id:
+        raise ExecutionError(
+            f"activity '{node_id}' failed under '{holder}'; only they or a "
+            "supervisor may reset it (V4)"
+        )
+    result = instance.model_copy(deep=True)
+    result.node_details.pop(node_id, None)
+    result.node_detail_reason.pop(node_id, None)
+    result.claimed_by.pop(node_id, None)
+    result.node_claimed_at.pop(node_id, None)
+    result.escalated_stages.pop(node_id, None)
+    result.node_paused_seconds.pop(node_id, None)  # fresh clocks (net time)
+    result.node_suspended_at.pop(node_id, None)
+    result.node_states[node_id] = NodeState.ACTIVATED
+    return result
 
 
 def complete_activity(
@@ -337,11 +501,23 @@ def complete_activity(
             f"activity '{node_id}' is claimed by '{holder}' and can only be "
             "completed by them (W2)"
         )
+    detail = instance.node_details.get(node.id)
+    if detail is NodeDetailState.SUSPENDED:
+        # E2 (V2): the §4 automaton only finishes from RUNNING -- resume first.
+        raise ExecutionError(
+            f"activity '{node_id}' is suspended -- resume it before completing"
+        )
+    if detail is NodeDetailState.FAILED:
+        raise ExecutionError(
+            f"activity '{node_id}' is marked FAILED and awaits its reset (V4)"
+        )
     result = instance.model_copy(deep=True)
     if agent_id is not None:
         result.performed_by[node.id] = agent_id
     result.claimed_by.pop(node.id, None)
     result.node_claimed_at.pop(node.id, None)
+    result.node_paused_seconds.pop(node.id, None)  # net-time credit is per activation
+    result.node_suspended_at.pop(node.id, None)
     if data:
         result.data_values.update(data)
     _complete_node(result, schema, node)
@@ -520,6 +696,11 @@ def _reset_loop_block(
         # T3/E9: each round measures its own target time -- fired escalation
         # stages belong to the activation, not the node.
         instance.escalated_stages.pop(nid, None)
+        # E2: detail overlays hang on one activation like claims do.
+        instance.node_details.pop(nid, None)
+        instance.node_detail_reason.pop(nid, None)
+        instance.node_paused_seconds.pop(nid, None)  # net-time credit too
+        instance.node_suspended_at.pop(nid, None)
     internal_sources = body | {start_id}
     for edge in schema.edges:
         if edge.source in internal_sources:
@@ -721,6 +902,9 @@ def _complete_node(
         else:
             signal = EdgeState.TRUE_SIGNALED
         instance.edge_states[_edge_key(edge)] = signal
+    for edge in schema.sync_outgoing(node.id):
+        # K4: a sync edge is *resolved* by completion -- its waiter may run.
+        instance.edge_states[_edge_key(edge)] = EdgeState.TRUE_SIGNALED
 
 
 def _skip_node(instance: ProcessInstance, schema: ProcessSchema, node: Node) -> None:
@@ -728,6 +912,10 @@ def _skip_node(instance: ProcessInstance, schema: ProcessSchema, node: Node) -> 
 
     instance.node_states[node.id] = NodeState.SKIPPED
     for edge in schema.outgoing(node.id):
+        instance.edge_states[_edge_key(edge)] = EdgeState.FALSE_SIGNALED
+    for edge in schema.sync_outgoing(node.id):
+        # K4: deselection resolves the wait too (never a dead-wait) -- the
+        # FALSE signal carries "resolved without execution".
         instance.edge_states[_edge_key(edge)] = EdgeState.FALSE_SIGNALED
 
 
@@ -752,6 +940,15 @@ def _evaluate_targets(instance: ProcessInstance, schema: ProcessSchema) -> bool:
             activate = all(s is EdgeState.TRUE_SIGNALED for s in signals)
         else:
             activate = any(s is EdgeState.TRUE_SIGNALED for s in signals)
+        if activate and any(
+            instance.edge_states.get(_edge_key(e)) is EdgeState.NOT_SIGNALED
+            for e in schema.sync_incoming(node.id)
+        ):
+            # K4: an incoming sync edge is an *additional* wait -- the node
+            # activates only once every sync source is completed or skipped.
+            # A node the control flow deselects skips regardless (a skip must
+            # never dead-wait on a sync).
+            continue
         if activate:
             instance.node_states[node.id] = NodeState.ACTIVATED
         else:

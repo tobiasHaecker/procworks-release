@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from procworks.model import (
     JOIN_TYPES,
     SPLIT_TYPES,
+    EdgeType,
     NodeType,
     ProcessSchema,
     ValueClass,
@@ -54,7 +55,8 @@ class ModelHint(BaseModel):
     """A single non-blocking modelling hint (advisory, never a correctness gate)."""
 
     #: Stable hint code. ``G1``/``G2``/``G6``/``G7`` follow the 7PMG numbering;
-    #: ``G8`` (Soll-Zeit-Luecke) is ProcWorks' own addition beyond that set.
+    #: ``G8`` (Soll-Zeit-Luecke) and ``G9`` (Frist ohne Eskalations-Reaktion)
+    #: are ProcWorks' own additions beyond that set.
     code: str
     #: Human-readable advice.
     message: str
@@ -102,6 +104,8 @@ def _nesting_depth(schema: ProcessSchema) -> int:
     indegree: dict[str, int] = {nid: 0 for nid in nodes}
     succ: dict[str, list[str]] = {nid: [] for nid in nodes}
     for edge in schema.edges:
+        if edge.type is not EdgeType.CONTROL:
+            continue  # SYNC (K4) is ordering-only, no nesting contribution
         if edge.source in nodes and edge.target in nodes:
             succ[edge.source].append(edge.target)
             indegree[edge.target] += 1
@@ -234,6 +238,7 @@ def model_hints(schema: ProcessSchema) -> list[ModelHint]:
             )
 
     hints += _target_lead_gap_hints(schema)
+    hints += _escalation_gap_hints(schema)
     return hints
 
 
@@ -274,6 +279,52 @@ def _target_lead_gap_hints(schema: ProcessSchema) -> list[ModelHint]:
                     "eine -- ohne Soll-Zeit nimmt dieser Schritt nicht an der "
                     "zeitbasierten Priorisierung teil und wird nie als "
                     "zeitkritisch eingestuft."
+                ),
+                node_id=node.id,
+            )
+        )
+    return hints
+
+
+def _escalation_gap_hints(schema: ProcessSchema) -> list[ModelHint]:
+    """G9: hard target times without a modelled overdue reaction (T3 gap).
+
+    The advisory counterpart the Eskalations-Konzept sketched in §6
+    ("B2/Freigabe"): T3 deliberately never *forces* a policy per target time,
+    but once the modeller uses escalation at all, a timed interactive step
+    without one is probably an oversight -- it turns OVERDUE in the worklist
+    and then nothing happens. Mirrors G8's additive silence: a schema without
+    any ``escalation_policies`` gets no hint (whoever ignores escalation
+    entirely is not nagged), automatic steps are exempt (their failures are
+    incidents, not human escalation -- T3a's own line).
+    """
+
+    if not schema.escalation_policies:
+        return []
+    hints: list[ModelHint] = []
+    for node in schema.nodes.values():
+        if node.type is not NodeType.ACTIVITY:
+            continue
+        binding = schema.service_bindings.get(node.id)
+        if binding is not None and binding.automatic:
+            continue  # incidents/retry cover automatic steps (T3a)
+        constraint = schema.time_constraints.get(node.id)
+        if constraint is None or (
+            constraint.target_lead_seconds is None
+            and constraint.max_duration_seconds is None
+        ):
+            continue  # no resolvable due instant -> nothing to react to
+        if node.id in schema.escalation_policies:
+            continue
+        hints.append(
+            ModelHint(
+                code="G9",
+                message=(
+                    f"Der Schritt '{node.label or node.id}' hat eine Soll-Zeit, "
+                    "aber keine Eskalations-Stufen. Andere Schritte dieses "
+                    "Modells eskalieren bei Fristueberschreitung -- dieser "
+                    "wird nur als ueberfaellig markiert, ohne dass jemand "
+                    "reagiert."
                 ),
                 node_id=node.id,
             )

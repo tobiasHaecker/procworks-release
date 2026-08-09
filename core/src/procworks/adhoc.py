@@ -177,6 +177,8 @@ def adhoc_delete_node(
     result.claimed_by.pop(node_id, None)
     result.node_claimed_at.pop(node_id, None)
     result.escalated_stages.pop(node_id, None)  # T3: same reasoning
+    result.node_details.pop(node_id, None)  # E2: same reasoning
+    result.node_detail_reason.pop(node_id, None)
     result.edge_states.pop(_edge_key(predecessor_id, node_id), None)
     result.edge_states.pop(_edge_key(node_id, successor_id), None)
     result.edge_states[_edge_key(predecessor_id, successor_id)] = EdgeState.NOT_SIGNALED

@@ -69,6 +69,9 @@ const state = {
   schemaId: localStorage.getItem("schemaId") || null,
   schema: null,
   validation: null,
+  // Nicht-blockierende Modellhinweise (G-Gruppe, /metrics) zum gewählten
+  // Schema. Rein beratend – nie Teil der Korrektheitsentscheidung.
+  hints: [],
   instanceIds: [],
   instanceId: null,
   instance: null,
@@ -234,7 +237,12 @@ const NODE_TYPE = {
   START: "START", END: "END", ACTIVITY: "ACTIVITY",
   AND_SPLIT: "AND_SPLIT", AND_JOIN: "AND_JOIN",
   XOR_SPLIT: "XOR_SPLIT", XOR_JOIN: "XOR_JOIN", SUBPROCESS: "SUBPROCESS",
+  // Schleifenblock (K6): Begrenzer einer REPEAT-UNTIL-Schleife. Für das
+  // Layout gewöhnliche serielle Knoten (je ein Ein-/Ausgang; die
+  // Rücksprungkante ist nie gespeichert, der Graph bleibt azyklisch).
+  LOOP_START: "LOOP_START", LOOP_END: "LOOP_END",
 };
+const LOOP_TYPES = new Set([NODE_TYPE.LOOP_START, NODE_TYPE.LOOP_END]);
 const GATEWAYS = new Set([
   NODE_TYPE.AND_SPLIT, NODE_TYPE.AND_JOIN, NODE_TYPE.XOR_SPLIT, NODE_TYPE.XOR_JOIN,
 ]);
@@ -750,7 +758,8 @@ function nodeClass(node, instance) {
 function nodeCaption(node) {
   if (node.label) return node.label;
   return { START: "Start", END: "Ende", AND_SPLIT: "UND \u25B6", AND_JOIN: "\u25B6 UND",
-    XOR_SPLIT: "XOR \u25B6", XOR_JOIN: "\u25B6 XOR", SUBPROCESS: "Teilprozess" }[node.type] || node.type;
+    XOR_SPLIT: "XOR \u25B6", XOR_JOIN: "\u25B6 XOR", SUBPROCESS: "Teilprozess",
+    LOOP_START: "\u21BB Wiederholen", LOOP_END: "Bis erf\u00FCllt \u21BB" }[node.type] || node.type;
 }
 
 // Berechnet die Datenherkunft-Linien (Schreib- -> Lese-Knoten) fuer die
@@ -792,6 +801,75 @@ function computeProvenance(schema, focus) {
       });
   });
   return lines;
+}
+
+// Paare (LOOP_START -> LOOP_END) samt Rumpfmenge, per Vorwärtslauf mit
+// Tiefenzählung – der Spiegel von model.loop_block im Kern (K6a garantiert die
+// saubere Paarung; ein unpaariger Start kann gar nicht erst entstehen). Rein
+// lesend, wird für den gezeichneten Rücksprung-Bogen gebraucht, denn die
+// Rücksprungkante existiert bewusst nicht als Datum.
+function loopPairsOf(schema) {
+  const out = {};
+  (schema.edges || []).forEach((e) => { (out[e.source] = out[e.source] || []).push(e.target); });
+  const pairs = [];
+  Object.values(schema.nodes || {}).forEach((n) => {
+    if (n.type !== NODE_TYPE.LOOP_START) return;
+    const body = new Set();
+    const stack = (out[n.id] || []).map((t) => [t, 0]);
+    let end = null;
+    while (stack.length) {
+      const [id, depth] = stack.pop();
+      const node = schema.nodes[id];
+      if (!node || body.has(id)) continue;
+      if (node.type === NODE_TYPE.LOOP_END && depth === 0) { end = id; continue; }
+      body.add(id);
+      let d = depth;
+      if (node.type === NODE_TYPE.LOOP_START) d += 1;
+      else if (node.type === NODE_TYPE.LOOP_END) d -= 1;
+      (out[id] || []).forEach((t) => stack.push([t, d]));
+    }
+    if (end) pairs.push({ start: n.id, end, body });
+  });
+  return pairs;
+}
+
+// Deutsche Kurzbeschreibung der Wiederhol-Bedingung einer LoopDecision –
+// die EINE geteilte Quelle für den Rücksprung-Bogen (renderGraph) und das
+// Schleifen-Panel (loopNodePanel), damit die Oberflächen nie driften.
+// Boolesche Kurzform (S1): „X“ = wahr/falsch. Partition (S3): die
+// Wiederhol-Zellen werden als kompakte Wertbereiche aufgezählt (THRESHOLD als
+// [untere–obere) Bereiche, ENUM als Wertemenge bzw. „sonst“).
+function loopConditionCaption(schema, d, maxLen) {
+  if (!d) return null;
+  const elem = (schema.data_elements || {})[d.discriminator];
+  const name = truncate(elem ? elem.name : d.discriminator, maxLen || 14);
+  if (!d.cells || !d.cells.length) {
+    return `„${name}“ = ${d.repeat_value ? "wahr" : "falsch"}`;
+  }
+  if (d.kind === "THRESHOLD") {
+    const parts = [];
+    let lower = null;
+    d.cells.forEach((c) => {
+      if (c.repeat) {
+        if (lower === null) parts.push(`< ${c.upper}`);
+        else if (c.upper == null) parts.push(`≥ ${lower}`);
+        else parts.push(`${lower} – ${c.upper}`);
+      }
+      lower = c.upper;
+    });
+    return `„${name}“ ${parts.join(" oder ")}`;
+  }
+  if (d.kind === "BOOLEAN") {
+    const rep = d.cells.filter((c) => c.repeat).map((c) => (c.bool_value ? "wahr" : "falsch"));
+    return `„${name}“ = ${rep.join("/")}`;
+  }
+  // ENUM: aufgezählte Wiederhol-Werte; wiederholt der Sonst-Zweig, steht das dabei.
+  const rep = d.cells.filter((c) => c.repeat);
+  const named = rep.filter((c) => !c.is_else).flatMap((c) => c.values || []);
+  const bits = [];
+  if (named.length) bits.push(`∈ {${named.map((v) => truncate(v, 10)).join(", ")}}`);
+  if (rep.some((c) => c.is_else)) bits.push("sonst");
+  return `„${name}“ ${bits.join(" oder ")}`;
 }
 
 function renderGraph(schema, opts) {
@@ -836,6 +914,38 @@ function renderGraph(schema, opts) {
       root.appendChild(g);
     }
   });
+
+  // Rücksprung-Bögen der Schleifen (K6): Die Rücksprungkante ist bewusst nie
+  // gespeichert (der Graph bleibt azyklisch) – gezeichnet wird sie aus der
+  // LOOP_START/LOOP_END-Paarung: vom Unterrand des Schleifenendes unter dem
+  // Rumpf hindurch zurück an den Unterrand des Schleifenanfangs. Der Bogen
+  // taucht unter die tiefste Bahn des Blocks (dort hängen auch die Badges);
+  // ragt er unter die viewBox hinaus, wird sie nach unten erweitert –
+  // das Spiegelbild der Herkunfts-Erweiterung nach oben (s. u.).
+  let vbBottom = L.height;
+  loopPairsOf(schema).forEach(({ start, end, body }) => {
+    const ps = L.pos[start], pe = L.pos[end];
+    if (!ps || !pe) return;
+    let low = ps.y + ps.h;
+    body.forEach((id) => { const p = L.pos[id]; if (p) low = Math.max(low, p.y + p.h); });
+    low = Math.max(low, pe.y + pe.h);
+    const dip = low + 46;
+    const xe = pe.x + pe.w / 2, ye = pe.y + pe.h;
+    const xs = ps.x + ps.w / 2, ys = ps.y + ps.h;
+    root.appendChild(svg("path", { class: "gloop", "marker-end": "url(#arrow)",
+      d: `M ${xe} ${ye} C ${xe} ${dip}, ${xs} ${dip}, ${xs} ${ys + 4}` }));
+    const d = (schema.loop_decisions || {})[end];
+    const condition = loopConditionCaption(schema, d, 14);
+    const maxSuffix = d && d.max_iterations ? ` · max ${d.max_iterations}×` : "";
+    const caption = condition ? `↻ solange ${condition}${maxSuffix}` : "↻ wiederholen";
+    root.appendChild(svg("text", { class: "gloop-txt", x: (xs + xe) / 2, y: dip - 5, "text-anchor": "middle" },
+      document.createTextNode(caption)));
+    vbBottom = Math.max(vbBottom, dip + 12);
+  });
+  if (vbBottom > L.height) {
+    root.setAttribute("height", vbBottom);
+    root.setAttribute("viewBox", `0 0 ${L.width} ${vbBottom}`);
+  }
 
   // Datenherkunft (gestrichelt): fuer jede gelesene Groesse ein Bogen vom
   // Schreib- zum Lese-Knoten. Rein visuell; ``opts.provenance`` wird von der
@@ -899,8 +1009,8 @@ function renderGraph(schema, opts) {
   }
   if (topY < 0) {
     const vbTop = topY - 6;
-    root.setAttribute("viewBox", `0 ${vbTop} ${L.width} ${L.height - vbTop}`);
-    root.setAttribute("height", L.height - vbTop);
+    root.setAttribute("viewBox", `0 ${vbTop} ${L.width} ${vbBottom - vbTop}`);
+    root.setAttribute("height", vbBottom - vbTop);
   }
 
   provItems.forEach((pv) => {
@@ -945,6 +1055,15 @@ function renderGraph(schema, opts) {
     const sub = opts.instance && opts.instance.node_states ? (opts.instance.node_states[id] || "") : node.type;
     g.appendChild(svg("text", { class: "gstate", x: p.x + p.w / 2, y: p.y + p.h / 2 + 14, "text-anchor": "middle" },
       document.createTextNode(sub)));
+    // Iterationszähler (K6, rein beobachtend): Wie oft hat diese Schleife
+    // bereits wiederholt? Nur in Laufzeit-Sichten (Instanz vorhanden) und nur,
+    // wenn mindestens einmal wiederholt wurde.
+    const iters = opts.instance && opts.instance.loop_iterations
+      ? opts.instance.loop_iterations[id] : null;
+    if (node.type === NODE_TYPE.LOOP_END && iters) {
+      g.appendChild(svg("text", { class: "gloop-iter", x: p.x + p.w / 2, y: p.y + p.h + 14, "text-anchor": "middle" },
+        document.createTextNode(`↻ ${iters}× wiederholt`)));
+    }
     root.appendChild(g);
     renderNodeBadges(root, schema, node, p, opts);
     renderNodeFindingMark(root, node, p, opts);
@@ -1468,9 +1587,15 @@ async function loadSchemas() {
 }
 
 async function refreshSchema() {
-  if (!state.schemaId) { state.schema = null; state.validation = null; return; }
+  if (!state.schemaId) { state.schema = null; state.validation = null; state.hints = []; return; }
   state.schema = await api.get(`/schemas/${state.schemaId}`);
   state.validation = await api.get(`/schemas/${state.schemaId}/validation`);
+  // Modellhinweise sind rein beratend – ein Fehler hier darf das Modellieren
+  // nie blockieren (best-effort, leer statt Fehlermeldung).
+  try {
+    const report = await api.get(`/schemas/${state.schemaId}/metrics`);
+    state.hints = (report && report.hints) || [];
+  } catch (err) { state.hints = []; }
   localStorage.setItem("schemaId", state.schemaId);
 }
 
@@ -1857,6 +1982,17 @@ function modelStatusBar(schema, draft) {
       class: "pill pill-amber",
       title: notReady.map((f) => f.message).join("\n"),
     }, `${notReady.length} Schritt(e) ohne Bearbeiter`));
+  }
+  // Modellhinweise (G-Gruppe): rein beratend, dritter Zustand neben „korrekt"
+  // und „freigabereif" – bewusst neutral (grau), nie rot/amber, damit ein
+  // Hinweis nicht wie ein Befund wirkt. Details im Tooltip; in der klassischen
+  // Sicht listet das Korrektheits-Panel dieselben Hinweise aus.
+  const hints = draft ? (state.hints || []) : [];
+  if (hints.length) {
+    bar.appendChild(el("span", {
+      class: "pill pill-gray",
+      title: hints.map((h) => `${h.code}: ${h.message}`).join("\n"),
+    }, `${hints.length} Hinweis(e)`));
   }
   const focusElem = state.dataElemFocus && schema.data_elements[state.dataElemFocus];
   const text = focusElem
@@ -2514,6 +2650,9 @@ function stepCard(schema, draft) {
     body.appendChild(cardSection("class", "Klassifikation", null, (b) => cardValueClassSection(b, schema, node, draft)));
   } else if (SPLIT_TYPES.has(node.type)) {
     body.appendChild(cardSection("branches", "Verzweigung", null, (b) => cardBranchSection(b, schema, node, draft)));
+  } else if (LOOP_TYPES.has(node.type)) {
+    body.appendChild(cardSection("loop", "Schleife", null,
+      (b) => b.appendChild(loopNodePanel(schema, node, draft))));
   } else {
     body.appendChild(el("div", { class: "card-note" },
       node.type === NODE_TYPE.AND_JOIN || node.type === NODE_TYPE.XOR_JOIN
@@ -2550,8 +2689,11 @@ function stepCardHead(schema, node, draft, findings) {
 function cardFlowSection(body, schema, node) {
   body.appendChild(el("div", { class: "card-hint" },
     "Neue Schritte entstehen immer relativ zu einem bestehenden – so kann kein loses Ende entstehen."));
+  const movable = node.type === NODE_TYPE.ACTIVITY || node.type === NODE_TYPE.SUBPROCESS;
   const row = el("div", { class: "row", style: "gap:8px" },
     el("button", { class: "btn small primary", onClick: () => openInsertModal(node.id) }, "+ Schritt danach"),
+    movable ? el("button", { class: "btn small", title: "Schritt an eine andere Stelle des Ablaufs verschieben – alle Bindungen bleiben erhalten",
+      onClick: () => moveNodeDialog(node.id) }, "Verschieben…") : null,
     el("button", { class: "btn small danger", onClick: () => deleteNode(node.id) }, "Entfernen"));
   body.appendChild(row);
   if (node.type === NODE_TYPE.ACTIVITY) {
@@ -2681,6 +2823,7 @@ function cardTimeSection(body, schema, node, draft) {
         hasFrist ? "Frist ändern" : "Frist setzen"),
       hasFrist ? el("button", { class: "btn small danger", onClick: () => removeTimeConstraint(node.id) }, "Entfernen") : null));
   }
+  escalationBlock(body, schema, node, draft);
   const pr = (schema.node_priorities || {})[node.id];
   body.appendChild(el("div", { class: "hr" }));
   body.appendChild(el("div", { class: "insp-h" }, "Priorität"));
@@ -3133,6 +3276,7 @@ function nodePerformSections(body, schema, node) {
     // daraus BEIDE Soll-Zeiten vor (Dauer und Soll-Reaktionszeit).
     el("button", { class: "btn small", onClick: () => setTimeConstraintFor(node.id, hasFrist ? tc : null) }, hasFrist ? "Frist ändern" : "Frist setzen"),
     hasFrist ? el("button", { class: "btn small danger", onClick: () => removeTimeConstraint(node.id) }, "Entfernen") : null));
+  escalationBlock(body, schema, node, true);
 
   // Priorität (E8): Auswirkung + Dringlichkeit -> abgeleitete Arbeitslisten-Stufe.
   const pr = (schema.node_priorities || {})[node.id];
@@ -3385,6 +3529,87 @@ async function removeTimeConstraint(nodeId) {
   } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 }
 
+// --- Eskalation (T3/E9) ----------------------------------------------------
+// Anzeige + Bearbeitung der modellierten Fristverletzungs-Reaktion. EINE
+// geteilte Blockfunktion für beide Modellier-Oberflächen (Schritt-Karte und
+// klassischer Inspektor), damit die Sichten nie driften. Die Wohlgeformtheit
+// (Soll-Zeit vorhanden, Stufen aufsteigend, Ziele auflösbar) prüft der Kern
+// (T3a–T3c, Validate-before-Commit) – der Client zeigt Befunde nur an.
+function escalationBlock(body, schema, node, draft) {
+  if (node.type !== NODE_TYPE.ACTIVITY) return;
+  const policy = (schema.escalation_policies || {})[node.id];
+  const roles = (schema.org_model || {}).roles || {};
+  const roleName = (ref) => (roles[ref] ? roles[ref].name : ref);
+  body.appendChild(el("div", { class: "hr" }));
+  body.appendChild(el("div", { class: "insp-h" }, "Eskalation bei Fristüberschreitung"));
+  if (policy && (policy.stages || []).length) {
+    policy.stages.forEach((s, i) => {
+      const when = s.after_seconds > 0
+        ? formatDuration(s.after_seconds) + " nach Fristüberschreitung"
+        : "bei Fristüberschreitung";
+      const what = s.kind === "FUNCTIONAL"
+        ? `zusätzlich anbieten an „${roleName(s.rule && s.rule.ref)}“`
+        : `informieren: „${roleName(s.rule && s.rule.ref)}“`;
+      body.appendChild(el("div", { style: "font-size:12px" }, `Stufe ${i + 1}: ${when} – ${what}`));
+    });
+  } else {
+    body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
+      "keine – eine Überschreitung bleibt nur im Kritikalitätsband der Arbeitsliste sichtbar."));
+  }
+  if (draft) {
+    body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+      el("button", { class: "btn small", onClick: () => setEscalationFor(node.id, policy || null) },
+        policy ? "Eskalation ändern" : "Eskalation einrichten"),
+      policy ? el("button", { class: "btn small danger", onClick: () => removeEscalation(node.id) }, "Entfernen") : null));
+  }
+}
+
+function setEscalationFor(nodeId, current) {
+  const roles = Object.values((state.schema.org_model || {}).roles || {});
+  if (!roles.length) { toast("err", "Erst Rollen in der Organisation anlegen"); return; }
+  const rows = el("div", { class: "row", style: "flex-direction:column;align-items:stretch;gap:8px" });
+  function addRow(stage) {
+    const after = el("input", { type: "number", class: "esc-after", min: "0",
+      value: stage ? String(Math.round(stage.after_seconds / 60)) : "0" });
+    const kind = el("select", { class: "esc-kind" },
+      el("option", { value: "FUNCTIONAL" }, "zusätzlich anbieten (funktional)"),
+      el("option", { value: "HIERARCHICAL" }, "informieren (hierarchisch)"));
+    if (stage) kind.value = stage.kind;
+    const role = el("select", { class: "esc-role" },
+      ...roles.map((r) => el("option", { value: r.id }, r.name)));
+    if (stage && stage.rule && stage.rule.ref) role.value = stage.rule.ref;
+    rows.appendChild(el("div", { class: "branch-row esc-row" },
+      el("label", { class: "field" }, "Minuten nach Frist", after),
+      el("label", { class: "field" }, "Art", kind),
+      el("label", { class: "field" }, "Ziel-Rolle", role)));
+  }
+  ((current && current.stages && current.stages.length) ? current.stages : [null]).forEach(addRow);
+  openModal(`Eskalation – ${nodeCaption(state.schema.nodes[nodeId])}`,
+    el("div", null,
+      el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        "Überschreitet die Aufgabe ihre Soll-Zeit, feuern die Stufen nacheinander: „zusätzlich anbieten“ erweitert den Bearbeiterkreis (funktionale Eskalation), „informieren“ benachrichtigt die Ziel-Rolle, ohne sie zu berechtigen (hierarchisch). Voraussetzung ist eine Frist bzw. Soll-Reaktionszeit am Schritt."),
+      rows,
+      el("button", { class: "btn small ghost", onClick: () => addRow(null) }, "+ Stufe")),
+    async () => {
+      const stages = [...rows.querySelectorAll(".esc-row")].map((r) => ({
+        after_seconds: Number(r.querySelector(".esc-after").value || "0") * 60,
+        kind: r.querySelector(".esc-kind").value,
+        rule: { kind: "ROLE", ref: r.querySelector(".esc-role").value },
+      }));
+      try {
+        await api.post(`/schemas/${state.schemaId}/escalation-policy`, { node_id: nodeId, policy: { stages } });
+        await refreshSchema(); render(); toast("ok", "Eskalation gespeichert");
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Speichern");
+}
+
+async function removeEscalation(nodeId) {
+  try {
+    await api.post(`/schemas/${state.schemaId}/escalation-policy`, { node_id: nodeId, policy: null });
+    await refreshSchema(); render(); toast("ok", "Eskalation entfernt");
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
 function setPriorityFor(nodeId, current) {
   const mk = (val) => {
     const s = el("select", null, ...Object.entries(IMPACT_LABELS).map(([v, l]) => el("option", { value: v }, l)));
@@ -3521,6 +3746,8 @@ function nodeInspectorPanel() {
     body.appendChild(el("label", { class: "field" }, "Bezeichnung", input));
     body.appendChild(el("div", { class: "row", style: "gap:8px" },
       el("button", { class: "btn small primary", onClick: () => renameNode(node.id, input.value) }, "Umbenennen"),
+      el("button", { class: "btn small", title: "Schritt an eine andere Stelle des Ablaufs verschieben – alle Bindungen bleiben erhalten",
+        onClick: () => moveNodeDialog(node.id) }, "Verschieben…"),
       el("button", { class: "btn small danger", onClick: () => deleteNode(node.id) }, "Entfernen")));
     if (node.type === NODE_TYPE.ACTIVITY) {
       // --- Datenbindungen dieses Schritts (D1-D4) direkt am Schritt ---
@@ -3609,6 +3836,8 @@ function nodeInspectorPanel() {
     body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
       "Verzweigung: Entfernen l\u00F6scht den gesamten Block (Split, Zweige und passenden Join)."));
     body.appendChild(el("button", { class: "btn small danger", onClick: () => deleteNode(node.id) }, "Verzweigung entfernen"));
+  } else if (LOOP_TYPES.has(node.type)) {
+    body.appendChild(loopNodePanel(schema, node, draft));
   } else {
     body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
       node.type === NODE_TYPE.AND_JOIN || node.type === NODE_TYPE.XOR_JOIN
@@ -3638,7 +3867,9 @@ function deleteNode(nodeId) {
   const isSplit = SPLIT_TYPES.has(node.type);
   const msg = isSplit
     ? "Den gesamten Verzweigungsblock (Split, alle Zweige und den passenden Join) entfernen?"
-    : `\u201E${nodeCaption(node)}\u201C aus dem Modell entfernen?`;
+    : node.type === NODE_TYPE.LOOP_START
+      ? "Die gesamte Schleife (Anfang, Rumpf und Ende) entfernen?"
+      : `\u201E${nodeCaption(node)}\u201C aus dem Modell entfernen?`;
   openModal("Element entfernen", el("div", { class: "muted", style: "font-size:13px" }, msg), async () => {
     try {
       await api.del(`/schemas/${state.schemaId}/nodes/${nodeId}`);
@@ -3648,6 +3879,86 @@ function deleteNode(nodeId) {
       toast("ok", "Element entfernt");
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Entfernen");
+}
+
+// --- Schritt verschieben (moveNode) ---------------------------------------
+// Löst den Schritt aus seiner Position und fügt ihn hinter dem gewählten Anker
+// wieder ein. Anders als Löschen + Neuanlegen bleibt die Knoten-ID erhalten,
+// alle Bindungen (Daten, Bearbeiter, Dienst, Maske, Zeit, Benachrichtigung)
+// reisen mit. Der Kern validiert vor dem Commit (D1/Z3/T2/N4 …) und lehnt ein
+// unzulässiges Ziel mit lokalisierten Befunden ab – die Zielliste hier ist nur
+// eine Anzeige-Vorauswahl, keine Korrektheitsentscheidung. Geteilte Funktion
+// beider Modellier-Oberflächen (Schritt-Karte und klassische Sicht) – niemals
+// je Sicht ausformulieren, sonst driften die Oberflächen auseinander.
+
+// Plausible Anker: alle Knoten mit genau einem Ausgang (ein Split kann nie
+// Anker sein), außer dem Schritt selbst, dem Ende und dem aktuellen
+// Vorgänger (das wäre ein No-op).
+function moveTargetsFor(nodeId) {
+  const schema = state.schema;
+  const outCount = {};
+  (schema.edges || []).forEach((e) => { outCount[e.source] = (outCount[e.source] || 0) + 1; });
+  const pred = (schema.edges || []).find((e) => e.target === nodeId);
+  return Object.values(schema.nodes).filter((n) =>
+    n.id !== nodeId &&
+    n.type !== NODE_TYPE.END &&
+    outCount[n.id] === 1 &&
+    !(pred && n.id === pred.source));
+}
+
+function moveNodeDialog(nodeId) {
+  const node = state.schema.nodes[nodeId];
+  const targets = moveTargetsFor(nodeId);
+  if (!targets.length) { toast("err", "Keine gültige Zielposition vorhanden"); return; }
+  const sel = el("select", null,
+    ...targets.map((n) => el("option", { value: n.id }, "nach „" + nodeCaption(n) + "“")));
+  openModal("Schritt verschieben",
+    el("div", null,
+      el("div", { class: "muted", style: "font-size:13px;margin-bottom:8px" },
+        `„${nodeCaption(node)}“ an eine andere Stelle des Ablaufs verschieben. ` +
+        "Alle Bindungen des Schritts bleiben erhalten; ein Ziel, das eine Regel verletzen würde " +
+        "(z. B. Lesen vor Schreiben), wird mit Begründung abgelehnt."),
+      el("label", { class: "field" }, "Neue Position", sel)),
+    async () => {
+      try {
+        await api.post(`/schemas/${state.schemaId}/nodes/${nodeId}/move`, { after_node_id: sel.value });
+        await refreshSchema();
+        render();
+        toast("ok", "Schritt verschoben", [nodeCaption(node)]);
+      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    }, "Verschieben");
+}
+
+// --- Schleifenblock (K6) ---------------------------------------------------
+// Beschreibung + Aktionen der Schleifen-Begrenzer, geteilt von beiden
+// Modellier-Oberflächen (Schritt-Karte und klassischer Knoten-Inspektor).
+// LOOP_START bietet das Entfernen der ganzen Schleife an (der Kern löscht
+// Anfang, Rumpf, Ende und Entscheidung als Einheit); LOOP_END zeigt die
+// strukturierte Abbruchentscheidung an – geändert wird sie nicht hier,
+// sondern über das Wiederholen-Merkmal (Datenelement) selbst.
+function loopNodePanel(schema, node, draft) {
+  const box = el("div", null);
+  if (node.type === NODE_TYPE.LOOP_END) {
+    const d = (schema.loop_decisions || {})[node.id];
+    const condition = loopConditionCaption(schema, d, 24);
+    box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+      d ? `Schleifenende: wiederholt wird, solange ${condition} ist. Der Rumpf läuft mindestens einmal; die Entscheidung fällt in jeder Runde automatisch aus den Daten (K6).`
+        : "Schleifenende ohne hinterlegte Entscheidung."));
+    if (d && d.max_iterations) {
+      box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+        `Notbremse: höchstens ${d.max_iterations} Durchläufe – am Limit wird die Schleife automatisch verlassen, und die Zeitprüfung (T2) rechnet den Rumpf ${d.max_iterations}-fach.`));
+    }
+    box.appendChild(el("div", { class: "muted", style: "font-size:12px" },
+      "Entfernt wird die Schleife über ihren Schleifenanfang."));
+    return box;
+  }
+  box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+    "Schleifenanfang: Der Block bis zum Schleifenende wird wiederholt, bis das Wiederholen-Merkmal die Schleife beendet. Entfernen löscht die gesamte Schleife (Anfang, Rumpf, Ende)."));
+  if (draft) {
+    box.appendChild(el("button", { class: "btn small danger",
+      onClick: () => deleteNode(node.id) }, "Schleife entfernen"));
+  }
+  return box;
 }
 
 // Leeren Zweig eines XOR-Splits gezielt entfernen. Bleibt danach nur ein Zweig
@@ -3987,6 +4298,17 @@ function findingsPanel() {
       el("span", { class: "rule" }, f.rule),
       el("span", null, f.message + (f.node_id ? ` [${f.node_id}]` : "")))));
   }
+  // Modellhinweise (G-Gruppe, /metrics): beratend, kein Korrektheitsurteil.
+  // Bewusst im selben Panel, aber klar abgesetzt \u2013 ein Hinweis ist kein Befund.
+  const hints = state.hints || [];
+  if (hints.length) {
+    body.appendChild(el("div", { class: "hr" }));
+    body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:6px" },
+      "Hinweise (beratend, blockieren nichts):"));
+    hints.forEach((h) => body.appendChild(el("div", { class: "finding" },
+      el("span", { class: "rule" }, h.code),
+      el("span", null, h.message + (h.node_id ? ` [${h.node_id}]` : "")))));
+  }
   return el("div", { class: "panel", "data-tour": "model.findings" },
     el("div", { class: "panel-h" }, el("h2", null, "Korrektheit"), el("span", { class: "sub" }, "live vom Kern")), body);
 }
@@ -4072,14 +4394,71 @@ function openInsertModal(afterNodeId) {
         el("div", { class: "muted", style: "font-size:12px;margin:4px 0" }, "Die Engine w\u00E4hlt den Zweig automatisch anhand des Werts \u2013 vollst\u00E4ndig und \u00FCberschneidungsfrei (K7)."),
         condRows, el("button", { class: "btn small ghost", onClick: () => addCondRow() }, "+ Zweig"))
     : el("div", { class: "muted", style: "font-size:13px" }, "Legen Sie zuerst ein Datenelement (INTEGER/FLOAT/BOOLEAN/STRING) an und lassen Sie es vor dieser Stelle schreiben.");
+  // --- Schleife (K6): Rumpf-Bezeichnung + entscheidbares Wiederholen-Merkmal.
+  // BOOLEAN nutzt die Kurzform (repeat_value); Zahlen (Schwelle) und Text
+  // (Wertemenge) bauen eine Wiederhol/Verlassen-Partition (Stufe S3, K6b).
+  // Die Rumpfaktivität erhält vom Kern automatisch den Pflicht-Schreibzugriff
+  // auf das Merkmal (K6c: jede Iteration entscheidet auf frischen Daten).
+  const loopable = Object.values(state.schema.data_elements).filter(
+    (d) => d.source === "INSTANCE" && ["BOOLEAN", "INTEGER", "FLOAT", "STRING"].includes(d.data_type));
+  const loopDisc = el("select", { class: "loop-disc" },
+    ...loopable.map((d) => el("option", { value: d.id }, `${d.name} (${d.data_type})`)));
+  const loopRepeat = el("select", null,
+    el("option", { value: "true" }, "wahr (true)"),
+    el("option", { value: "false" }, "falsch (false)"));
+  const loopCmp = el("select", { class: "loop-cmp" },
+    el("option", { value: "gte" }, "größer/gleich der Grenze ist (≥)"),
+    el("option", { value: "lt" }, "unter der Grenze liegt (<)"));
+  const loopBound = el("input", { type: "number", class: "loop-bound", placeholder: "z. B. 1" });
+  const loopValues = el("input", { type: "text", class: "loop-values", placeholder: "Werte, kommagetrennt – z. B. nacharbeit" });
+  const loopRows = el("div", { class: "row", style: "flex-direction:column;align-items:stretch;gap:8px" });
+  function loopKind() {
+    const elem = state.schema.data_elements[loopDisc.value];
+    if (!elem) return null;
+    if (elem.data_type === "BOOLEAN") return "BOOLEAN";
+    if (elem.data_type === "STRING") return "ENUM";
+    return "THRESHOLD";
+  }
+  function rebuildLoopRows() {
+    clear(loopRows);
+    const kind = loopKind();
+    if (kind === "BOOLEAN") {
+      loopRows.appendChild(el("label", { class: "field" }, "Wiederholen, solange der Wert", loopRepeat));
+    } else if (kind === "THRESHOLD") {
+      loopRows.appendChild(el("label", { class: "field" }, "Wiederholen, solange der Wert", loopCmp));
+      loopRows.appendChild(el("label", { class: "field" }, "Grenze", loopBound));
+    } else if (kind === "ENUM") {
+      loopRows.appendChild(el("label", { class: "field" },
+        "Wiederholen bei diesen Werten (alle anderen verlassen die Schleife)", loopValues));
+    }
+  }
+  loopDisc.addEventListener("change", rebuildLoopRows);
+  rebuildLoopRows();
+  // Optionale Notbremse (S3): Höchstzahl der Durchläufe. Deterministisch –
+  // am Limit wird verlassen, auch wenn die Daten „wiederholen“ sagen; die
+  // Zeitprüfung (T2) rechnet den Rumpf dann entsprechend oft.
+  const loopMax = el("input", { type: "number", class: "loop-max", min: "2",
+    placeholder: "leer = unbegrenzt" });
+  const loopPanel = loopable.length
+    ? el("div", null,
+        el("label", { class: "field" }, "Bezeichnung des Wiederhol-Schritts",
+          el("input", { type: "text", id: "loop-label", placeholder: "z. B. Nacharbeit erledigen" })),
+        el("label", { class: "field" }, "Wiederholen-Merkmal (Datenelement)", loopDisc),
+        loopRows,
+        el("label", { class: "field" }, "Höchstzahl Durchläufe (Notbremse, mind. 2)", loopMax),
+        el("div", { class: "muted", style: "font-size:12px;margin:4px 0" },
+          "Der Schritt läuft mindestens einmal; am Ende jeder Runde entscheidet das Merkmal automatisch, ob wiederholt wird (K6). Der Schritt schreibt das Merkmal verbindlich – jede Runde entscheidet auf frischen Daten."))
+    : el("div", { class: "muted", style: "font-size:13px" },
+        "Legen Sie zuerst ein Datenelement an (BOOLEAN, Zahl oder Text) – es entscheidet am Rundenende, ob wiederholt wird.");
   const panels = {
     serial: serialBody,
     parallel: el("div", null, parBox, el("button", { class: "btn small ghost", onClick: () => addParRow() }, "+ Zweig")),
     conditional: condPanel,
+    loop: loopPanel,
   };
   const slot = el("div", null, panels.serial);
   const tabs = el("div", { class: "tabs" },
-    tabBtn("Seriell", "serial", true), tabBtn("Parallel (UND)", "parallel"), tabBtn("Bedingt (XOR)", "conditional"));
+    tabBtn("Seriell", "serial", true), tabBtn("Parallel (UND)", "parallel"), tabBtn("Bedingt (XOR)", "conditional"), tabBtn("Schleife", "loop"));
   function tabBtn(label, key, isActive) {
     return el("button", { class: isActive ? "active" : "", onClick: (e) => {
       active = key;
@@ -4102,6 +4481,35 @@ function openInsertModal(afterNodeId) {
         const labels = [...parBox.querySelectorAll(".par-branch")].map((i) => i.value.trim()).filter(Boolean);
         if (labels.length < 2) { toast("err", "Mindestens zwei Zweige n\u00F6tig"); return false; }
         await api.post(`/schemas/${state.schemaId}/parallel-insert`, { branch_labels: labels, after_node_id: afterNodeId });
+      } else if (active === "loop") {
+        const label = byId("loop-label") ? byId("loop-label").value.trim() : "";
+        if (!label) { toast("err", "Bezeichnung des Wiederhol-Schritts fehlt"); return false; }
+        if (!loopDisc.value) { toast("err", "Kein Wiederholen-Merkmal gew\u00E4hlt"); return false; }
+        const kind = loopKind();
+        const payload = { label, after_node_id: afterNodeId, discriminator: loopDisc.value };
+        if (kind === "BOOLEAN") {
+          payload.repeat_value = loopRepeat.value === "true";
+        } else if (kind === "THRESHOLD") {
+          // Zwei Zellen kacheln die Zahlengerade: [-\u221E, G) und [G, +\u221E); die
+          // Vergleichswahl bestimmt, welche Seite wiederholt (K6b: je eine
+          // Wiederhol- und eine Verlassen-Zelle).
+          const bound = loopBound.value.trim();
+          if (bound === "") { toast("err", "Grenze fehlt"); return false; }
+          const g = Number(bound);
+          payload.cells = loopCmp.value === "gte"
+            ? [{ repeat: false, upper: g }, { repeat: true }]
+            : [{ repeat: true, upper: g }, { repeat: false }];
+        } else {
+          const values = loopValues.value.split(",").map((v) => v.trim()).filter(Boolean);
+          if (!values.length) { toast("err", "Mindestens ein Wiederhol-Wert n\u00F6tig"); return false; }
+          payload.cells = [{ repeat: true, values }, { repeat: false, is_else: true }];
+        }
+        if (loopMax.value.trim() !== "") {
+          const m = Number(loopMax.value);
+          if (!Number.isInteger(m) || m < 2) { toast("err", "H\u00F6chstzahl Durchl\u00E4ufe: mindestens 2"); return false; }
+          payload.max_iterations = m;
+        }
+        await api.post(`/schemas/${state.schemaId}/loop-insert`, payload);
       } else {
         const kind = discKind();
         if (!kind) { toast("err", "Kein g\u00FCltiger Diskriminator gew\u00E4hlt"); return false; }
@@ -5134,9 +5542,14 @@ async function renderInstanceDetail(container, withActions) {
   } else {
     (wl.ready_activities || []).forEach((nid) => {
       const node = runSchema.nodes[nid];
+      // E1: Transparenz statt Verstecken \u2013 die Instanz-Sicht zeigt alle
+      // bereiten Schritte samt Inhaber (die pers\u00F6nlichen Listen filtern).
+      const owner = (inst.claimed_by || {})[nid];
       wlBody.appendChild(el("div", { class: "worklist-item" },
         el("span", { class: "name" }, node ? nodeCaption(node) : nid),
-        el("span", { class: "tag" }, "bereit"),
+        owner
+          ? el("span", { class: "tag" }, "\u00FCbernommen von " + agentNameOf(owner))
+          : el("span", { class: "tag" }, "bereit"),
         withActions ? el("button", { class: "btn small green", onClick: () => completeActivity(nid, node) }, "Abschlie\u00DFen") : null));
     });
     if (!(wl.ready_activities || []).length) {
@@ -5963,12 +6376,30 @@ async function viewTasks() {
   if (!tasks.length) {
     body.appendChild(el("div", { class: "ok-banner" }, "\u2713 Keine offenen Aufgaben f\u00FCr " + agentNameOf(agentId) + "."));
   } else {
+    // E1 (Zustandsmaschine): Eine unübernommene Aufgabe bietet „Übernehmen“
+    // an (sie verschwindet dann aus den Listen aller anderen), eine selbst
+    // übernommene „Zurücklegen“. Fremd Übernommenes taucht hier gar nicht
+    // erst auf – das filtert der Kern (Withdrawn-Sicht). „Erledigen“ geht
+    // weiterhin auch ohne Übernahme (Ein-Klick-Fluss).
     const rows = tasks.map((t) => {
       const elig = (t.eligible_agents || []).map(agentNameOf).join(", ");
-      const btn = el("button", { class: "btn small green", onClick: () => completeTask(t, agentId) }, "Erledigen");
-      return [t.label || t.node_id, schemaLabel(t.schema_id, t.schema_version), dueCell(t), elig, btn];
+      const mine = t.claimed_by === agentId;
+      const status = el("div", { class: "row", style: "gap:4px" },
+        mine
+          ? el("span", { class: "pill pill-amber" }, "übernommen")
+          : el("span", { class: "pill pill-gray" }, "angeboten"),
+        // T3/E9: eine gefeuerte Eskalationsstufe ist am Eintrag ablesbar.
+        t.escalated_stage > 0
+          ? el("span", { class: "pill pill-red" }, `eskaliert (${t.escalated_stage})`)
+          : null);
+      const actions = el("div", { class: "row", style: "gap:6px" },
+        el("button", { class: "btn small green", onClick: () => completeTask(t, agentId) }, "Erledigen"),
+        mine
+          ? el("button", { class: "btn small ghost", onClick: () => returnTask(t, agentId) }, "Zurücklegen")
+          : el("button", { class: "btn small ghost", onClick: () => claimTask(t, agentId) }, "Übernehmen"));
+      return [t.label || t.node_id, schemaLabel(t.schema_id, t.schema_version), dueCell(t), elig, status, actions];
     });
-    body.appendChild(table(["Aufgabe", "Prozess", "Fällig", "Berechtigte", ""], rows));
+    body.appendChild(table(["Aufgabe", "Prozess", "Fällig", "Berechtigte", "Status", ""], rows));
   }
   content.appendChild(el("div", { class: "panel", "data-tour": "tasks.list" },
     el("div", { class: "panel-h" }, el("h2", null, "Offene Aufgaben"), el("span", { class: "sub" }, tasks.length + " Eintr\u00E4ge")),
@@ -6051,6 +6482,26 @@ async function absencePanel(agentId) {
         el("label", { class: "field", style: "flex:1;min-width:180px" }, "Notiz", noteInp),
         addBtn)),
     listBody);
+}
+
+// E1 (Zustandsmaschine): Aufgabe übernehmen bzw. zurücklegen. Geteilte
+// Funktionen für jede Aufrufstelle (Aufgabenliste heute, künftige Sichten) –
+// der Kern erzwingt Exklusivität (W1) und Berechtigung (W2) und antwortet bei
+// Konflikten mit 409, das hier nur angezeigt wird (keine Client-Logik).
+async function claimTask(task, agentId) {
+  try {
+    await api.post(`/instances/${task.instance_id}/claim`, { node_id: task.node_id, agent_id: agentId });
+    toast("ok", "Aufgabe übernommen", ["Sie verschwindet aus den Listen der anderen, bis sie erledigt oder zurückgelegt ist."]);
+    render();
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
+async function returnTask(task, agentId) {
+  try {
+    await api.post(`/instances/${task.instance_id}/return`, { node_id: task.node_id, agent_id: agentId });
+    toast("ok", "Aufgabe zurückgelegt", ["Alle Berechtigten sehen sie wieder in ihrer Liste."]);
+    render();
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 }
 
 async function completeTask(task, agentId) {
@@ -7175,7 +7626,7 @@ const HELP_RULES = [
   ]],
   ["Zeit & Release (T, B)", [
     ["T1\u2013T2", "Fristen/Dauern wohldefiniert und entlang der Blockstruktur widerspruchsfrei."],
-    ["B1", "Release-Reife: jeder Schritt hat einen ausf\u00FChrbaren Dienst."],
+    ["B1", "Release-Reife: jeder Schritt ist ausf\u00FChrbar \u2013 automatische tragen einen Dienst, interaktive Maske und Bearbeiterzuordnung (der interaktive Teil ist B2)."],
     ["B2", "Release-Reife: jeder interaktive Schritt hat eine Bearbeiterzuordnung."],
     ["B3", "Release-Reife: alle Pflichtdaten sind gebunden, alle Pr\u00E4dikate spezifiziert."],
   ]],
@@ -7189,6 +7640,7 @@ const HELP_RULES = [
     ["G2", "Hinweis: hoher Gateway-Grad \u2013 Verzweigung vereinfachen."],
     ["G6", "Hinweis: hohe Verschachtelungstiefe (>5)."],
     ["G7", "Hinweis: Aktivit\u00E4t ohne sprechenden Namen."],
+    ["G8", "Hinweis: interaktiver Schritt ohne Soll-Reaktionszeit, obwohl andere Schritte eine tragen \u2013 er nimmt nicht an der zeitbasierten Priorisierung teil."],
   ]],
 ];
 

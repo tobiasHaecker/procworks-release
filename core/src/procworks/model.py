@@ -10,8 +10,10 @@ layer (OrgModel, StaffRule, ServiceBinding) used by the resource rules Z1-Z4.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +29,8 @@ class NodeType(StrEnum):
     XOR_SPLIT = "XOR_SPLIT"
     XOR_JOIN = "XOR_JOIN"
     SUBPROCESS = "SUBPROCESS"
+    LOOP_START = "LOOP_START"
+    LOOP_END = "LOOP_END"
 
 
 #: Gateway node types that open a block.
@@ -38,6 +42,14 @@ SPLIT_JOIN_PAIR = {
     NodeType.AND_SPLIT: NodeType.AND_JOIN,
     NodeType.XOR_SPLIT: NodeType.XOR_JOIN,
 }
+#: Loop block delimiters (K6). Deliberately NOT in SPLIT/JOIN_TYPES: for every
+#: structural algorithm a loop node is an ordinary serial node (in=1/out=1) --
+#: only the K6 rules and the engine's iteration reset know its special role.
+#: The loop-back edge is *not stored* (derivable from the K6 pairing), so the
+#: persisted control graph stays acyclic and every DAG-based analysis (D1, Z3,
+#: T2, layout, reachability) remains valid: REPEAT-UNTIL runs the body at
+#: least once, so "written on every path before X" holds at runtime too.
+LOOP_TYPES = frozenset({NodeType.LOOP_START, NodeType.LOOP_END})
 
 
 class EdgeType(StrEnum):
@@ -743,6 +755,49 @@ class TimeConstraint(BaseModel):
     target_lead_seconds: float | None = None
 
 
+# --- escalation (T3/E9, Eskalations-Konzept) ------------------------------
+
+
+class EscalationKind(StrEnum):
+    """Direction of an escalation stage (ITIL, Architektur-Konzept §3.8).
+
+    ``FUNCTIONAL`` (horizontal) *broadens the offer*: the stage's agent set is
+    added to the task's eligible performers. ``HIERARCHICAL`` (vertical)
+    *informs*: the stage's agent set is notified via the mail outbox but never
+    becomes eligible -- escalation informs or widens, it never reassigns.
+    """
+
+    FUNCTIONAL = "FUNCTIONAL"
+    HIERARCHICAL = "HIERARCHICAL"
+
+
+class EscalationStage(BaseModel):
+    """One time-triggered stage of an overdue reaction (T3/E9).
+
+    ``after_seconds`` is the offset from the task's *due instant* (activation
+    plus resolved target time -- the same shared computation the worklist
+    prioritisation uses); ``0`` fires the moment the task turns overdue.
+    ``rule`` names the target set in the usual BZR language; node-referencing
+    kinds are rejected by T3c (an escalation targets a role/unit, never a
+    relative performer).
+    """
+
+    after_seconds: float
+    kind: EscalationKind
+    rule: StaffRule
+
+
+class EscalationPolicy(BaseModel):
+    """The modelled multi-stage overdue reaction of one activity (T3).
+
+    Stages are ordered by strictly ascending ``after_seconds`` (T3b) and fire
+    at most once per activation (``ProcessInstance.escalated_stages``; a loop
+    iteration reset starts a fresh, unescalated round).
+    """
+
+    stages: list[EscalationStage] = Field(default_factory=list)
+
+
 # --- time-based worklist criticality (Zeitbasierte-Priorisierung-Konzept) --
 
 
@@ -991,6 +1046,63 @@ def discriminator_kind(data_type: DataType) -> XorDecisionKind | None:
     }.get(data_type)
 
 
+class PartitionCell(Protocol):
+    """Structural shape shared by every partition cell (K7 + K6).
+
+    :class:`XorBranch` (routing to a branch body) and :class:`LoopCell`
+    (classifying into repeat/exit) carry the same *cell* fields; the matching
+    and partition-wellformedness logic is written once against this protocol.
+    """
+
+    @property
+    def upper(self) -> float | None: ...
+
+    @property
+    def bool_value(self) -> bool | None: ...
+
+    @property
+    def values(self) -> list[str]: ...
+
+    @property
+    def is_else(self) -> bool: ...
+
+
+def matching_partition_cell[CellT: PartitionCell](
+    kind: XorDecisionKind, cells: Sequence[CellT], value: object
+) -> CellT | None:
+    """Return the cell of a total, disjoint partition that contains ``value``.
+
+    The single matching routine behind :func:`resolve_xor_target` (K7) and
+    :func:`resolve_loop_repeat` (K6). A well-formed partition always yields a
+    cell; ``None`` only occurs for malformed data (e.g. a non-numeric value on
+    a THRESHOLD partition), which the caller turns into a runtime error.
+    """
+
+    if kind is XorDecisionKind.THRESHOLD:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        for cell in cells:
+            if cell.upper is None or value < cell.upper:
+                return cell
+        return None
+    if kind is XorDecisionKind.BOOLEAN:
+        truth = bool(value)
+        for cell in cells:
+            if cell.bool_value is truth:
+                return cell
+        return None
+    # ENUM
+    text = str(value)
+    else_cell: CellT | None = None
+    for cell in cells:
+        if cell.is_else:
+            else_cell = cell
+            continue
+        if text in cell.values:
+            return cell
+    return else_cell
+
+
 def resolve_xor_target(decision: XorDecision, value: object) -> str | None:
     """Return the branch target whose cell contains ``value`` (or ``None``).
 
@@ -999,29 +1111,8 @@ def resolve_xor_target(decision: XorDecision, value: object) -> str | None:
     which the caller turns into a runtime error.
     """
 
-    if decision.kind is XorDecisionKind.THRESHOLD:
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            return None
-        for branch in decision.branches:
-            if branch.upper is None or value < branch.upper:
-                return branch.target
-        return None
-    if decision.kind is XorDecisionKind.BOOLEAN:
-        truth = bool(value)
-        for branch in decision.branches:
-            if branch.bool_value is truth:
-                return branch.target
-        return None
-    # ENUM
-    text = str(value)
-    else_target: str | None = None
-    for branch in decision.branches:
-        if branch.is_else:
-            else_target = branch.target
-            continue
-        if text in branch.values:
-            return branch.target
-    return else_target
+    branch = matching_partition_cell(decision.kind, decision.branches, value)
+    return branch.target if branch is not None else None
 
 
 def xor_condition_text(
@@ -1051,6 +1142,127 @@ def xor_condition_text(
     return f"{disc} in [{', '.join(branch.values)}]"
 
 
+class LoopCell(BaseModel):
+    """One cell of a loop decision's partition (K6, stage S3).
+
+    Same cell shapes as :class:`XorBranch` (THRESHOLD interval / BOOLEAN truth
+    value / ENUM value set with one catch-all), but instead of routing to a
+    branch body the cell classifies the discriminator value into **repeat**
+    (run the body again) or **exit** (leave the loop). There is deliberately no
+    ``target``: the loop-back is never an edge -- it derives from the
+    LOOP_START/LOOP_END pairing (Schleifen-Konzept §2).
+    """
+
+    repeat: bool
+    upper: float | None = None
+    bool_value: bool | None = None
+    values: list[str] = Field(default_factory=list)
+    is_else: bool = False
+
+
+class LoopDecision(BaseModel):
+    """The decidable exit condition of a REPEAT-UNTIL loop (K6).
+
+    Keyed by the ``LOOP_END`` node id on the schema. Mirrors the K7 principle
+    for XOR splits: no free-text predicate, no manual decision -- the loop is
+    decided deterministically from instance data in every iteration.
+
+    ``discriminator`` names an ``INSTANCE`` data element that K6c guarantees
+    to be written on every path through the loop body (each iteration decides
+    on fresh data). Two equivalent shapes (:func:`resolve_loop_repeat`):
+
+    - **Boolean shorthand** (stage S1, ``cells`` empty): the discriminator is
+      BOOLEAN; when its value at ``LOOP_END`` equals ``repeat_value`` the body
+      runs again, otherwise the loop exits. ``kind`` stays ``BOOLEAN``.
+    - **Partition** (stage S3, ``cells`` non-empty): ``cells`` tile the
+      discriminator's domain totally and disjointly (same wellformedness as a
+      K7 partition, ``kind`` derived from the element's type) and classify
+      each cell into repeat or exit; at least one cell of each class exists
+      (K6b), so the loop can always terminate and is never vacuous.
+
+    ``max_iterations`` (optional, stage S3) is a deterministic hard brake: the
+    body runs at most this many times in total -- when the data still says
+    "repeat" at the bound, the loop exits anyway. It also makes the T2
+    critical path loop-aware (the body is charged ``max_iterations`` times);
+    without it T2 keeps its documented one-pass approximation. At least 2 when
+    set (K6b) -- a bound of 1 would forbid every repetition and degenerate the
+    loop.
+
+    Existing persisted decisions carry neither ``kind`` nor ``cells`` nor
+    ``max_iterations`` and keep their exact S1 semantics through the defaults
+    (fully additive).
+    """
+
+    discriminator: str
+    repeat_value: bool = True
+    kind: XorDecisionKind = XorDecisionKind.BOOLEAN
+    cells: list[LoopCell] = Field(default_factory=list)
+    max_iterations: int | None = None
+
+
+def loop_condition_text(discriminator_name: str, decision: LoopDecision) -> str:
+    """Render a human-readable *repeat* predicate (display / BPMN caption only).
+
+    The structured :class:`LoopDecision` is the source of truth; this string is
+    a derived caption used as the ``conditionExpression`` of the exported BPMN
+    loop-back flow. Mirrors :func:`xor_condition_text` per cell kind; for a
+    partition the repeat cells are joined with ``or``.
+    """
+
+    disc = discriminator_name
+    if not decision.cells:
+        return f"{disc} == {'true' if decision.repeat_value else 'false'}"
+    parts: list[str] = []
+    if decision.kind is XorDecisionKind.THRESHOLD:
+        lower: float | None = None
+        for cell in decision.cells:
+            if cell.repeat:
+                if lower is None:
+                    parts.append(
+                        f"{disc} < {_fmt_bound(cell.upper)}"
+                        if cell.upper is not None
+                        else disc
+                    )
+                elif cell.upper is None:
+                    parts.append(f"{disc} >= {_fmt_bound(lower)}")
+                else:
+                    parts.append(
+                        f"{_fmt_bound(lower)} <= {disc} < {_fmt_bound(cell.upper)}"
+                    )
+            lower = cell.upper
+    elif decision.kind is XorDecisionKind.BOOLEAN:
+        for cell in decision.cells:
+            if cell.repeat:
+                parts.append(
+                    f"{disc} == {'true' if cell.bool_value else 'false'}"
+                )
+    else:  # ENUM
+        for cell in decision.cells:
+            if not cell.repeat:
+                continue
+            parts.append(
+                f"{disc}: otherwise"
+                if cell.is_else
+                else f"{disc} in [{', '.join(cell.values)}]"
+            )
+    return " or ".join(parts)
+
+
+def resolve_loop_repeat(decision: LoopDecision, value: object) -> bool | None:
+    """Decide repeat (True) vs. exit (False) for a loop discriminator value.
+
+    The runtime counterpart of K6b, shared by the engine and any preview UI.
+    The boolean shorthand never fails; a partition returns ``None`` only for
+    malformed data (e.g. a non-numeric value on a THRESHOLD partition), which
+    the engine turns into a runtime error.
+    """
+
+    if not decision.cells:
+        return bool(value) == decision.repeat_value
+    cell = matching_partition_cell(decision.kind, decision.cells, value)
+    return cell.repeat if cell is not None else None
+
+
 class ControlEdge(BaseModel):
     """A directed control edge between two nodes."""
 
@@ -1076,6 +1288,10 @@ class ProcessSchema(BaseModel):
     #: carries exactly one decision; the partition is total and disjoint so the
     #: runtime always enables exactly one branch from the instance data.
     xor_decisions: dict[str, XorDecision] = Field(default_factory=dict)
+    #: Structured exit condition per LOOP_END node id (K6). The loop-back edge
+    #: is never stored -- it derives from the LOOP_START/LOOP_END pairing, so
+    #: the persisted graph stays acyclic (see LOOP_TYPES).
+    loop_decisions: dict[str, LoopDecision] = Field(default_factory=dict)
     data_elements: dict[str, DataElement] = Field(default_factory=dict)
     data_accesses: list[DataAccess] = Field(default_factory=list)
     #: Optional input mask per ACTIVITY node id (form designer). A mask is a
@@ -1105,6 +1321,10 @@ class ProcessSchema(BaseModel):
     #: Optional per-node temporal annotations (roadmap E5). Empty by default so
     #: the temporal rules T1/T2 stay silent for models without time data.
     time_constraints: dict[str, TimeConstraint] = Field(default_factory=dict)
+    #: Optional modelled overdue reactions per interactive ACTIVITY node id
+    #: (T3/E9, Eskalations-Konzept). Empty by default so the T3 rules stay
+    #: silent for models without escalation (fully additive).
+    escalation_policies: dict[str, EscalationPolicy] = Field(default_factory=dict)
     #: Optional hard deadline of the whole process in seconds (roadmap E5).
     deadline_seconds: float | None = None
     #: Marks this schema as a reusable sub-process ("sub-model"): once RELEASED
@@ -1142,6 +1362,44 @@ class ProcessSchema(BaseModel):
             for a in self.data_accesses
             if a.element_id == element_id and a.mode in READ_MODES
         ]
+
+
+def loop_block(schema: ProcessSchema, loop_start_id: str) -> tuple[str, set[str]]:
+    """Return ``(matching_loop_end_id, body_node_ids)`` for a LOOP_START.
+
+    Walks forward from the loop start balancing nested loops; because loops are
+    properly paired (K6a), exactly one LOOP_END closes the block. The body ids
+    are the nodes strictly between start and end (both delimiters excluded).
+    Shared by the validator (K6 checks), the operations (block delete/move
+    guards) and the engine (iteration reset) so all three agree on what "the
+    loop body" is. Raises ``ValueError`` for an unpaired loop start -- callers
+    inside the validator report that as a K6a finding instead.
+    """
+
+    body: set[str] = set()
+    stack: list[tuple[str, int]] = [
+        (e.target, 0) for e in schema.outgoing(loop_start_id)
+    ]
+    matching_end: str | None = None
+    while stack:
+        node_id, depth = stack.pop()
+        node = schema.nodes.get(node_id)
+        if node is None or node_id in body:
+            continue
+        if node.type is NodeType.LOOP_END and depth == 0:
+            matching_end = node_id
+            continue
+        body.add(node_id)
+        next_depth = depth
+        if node.type is NodeType.LOOP_START:
+            next_depth += 1
+        elif node.type is NodeType.LOOP_END:
+            next_depth -= 1
+        for edge in schema.outgoing(node_id):
+            stack.append((edge.target, next_depth))
+    if matching_end is None:
+        raise ValueError(f"loop start '{loop_start_id}' has no matching LOOP_END")
+    return matching_end, body
 
 
 class TemplateOrigin(StrEnum):
@@ -1247,6 +1505,27 @@ class ProcessInstance(BaseModel):
     #: node (loop) overwrites its stamp, so the clock restarts. Additive: absent
     #: entries fall back to the ``NONE`` criticality band (backward compatible).
     node_activated_at: dict[str, datetime] = Field(default_factory=dict)
+    #: Completed repeat count per LOOP_END node id (K6). Purely observational
+    #: (monitoring/tests); the engine increments it each time a loop decision
+    #: says "repeat" and resets the body. Additive with a safe default, so
+    #: pre-loop instances stay valid.
+    loop_iterations: dict[str, int] = Field(default_factory=dict)
+    #: Work-item ownership per node id (E1, worklist state machine): the agent
+    #: who claimed the activated step. At most one owner per step (W1); the
+    #: entry is cleared on completion, return and the loop-iteration reset
+    #: (W4). Additive with a safe default -- pre-E1 instances behave exactly
+    #: as before (every step stays an open offer).
+    claimed_by: dict[str, str] = Field(default_factory=dict)
+    #: Wall-clock instant of the claim per node id, stamped at the API
+    #: boundary (like ``node_activated_at`` -- the engine stays clock-free).
+    #: Anchor for the "t_bearb from claim" refinement of the time-based
+    #: worklist prioritisation (not yet consumed there).
+    node_claimed_at: dict[str, datetime] = Field(default_factory=dict)
+    #: Fired escalation stages per node id for the *current* activation
+    #: (T3/E9): the boundary sweep increments the counter as stages fire, the
+    #: loop-iteration reset clears the body's entries (each round starts
+    #: unescalated). Additive with a safe default.
+    escalated_stages: dict[str, int] = Field(default_factory=dict)
 
 
 # --- integration runtime entities (roadmap E10-E13) ----------------------

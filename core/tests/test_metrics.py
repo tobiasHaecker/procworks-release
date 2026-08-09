@@ -13,7 +13,9 @@ from procworks import (
     AccessMode,
     BranchSpec,
     DataType,
+    TimeConstraint,
     add_data_element,
+    assign_service,
     conditional_insert,
     connect_data,
     create_empty_schema,
@@ -22,6 +24,7 @@ from procworks import (
     model_report,
     parallel_insert,
     serial_insert,
+    set_time_constraint,
     set_value_class,
     value_class_breakdown,
 )
@@ -123,3 +126,58 @@ def test_model_report_combines_everything() -> None:
     assert report.metrics.activity_count == 1
     assert report.hints == []
     assert report.value_classes.unclassified == 1
+
+
+# --- G8: Soll-Zeit-Luecke (Z4 der zeitbasierten Priorisierung) --------------
+
+
+def test_g8_silent_without_any_target_lead_time() -> None:
+    """Ein Schema ohne Soll-Reaktionszeiten bekommt keinen G8-Hinweis.
+
+    Additive Stille: Wer die Zeitperspektive nicht nutzt, wird nicht mit
+    Hinweisen ueberzogen -- auch nicht, wenn nur Bearbeitungsdauern (T2)
+    modelliert sind.
+    """
+
+    schema = create_empty_schema("Zeitlos", schema_id="m8")
+    schema = serial_insert(schema, "A", after_node_id="start")
+    schema = serial_insert(schema, "B", after_node_id="start")
+    schema = set_time_constraint(
+        schema, _activity_id(schema, "A"), TimeConstraint(max_duration_seconds=60)
+    )
+    assert [h for h in model_hints(schema) if h.code == "G8"] == []
+
+
+def test_g8_flags_interactive_steps_without_lead_time() -> None:
+    """Traegt ein Schritt eine Soll-Zeit, werden die Luecken benannt.
+
+    Automatische Schritte sind ausgenommen: sie haben keinen Arbeitslisten-
+    Eintrag, den die Priorisierung sortieren koennte.
+    """
+
+    schema = create_empty_schema("Teilzeit", schema_id="m9")
+    schema = serial_insert(schema, "A", after_node_id="start")
+    schema = serial_insert(schema, "B", after_node_id=_activity_id(schema, "A"))
+    schema = serial_insert(schema, "C", after_node_id=_activity_id(schema, "B"))
+    a = _activity_id(schema, "A")
+    b = _activity_id(schema, "B")
+    c = _activity_id(schema, "C")
+    schema = set_time_constraint(schema, a, TimeConstraint(target_lead_seconds=3600))
+    schema = assign_service(schema, c, "Roboter", automatic=True)
+
+    hints = [h for h in model_hints(schema) if h.code == "G8"]
+    assert [h.node_id for h in hints] == [b]
+    assert "Soll-Reaktionszeit" in hints[0].message
+
+
+def test_g8_disappears_once_the_lead_time_is_set() -> None:
+    schema = create_empty_schema("Vollzeit", schema_id="m10")
+    schema = serial_insert(schema, "A", after_node_id="start")
+    schema = serial_insert(schema, "B", after_node_id=_activity_id(schema, "A"))
+    a = _activity_id(schema, "A")
+    b = _activity_id(schema, "B")
+    schema = set_time_constraint(schema, a, TimeConstraint(target_lead_seconds=3600))
+    assert [h.node_id for h in model_hints(schema) if h.code == "G8"] == [b]
+
+    schema = set_time_constraint(schema, b, TimeConstraint(target_lead_seconds=7200))
+    assert [h for h in model_hints(schema) if h.code == "G8"] == []

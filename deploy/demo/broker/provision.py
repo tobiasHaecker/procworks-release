@@ -8,9 +8,9 @@ a local change. Two implementations ship here:
 
 * :class:`InMemoryProvisioner` -- a fake for local development and tests; hands
   out fake instances without touching any cloud.
-* :class:`FlyProvisioner` -- a *skeleton* that shows where the Fly Machines REST
-  calls go. The actual HTTP payloads are marked ``TODO`` and must be filled in
-  against the current Fly Machines API before use.
+* :class:`FlyProvisioner` -- the real Fly Machines implementation (app per
+  visitor, shared-IP allocation via GraphQL, machine lifecycle over the REST
+  API). Live-verified in production since 2026-07-14; see deploy/demo/README.md.
 
 This module is a deployment artifact, not part of the correctness core.
 """

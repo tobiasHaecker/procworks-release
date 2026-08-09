@@ -53,7 +53,8 @@ class ModelMetrics(BaseModel):
 class ModelHint(BaseModel):
     """A single non-blocking modelling hint (advisory, never a correctness gate)."""
 
-    #: Stable hint code (``G1``, ``G2``, ``G6`` follow the 7PMG numbering).
+    #: Stable hint code. ``G1``/``G2``/``G6``/``G7`` follow the 7PMG numbering;
+    #: ``G8`` (Soll-Zeit-Luecke) is ProcWorks' own addition beyond that set.
     code: str
     #: Human-readable advice.
     message: str
@@ -232,6 +233,51 @@ def model_hints(schema: ProcessSchema) -> list[ModelHint]:
                 )
             )
 
+    hints += _target_lead_gap_hints(schema)
+    return hints
+
+
+def _target_lead_gap_hints(schema: ProcessSchema) -> list[ModelHint]:
+    """G8: interactive steps without a target lead time (Soll-Reaktionszeit).
+
+    G8 is ProcWorks' own addition beyond the 7PMG set (Z4 of the time-based
+    worklist prioritisation concept; the code "Z4" itself is taken by the
+    validator's staff-rule group, hence the G numbering). It stays **silent
+    unless the schema uses lead times at all**: only once at least one step
+    carries ``target_lead_seconds`` is a gap surprising -- steps without a
+    lead time then never enter a criticality band and sort behind time-critical
+    work purely by static priority. A schema that ignores the time perspective
+    entirely gets no hint (the additive-silence principle the validator's
+    T-group follows as well).
+    """
+
+    if not any(
+        c.target_lead_seconds is not None for c in schema.time_constraints.values()
+    ):
+        return []
+    hints: list[ModelHint] = []
+    for node in schema.nodes.values():
+        if node.type is not NodeType.ACTIVITY:
+            continue
+        binding = schema.service_bindings.get(node.id)
+        if binding is not None and binding.automatic:
+            continue  # automatic steps have no worklist entry to prioritise
+        constraint = schema.time_constraints.get(node.id)
+        if constraint is not None and constraint.target_lead_seconds is not None:
+            continue
+        hints.append(
+            ModelHint(
+                code="G8",
+                message=(
+                    f"Der Schritt '{node.label or node.id}' hat keine "
+                    "Soll-Reaktionszeit. Andere Schritte dieses Modells tragen "
+                    "eine -- ohne Soll-Zeit nimmt dieser Schritt nicht an der "
+                    "zeitbasierten Priorisierung teil und wird nie als "
+                    "zeitkritisch eingestuft."
+                ),
+                node_id=node.id,
+            )
+        )
     return hints
 
 

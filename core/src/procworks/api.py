@@ -17,7 +17,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -101,6 +101,9 @@ from procworks.model import (
     Cardinality,
     ConnectorKind,
     DataType,
+    EscalationKind,
+    EscalationPolicy,
+    EscalationStage,
     ExecutorKind,
     ExternalTask,
     FilterOperator,
@@ -110,6 +113,7 @@ from procworks.model import (
     Incident,
     InstanceState,
     LifecycleState,
+    LoopCell,
     MailBinding,
     MailOutboxEntry,
     MailOutboxState,
@@ -159,7 +163,7 @@ from procworks.validator import (
     check_executable,
     validate,
 )
-from procworks.worklist_priority import TimeContext
+from procworks.worklist_priority import TimeContext, target_seconds
 
 
 def _env_truthy(name: str) -> bool:
@@ -774,6 +778,42 @@ class RenameNodeRequest(BaseModel):
     label: str = Field(..., examples=["Antrag genehmigen"])
 
 
+class MoveNodeRequest(BaseModel):
+    """Target position for a node move: directly after this anchor node."""
+
+    after_node_id: str = Field(..., examples=["start"])
+
+
+class LoopInsertRequest(BaseModel):
+    """A REPEAT-UNTIL loop block (K6): body label + decidable exit condition."""
+
+    label: str = Field(..., examples=["Nacharbeit erledigen"])
+    after_node_id: str = Field(..., examples=["start"])
+    #: INSTANCE element that decides the loop in every iteration (BOOLEAN for
+    #: the shorthand below; any partitionable type when ``cells`` are given).
+    discriminator: str = Field(..., examples=["nacharbeit_noetig"])
+    #: Boolean shorthand: the body repeats while the discriminator equals this
+    #: value. Ignored when ``cells`` are given.
+    repeat_value: bool = True
+    #: Optional repeat/exit partition (stage S3): cells tile the
+    #: discriminator's domain like a K7 partition (THRESHOLD/BOOLEAN/ENUM per
+    #: the element's type) and classify each cell into repeat or exit.
+    cells: list[LoopCell] | None = None
+    #: Optional hard brake (stage S3): total body runs are capped at this
+    #: bound (>= 2) and the T2 critical path charges the body that many times.
+    max_iterations: int | None = None
+
+
+class LoopDecisionRequest(BaseModel):
+    """Replace the exit condition of an existing loop (K6b, LOOP_END node)."""
+
+    node_id: str = Field(..., examples=["loopend_1"])
+    discriminator: str = Field(..., examples=["nacharbeit_noetig"])
+    repeat_value: bool = True
+    cells: list[LoopCell] | None = None
+    max_iterations: int | None = None
+
+
 class AddDataElementRequest(BaseModel):
     name: str = Field(..., examples=["betrag"])
     data_type: DataType = Field(..., examples=[DataType.FLOAT])
@@ -1036,8 +1076,32 @@ class LinkFollowUpRequest(BaseModel):
     mode: FollowUpMode = FollowUpMode.ASYNC
 
 
+class SetEscalationPolicyRequest(BaseModel):
+    """Modelled overdue reaction of a node (T3/E9); ``policy: null`` clears."""
+
+    node_id: str = Field(..., examples=["act_1"])
+    policy: EscalationPolicy | None = None
+
+
 class StartActivityRequest(BaseModel):
     node_id: str = Field(..., examples=["act_1"])
+    #: Acting agent (E1: starting presupposes ownership, W4). A bound login
+    #: always acts as itself; open dev mode must name the agent.
+    agent_id: str | None = Field(default=None, examples=["agent_erika"])
+
+
+class ClaimActivityRequest(BaseModel):
+    """Take over an offered task (E1): it leaves everyone else's worklist."""
+
+    node_id: str = Field(..., examples=["act_1"])
+    agent_id: str | None = Field(default=None, examples=["agent_erika"])
+
+
+class ReturnActivityRequest(BaseModel):
+    """Return a claimed task to the open offer (E1, W3)."""
+
+    node_id: str = Field(..., examples=["act_1"])
+    agent_id: str | None = Field(default=None, examples=["agent_erika"])
 
 
 class CompleteActivityRequest(BaseModel):
@@ -1141,11 +1205,11 @@ def _get_template_or_404(template_id: str) -> ProcessTemplate:
     raise HTTPException(status_code=404, detail=f"template '{template_id}' not found")
 
 
-def _commit_or_422(result_fn: object) -> ProcessSchema:
+def _commit_or_422(result_fn: Callable[[], ProcessSchema]) -> ProcessSchema:
     """Execute an operation callable; map CorrectnessError to HTTP 422."""
 
     try:
-        schema = result_fn()  # type: ignore[operator]
+        schema = result_fn()
     except CorrectnessError as exc:
         raise HTTPException(
             status_code=422,
@@ -1172,7 +1236,7 @@ def _schemas_referencing(org_id: str) -> list[ProcessSchema]:
     return result
 
 
-def _commit_org_or_422(result_fn: object) -> OrgModel:
+def _commit_org_or_422(result_fn: Callable[[], OrgModel]) -> OrgModel:
     """Apply a shared-org change, re-validating every referencing schema.
 
     The org op is validated for internal consistency (validate-before-commit);
@@ -1183,7 +1247,7 @@ def _commit_org_or_422(result_fn: object) -> OrgModel:
     """
 
     try:
-        org = result_fn()  # type: ignore[operator]
+        org = result_fn()
     except CorrectnessError as exc:
         raise HTTPException(
             status_code=422,
@@ -1214,11 +1278,11 @@ def _get_instance_or_404(instance_id: str) -> ProcessInstance:
     return instance
 
 
-def _run_or_409(result_fn: object) -> ProcessInstance:
+def _run_or_409(result_fn: Callable[[], ProcessInstance]) -> ProcessInstance:
     """Execute a runtime operation callable; map ExecutionError to HTTP 409."""
 
     try:
-        instance = result_fn()  # type: ignore[operator]
+        instance = result_fn()
     except ExecutionError as exc:
         raise HTTPException(status_code=409, detail={"message": exc.message}) from exc
     return _instances.put(instance)
@@ -1482,11 +1546,11 @@ def _run_external(action: Callable[[], object]) -> object:
 
 
 
-def _commit_instance_or_422(result_fn: object) -> ProcessInstance:
+def _commit_instance_or_422(result_fn: Callable[[], ProcessInstance]) -> ProcessInstance:
     """Execute an instance change op; map CorrectnessError to HTTP 422."""
 
     try:
-        instance = result_fn()  # type: ignore[operator]
+        instance = result_fn()
     except CorrectnessError as exc:
         raise HTTPException(
             status_code=422,
@@ -1939,6 +2003,20 @@ def post_admin_mail_outbox_dispatch() -> MailOutboxStatus:
     return _mail_outbox_status()
 
 
+@app.post("/admin/escalations/sweep", dependencies=[_admin])
+def post_admin_escalation_sweep() -> dict[str, int]:
+    """Fire all currently due escalation stages now (T3/E9, admin).
+
+    The cron anchor of the lazy boundary timer: the worklist endpoints sweep
+    on every read, but an unattended deployment can drive escalations
+    deterministically by scheduling this endpoint (same pattern as the
+    mail-outbox dispatch). Idempotent -- a stage fires at most once per
+    activation.
+    """
+
+    return {"fired": _escalation_sweep()}
+
+
 @app.get("/schemas", dependencies=[_read])
 def list_schemas() -> list[str]:
     return _store.list_ids()
@@ -2138,6 +2216,60 @@ def post_conditional_insert(schema_id: str, req: ConditionalInsertRequest) -> Pr
     )
 
 
+@app.post(
+    "/schemas/{schema_id}/loop-insert",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_loop_insert(schema_id: str, req: LoopInsertRequest) -> ProcessSchema:
+    """Insert a REPEAT-UNTIL loop block (K6) after the anchor node.
+
+    The body runs at least once; at the LOOP_END the BOOLEAN discriminator
+    decides deterministically whether it repeats. Validate-before-commit as
+    always: an undecidable or ill-placed loop is rejected with HTTP 422.
+    """
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.insert_loop(
+            schema,
+            req.after_node_id,
+            req.label,
+            discriminator=req.discriminator,
+            repeat_value=req.repeat_value,
+            cells=req.cells,
+            max_iterations=req.max_iterations,
+        )
+    )
+
+
+@app.post(
+    "/schemas/{schema_id}/loop-decision",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_loop_decision(schema_id: str, req: LoopDecisionRequest) -> ProcessSchema:
+    """Replace the exit condition of an existing loop (K6b).
+
+    Retargets the decision to another discriminator, flips the boolean
+    shorthand or switches to/from an S3 repeat/exit partition. The body must
+    (still) write the discriminator on every path (K6c) -- otherwise HTTP 422
+    and the schema stays unchanged.
+    """
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.set_loop_decision(
+            schema,
+            req.node_id,
+            discriminator=req.discriminator,
+            repeat_value=req.repeat_value,
+            cells=req.cells,
+            max_iterations=req.max_iterations,
+        )
+    )
+
+
 @app.patch(
     "/schemas/{schema_id}/nodes/{node_id}",
     response_model=ProcessSchema,
@@ -2158,6 +2290,24 @@ def patch_rename_node(
 def delete_schema_node(schema_id: str, node_id: str) -> ProcessSchema:
     schema = _get_or_404(schema_id)
     return _commit_or_422(lambda: ops.delete_node(schema, node_id))
+
+
+@app.post(
+    "/schemas/{schema_id}/nodes/{node_id}/move",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_move_node(schema_id: str, node_id: str, req: MoveNodeRequest) -> ProcessSchema:
+    """Move a step to a new serial position, keeping all its bindings.
+
+    The node is spliced out of its current position and re-inserted directly
+    after ``after_node_id`` (validate-before-commit: an invalid move -- e.g. a
+    reader ahead of its writer, D1 -- is rejected with HTTP 422 and the schema
+    stays unchanged).
+    """
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(lambda: ops.move_node(schema, node_id, req.after_node_id))
 
 
 @app.post(
@@ -2408,7 +2558,13 @@ def post_bind_sql_write(
 @app.get("/schemas/{schema_id}/bpmn", dependencies=[_read])
 def get_export_bpmn(schema_id: str) -> Response:
     schema = _get_or_404(schema_id)
-    return Response(content=bpmn_io.export_bpmn(schema), media_type="application/xml")
+    try:
+        xml = bpmn_io.export_bpmn(schema)
+    except bpmn_io.BpmnError as exc:
+        # e.g. loops (K6, stage S1): not representable in the validated BPMN
+        # subset yet -- a clear 422 beats a file that cannot round-trip.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(content=xml, media_type="application/xml")
 
 
 @app.post(
@@ -3087,6 +3243,27 @@ def post_set_deadline(schema_id: str, req: SetDeadlineRequest) -> ProcessSchema:
     return _commit_or_422(lambda: ops.set_deadline(schema, req.deadline_seconds))
 
 
+@app.post(
+    "/schemas/{schema_id}/escalation-policy",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_set_escalation_policy(
+    schema_id: str, req: SetEscalationPolicyRequest
+) -> ProcessSchema:
+    """Set or clear a node's modelled overdue reaction (T3/E9).
+
+    Validate-before-commit: an undecidable escalation (no target time,
+    unordered stages, unresolvable or node-referencing targets) is rejected
+    with HTTP 422 and the schema stays unchanged.
+    """
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(
+        lambda: ops.set_escalation_policy(schema, req.node_id, req.policy)
+    )
+
+
 @app.post("/schemas/{schema_id}/subprocess", response_model=ProcessSchema, dependencies=[_model])
 def post_insert_subprocess(
     schema_id: str, req: InsertSubprocessRequest
@@ -3343,6 +3520,7 @@ def get_worklist(instance_id: str) -> WorklistReport:
     dependencies=[_read],
 )
 def get_instance_tasks(instance_id: str) -> list[OpenTask]:
+    _escalation_sweep()  # lazy boundary timer (T3/E9)
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
     return assignment.open_tasks(
@@ -3353,14 +3531,138 @@ def get_instance_tasks(instance_id: str) -> list[OpenTask]:
     )
 
 
+def _escalation_sweep(now: datetime | None = None) -> int:
+    """Fire due escalation stages across all running instances (T3/E9).
+
+    The lazy boundary timer of the Eskalations-Konzept (§1): called before
+    the worklist reads and by ``POST /admin/escalations/sweep`` -- there is
+    deliberately no background scheduler. Idempotent through the persisted
+    per-activation stage counter; the mail outbox additionally dedups per
+    ``esc|instance|node|stage|activation``. Returns the number of stages
+    fired in this pass. Cheap when nothing escalates: instances without
+    policies are skipped after one dict check.
+    """
+
+    moment = now or datetime.now(UTC)
+    fired_total = 0
+    absent = _current_absent_agents()
+    for instance_id in _instances.list_ids():
+        instance = _instances.get(instance_id)
+        if instance is None or instance.state is not InstanceState.RUNNING:
+            continue
+        schema = _effective_schema_for(instance)
+        if not schema.escalation_policies:
+            continue
+        changed = False
+        for node_id, policy in schema.escalation_policies.items():
+            if instance.node_states.get(node_id) not in (
+                NodeState.ACTIVATED,
+                NodeState.RUNNING,
+            ):
+                continue
+            activated = instance.node_activated_at.get(node_id)
+            target = target_seconds(schema.time_constraints.get(node_id))
+            if activated is None or target is None:
+                continue  # no stamped clock (legacy instance) -> no due instant
+            due = activated + timedelta(seconds=target)
+            already = instance.escalated_stages.get(node_id, 0)
+            for index in range(already, len(policy.stages)):
+                stage = policy.stages[index]
+                if moment < due + timedelta(seconds=stage.after_seconds):
+                    break  # stages are strictly ascending (T3b)
+                _fire_escalation_stage(instance, schema, node_id, index, stage, absent)
+                instance.escalated_stages[node_id] = index + 1
+                changed = True
+                fired_total += 1
+        if changed:
+            _instances.put(instance)
+    return fired_total
+
+
+def _fire_escalation_stage(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    index: int,
+    stage: EscalationStage,
+    absent: frozenset[str],
+) -> None:
+    """Boundary side effects of one fired stage: audit + best-effort mail.
+
+    FUNCTIONAL: the added performers learn about the task (the broadened
+    offer itself materialises through ``eligible_agents``). HIERARCHICAL: the
+    leadership set is informed. Recipients without an address are skipped --
+    delivery is best-effort and never blocks a process step (the audit event
+    is the guaranteed trace). Test instances stay silent like everywhere.
+    """
+
+    if instance.is_test:
+        return
+    label = _label_of(schema, node_id) or node_id
+    _audit.append(
+        EventType.TASK_ESCALATED,
+        instance.id,
+        instance.schema_id,
+        schema_version=instance.schema_version,
+        node_id=node_id,
+        label=label,
+        detail={"stage": str(index + 1), "kind": stage.kind.value},
+    )
+    recipients = assignment.resolve_rule_agents(
+        schema, stage.rule, instance, absent_agents=absent
+    )
+    addresses = sorted(
+        (agent.email or "").strip()
+        for agent_id in recipients
+        if (agent := schema.org_model.agents.get(agent_id)) is not None
+        and (agent.email or "").strip()
+    )
+    if not addresses:
+        return
+    if stage.kind is EscalationKind.FUNCTIONAL:
+        subject = f'Eskalation (Stufe {index + 1}): "{label}" jetzt auch bei Ihnen'
+        body = (
+            f'Die Aufgabe "{label}" (Vorgang {instance.id}) hat ihre Soll-Zeit '
+            f"überschritten und wurde Ihrer Bearbeitermenge zusätzlich "
+            f"angeboten (funktionale Eskalation, Stufe {index + 1})."
+        )
+    else:
+        subject = f'Eskalation (Stufe {index + 1}): "{label}" ist überfällig'
+        body = (
+            f'Die Aufgabe "{label}" (Vorgang {instance.id}) hat ihre Soll-Zeit '
+            f"überschritten (hierarchische Eskalation, Stufe {index + 1}). "
+            f"Bitte prüfen Sie den Vorgang."
+        )
+    marker = instance.node_activated_at.get(node_id)
+    dedup = f"esc|{instance.id}|{node_id}|{index}|{marker.isoformat() if marker else ''}"
+    _mail_outbox.enqueue(
+        mail_runtime.MailMessage(
+            to=addresses,
+            subject=subject,
+            body=body,
+            instance_id=instance.id,
+            node_id=node_id,
+            schema_id=instance.schema_id,
+            message_id=dedup,
+        ),
+        dedup,
+    )
+    _dispatch_mail_outbox()
+
+
 def _tasks_for_agent(agent_id: str) -> list[OpenTask]:
     """Collect the open tasks an agent is currently eligible for (incl. deputy).
 
     Each instance's tasks are prioritised with its own time context (time-based
     worklist prioritisation); the cross-instance list is then re-sorted so the
     agent sees one coherent, most-urgent-first todo list across all instances.
+
+    Withdrawn view (E1): a task someone *else* has claimed leaves this personal
+    list until it is returned or completed; the agent's own claimed tasks stay
+    (marked via ``claimed_by``). The instance-wide list stays complete.
     """
 
+    _escalation_sweep()  # lazy boundary timer (T3/E9): fire due stages first
     tasks: list[OpenTask] = []
     absent = _current_absent_agents()
     for instance_id in _instances.list_ids():
@@ -3370,6 +3672,8 @@ def _tasks_for_agent(agent_id: str) -> list[OpenTask]:
         schema = _effective_schema_for(instance)
         ctx = _time_context(instance, schema)
         for task in assignment.open_tasks(schema, instance, ctx, absent_agents=absent):
+            if task.claimed_by is not None and task.claimed_by != agent_id:
+                continue  # withdrawn: someone else took it over
             if agent_id in task.eligible_agents:
                 tasks.append(task)
     tasks.sort(
@@ -3529,11 +3833,135 @@ def delete_agent_absence(
     return Response(status_code=204)
 
 
-@app.post("/instances/{instance_id}/start", response_model=ProcessInstance, dependencies=[_run])
-def post_start_activity(instance_id: str, req: StartActivityRequest) -> ProcessInstance:
+def _require_acting_agent(principal: Principal, requested: str | None) -> str:
+    """Resolve the acting agent for ownership operations; 422 when unknown.
+
+    Claim/start need a concrete owner (W1/W4) -- unlike completion there is no
+    meaningful anonymous variant, so an open-dev-mode call without an agent id
+    is a request error, not a permission problem.
+    """
+
+    acting = _resolve_acting_agent(principal, requested)
+    if acting is None:
+        raise HTTPException(
+            status_code=422, detail="agent_id is required for this operation"
+        )
+    return acting
+
+
+@app.post("/instances/{instance_id}/claim", response_model=ProcessInstance)
+def post_claim_activity(
+    instance_id: str,
+    req: ClaimActivityRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> ProcessInstance:
+    """Claim an offered task for one agent (E1, worklist state machine).
+
+    On success the step leaves every other eligible agent's personal list
+    (Withdrawn view) until it is returned or completed. Conflicts (already
+    claimed, not eligible, not activated) come back as HTTP 409 -- the
+    instance is untouched. The claim instant is stamped at this boundary
+    (the engine stays clock-free), idempotently for a re-claim by the owner.
+    """
+
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    after = _run_or_409(lambda: exe.start_activity(instance, schema, req.node_id))
+    acting = _require_acting_agent(principal, req.agent_id)
+
+    def _claim_and_stamp() -> ProcessInstance:
+        after = exe.claim_activity(
+            instance,
+            schema,
+            req.node_id,
+            acting,
+            absent_agents=_current_absent_agents(),
+        )
+        after.node_claimed_at.setdefault(req.node_id, datetime.now(UTC))
+        return after
+
+    after = _run_or_409(_claim_and_stamp)
+    if not instance.is_test:
+        _audit.append(
+            EventType.ACTIVITY_CLAIMED,
+            after.id,
+            after.schema_id,
+            schema_version=after.schema_version,
+            node_id=req.node_id,
+            label=_label_of(schema, req.node_id),
+            agent_id=acting,
+        )
+    return after
+
+
+@app.post("/instances/{instance_id}/return", response_model=ProcessInstance)
+def post_return_activity(
+    instance_id: str,
+    req: ReturnActivityRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> ProcessInstance:
+    """Return a claimed task to the open offer (E1, W3).
+
+    The owner may always return their own claim; for someone else's claim the
+    same supervisory authority applies as for the worklist/absence endpoints
+    (admin/modeler roles, or open dev mode). A RUNNING step falls back to
+    ACTIVATED, and the task reappears in every eligible agent's list.
+    """
+
+    instance = _get_instance_or_404(instance_id)
+    schema = _effective_schema_for(instance)
+    acting = _resolve_acting_agent(principal, req.agent_id)
+    holder = instance.claimed_by.get(req.node_id)
+    if holder is not None and acting != holder:
+        _require_agent_self_or_supervisor(principal, holder)
+        force = True
+    else:
+        force = False
+    after = _run_or_409(
+        lambda: exe.return_activity(
+            instance, schema, req.node_id, acting or "", force=force
+        )
+    )
+    if not instance.is_test:
+        _audit.append(
+            EventType.ACTIVITY_RETURNED,
+            after.id,
+            after.schema_id,
+            schema_version=after.schema_version,
+            node_id=req.node_id,
+            label=_label_of(schema, req.node_id),
+            agent_id=acting,
+        )
+    return after
+
+
+@app.post("/instances/{instance_id}/start", response_model=ProcessInstance)
+def post_start_activity(
+    instance_id: str,
+    req: StartActivityRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> ProcessInstance:
+    """Move an activity into RUNNING ("Started", E1).
+
+    Starting presupposes ownership (W4): an unclaimed step is claimed
+    implicitly for the acting agent, a step claimed by someone else is a 409.
+    """
+
+    instance = _get_instance_or_404(instance_id)
+    schema = _effective_schema_for(instance)
+    acting = _require_acting_agent(principal, req.agent_id)
+
+    def _start_and_stamp() -> ProcessInstance:
+        after = exe.start_activity(
+            instance,
+            schema,
+            req.node_id,
+            acting,
+            absent_agents=_current_absent_agents(),
+        )
+        after.node_claimed_at.setdefault(req.node_id, datetime.now(UTC))
+        return after
+
+    after = _run_or_409(_start_and_stamp)
     if not instance.is_test:
         # A throw-away test instance of a draft records no audit events, so it
         # never reaches the monitoring KPIs (mirrors instance creation).
@@ -3544,6 +3972,7 @@ def post_start_activity(instance_id: str, req: StartActivityRequest) -> ProcessI
             schema_version=after.schema_version,
             node_id=req.node_id,
             label=_label_of(schema, req.node_id),
+            agent_id=acting,
         )
     return after
 

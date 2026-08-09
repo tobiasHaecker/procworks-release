@@ -28,6 +28,16 @@ class EventType(StrEnum):
     INSTANCE_CREATED = "INSTANCE_CREATED"
     ACTIVITY_STARTED = "ACTIVITY_STARTED"
     ACTIVITY_COMPLETED = "ACTIVITY_COMPLETED"
+    #: Work-item ownership events (E1, worklist state machine). Deliberately
+    #: NOT in ``NON_PROCESS_EVENTS``: they are real per-instance history, and
+    #: the KPI/mining aggregations filter on concrete event types anyway, so
+    #: these never distort a figure.
+    ACTIVITY_CLAIMED = "ACTIVITY_CLAIMED"
+    ACTIVITY_RETURNED = "ACTIVITY_RETURNED"
+    #: An escalation stage fired for an overdue task (T3/E9). Real
+    #: per-instance history; type-filtered like the claim events, so it never
+    #: distorts a KPI or the mined process map.
+    TASK_ESCALATED = "TASK_ESCALATED"
     BRANCH_DECIDED = "BRANCH_DECIDED"
     ADHOC_INSERTED = "ADHOC_INSERTED"
     ADHOC_DELETED = "ADHOC_DELETED"

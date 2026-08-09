@@ -418,11 +418,13 @@ no target either: `register_connector` stores only connector metadata (no URL),
 so with `PROCWORKS_CONNECTIONS` unset there is nothing to dial. A platform
 egress-deny network policy remains defence-in-depth on top.
 
+Done since this list was first written:
+- the reaper poke (`/admin/reap`) **is scheduled**: `.github/workflows/demo-reap.yml`
+  fires hourly as a backstop (no-op until the `DEMO_ADMIN_TOKEN` secret is set).
+
 Still open before/for going fully public:
 - wire up **Turnstile** for real (set `CAPTCHA_SECRET` + sitekey; the proof used
   the dev fallback) — optional, the rate limits + active cap guard it today;
-- actually **schedule** the reaper poke (`/admin/reap`) on your scheduler of
-  choice — the endpoint and token are ready, only the cron itself is an ops step;
 - a **cross-replica** budget counter (currently in-process, single replica);
 - a platform **egress-deny** network policy as belt-and-suspenders on top of the
   app-layer lockdown above;

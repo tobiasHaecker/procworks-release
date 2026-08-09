@@ -32,6 +32,7 @@ from procworks import worklist_priority
 from procworks.model import (
     PRIORITY_RANK,
     AbsenceEntry,
+    EscalationKind,
     InstanceState,
     NodeState,
     NodeType,
@@ -82,6 +83,16 @@ class OpenTask(BaseModel):
     #: Derived time criticality band; ``NONE`` when the task has no target time
     #: or no activation clock (backward-compatible default).
     time_criticality: TimeCriticality = TimeCriticality.NONE
+    #: Owner of the work item (E1): the agent who claimed the step, or ``None``
+    #: while the task is an open offer. Purely informative here -- the
+    #: per-agent Withdrawn filtering happens at the API boundary, so this
+    #: instance-wide view stays complete (transparency in monitoring).
+    claimed_by: str | None = None
+    #: Wall-clock instant of the claim (boundary-stamped), or ``None``.
+    claimed_at: datetime | None = None
+    #: Fired escalation stages of the current activation (T3/E9); ``0`` while
+    #: nothing escalated. Lets worklists mark an escalated task.
+    escalated_stage: int = 0
 
 
 def absent_agent_ids(
@@ -142,8 +153,37 @@ def eligible_agents(
     if rule is None:
         return set()
     base = _resolve(schema.org_model, rule, instance)
+    # T3/E9: fired FUNCTIONAL escalation stages *broaden* the offer -- their
+    # target sets join the eligibles (never replacing the original set, so the
+    # no-empty-set safety invariant holds trivially). HIERARCHICAL stages only
+    # inform and never appear here.
+    policy = schema.escalation_policies.get(node_id)
+    if policy is not None:
+        fired = instance.escalated_stages.get(node_id, 0)
+        for stage in policy.stages[:fired]:
+            if stage.kind is EscalationKind.FUNCTIONAL:
+                base = base | _resolve(schema.org_model, stage.rule, instance)
     if not include_deputies:
         return base
+    return _with_deputies(schema.org_model, base, absent_agents)
+
+
+def resolve_rule_agents(
+    schema: ProcessSchema,
+    rule: StaffRule,
+    instance: ProcessInstance,
+    *,
+    absent_agents: frozenset[str] = frozenset(),
+) -> set[str]:
+    """Resolve a standalone staff rule to concrete agents (incl. deputies).
+
+    The public counterpart of the per-node :func:`eligible_agents` for rules
+    that are not bound to a node -- today the escalation stage targets (T3/E9),
+    which the boundary resolves to notification recipients / added performers.
+    Same absence-gated deputy semantics as everywhere.
+    """
+
+    base = _resolve(schema.org_model, rule, instance)
     return _with_deputies(schema.org_model, base, absent_agents)
 
 
@@ -197,6 +237,9 @@ def open_tasks(
                 eligible_agents(schema, node_id, instance, absent_agents=absent_agents)
             ),
             priority=priority.level,
+            claimed_by=instance.claimed_by.get(node_id),
+            claimed_at=instance.node_claimed_at.get(node_id),
+            escalated_stage=instance.escalated_stages.get(node_id, 0),
         )
         if ctx is not None:
             view = worklist_priority.assess(schema, node_id, ctx)

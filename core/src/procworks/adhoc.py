@@ -172,6 +172,11 @@ def adhoc_delete_node(
     result = instance.model_copy(deep=True)
     result.ad_hoc_schema = candidate
     result.node_states.pop(node_id, None)
+    # E1: an ownership entry hangs on exactly one activation (W4) -- the
+    # deleted step takes its claim along.
+    result.claimed_by.pop(node_id, None)
+    result.node_claimed_at.pop(node_id, None)
+    result.escalated_stages.pop(node_id, None)  # T3: same reasoning
     result.edge_states.pop(_edge_key(predecessor_id, node_id), None)
     result.edge_states.pop(_edge_key(node_id, successor_id), None)
     result.edge_states[_edge_key(predecessor_id, successor_id)] = EdgeState.NOT_SIGNALED

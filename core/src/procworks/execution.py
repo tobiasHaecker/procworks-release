@@ -47,6 +47,8 @@ from procworks.model import (
     ProcessInstance,
     ProcessSchema,
     SubProcessBinding,
+    loop_block,
+    resolve_loop_repeat,
     resolve_xor_target,
 )
 from procworks.store import InstanceStore
@@ -70,14 +72,16 @@ class ExecutionContext:
 
 #: Non-activity node types that complete automatically once activated. An
 #: XOR_SPLIT is handled separately in ``_advance`` (it auto-resolves its branch
-#: from the instance data, K7); END is excluded because it terminates the
-#: instance.
+#: from the instance data, K7), as is a LOOP_END (it evaluates its loop
+#: decision and either exits or resets the body, K6); END is excluded because
+#: it terminates the instance. A LOOP_START is a plain pass-through.
 _AUTO_COMPLETE = frozenset(
     {
         NodeType.START,
         NodeType.AND_SPLIT,
         NodeType.AND_JOIN,
         NodeType.XOR_JOIN,
+        NodeType.LOOP_START,
     }
 )
 
@@ -176,21 +180,117 @@ def pending_decisions(instance: ProcessInstance, schema: ProcessSchema) -> list[
     return []
 
 
-def start_activity(
-    instance: ProcessInstance, schema: ProcessSchema, node_id: str
+def claim_activity(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str,
+    *,
+    absent_agents: frozenset[str] = frozenset(),
 ) -> ProcessInstance:
-    """Move an activated ACTIVITY into the RUNNING state."""
+    """Claim an offered (activated) ACTIVITY for one agent (E1, W1/W2/W4).
+
+    The claim makes the offer exclusive: the step leaves the personal
+    worklists of every other eligible agent (the "Withdrawn" view) until it is
+    returned or completed. Claiming is optional -- completing an unclaimed
+    step directly stays allowed -- but once claimed, only the owner can
+    complete it (W2, enforced in :func:`complete_activity`).
+
+    Guards: instance running; node is an interactive ACTIVITY in state
+    ACTIVATED (no claims on automatic steps -- those belong to workers via the
+    external-task lock, W4); nobody else holds the claim (W1); the agent is
+    eligible per the staff rule incl. absence-gated deputies (W2). Re-claiming
+    one's own claim is an idempotent no-op (double-click safe).
+    """
 
     _require_running(instance)
     node = _require_activity(schema, node_id)
+    binding = schema.service_bindings.get(node_id)
+    if binding is not None and binding.automatic:
+        raise ExecutionError(
+            f"activity '{node_id}' is automatic and cannot be claimed (W4)"
+        )
     if instance.node_states[node.id] is not NodeState.ACTIVATED:
         raise ExecutionError(
             f"activity '{node_id}' is not activated "
             f"(state {instance.node_states[node.id].value})"
         )
+    holder = instance.claimed_by.get(node.id)
+    if holder == agent_id:
+        return instance.model_copy(deep=True)
+    if holder is not None:
+        raise ExecutionError(
+            f"activity '{node_id}' is already claimed by '{holder}' (W1)"
+        )
+    if node_id in schema.staff_rules:
+        eligible = assignment.eligible_agents(
+            schema, node_id, instance, absent_agents=absent_agents
+        )
+        if agent_id not in eligible:
+            raise ExecutionError(
+                f"agent '{agent_id}' is not eligible to claim activity "
+                f"'{node_id}' (W2)"
+            )
     result = instance.model_copy(deep=True)
-    result.node_states[node.id] = NodeState.RUNNING
+    result.claimed_by[node.id] = agent_id
     return result
+
+
+def return_activity(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str,
+    *,
+    force: bool = False,
+) -> ProcessInstance:
+    """Return a claimed ACTIVITY to the open offer (E1, W3).
+
+    The claim is cleared and a RUNNING step falls back to ACTIVATED, so the
+    step reappears in the personal worklists of every eligible agent. Only the
+    owner may return; ``force`` is the boundary's supervisor/admin override
+    (the *authority* decision lives at the API, the engine only distinguishes
+    owner vs. override).
+    """
+
+    _require_running(instance)
+    node = _require_activity(schema, node_id)
+    holder = instance.claimed_by.get(node.id)
+    if holder is None:
+        raise ExecutionError(f"activity '{node_id}' is not claimed")
+    if not force and holder != agent_id:
+        raise ExecutionError(
+            f"activity '{node_id}' is claimed by '{holder}', not '{agent_id}' (W3)"
+        )
+    result = instance.model_copy(deep=True)
+    result.claimed_by.pop(node.id, None)
+    result.node_claimed_at.pop(node.id, None)
+    if result.node_states[node.id] is NodeState.RUNNING:
+        result.node_states[node.id] = NodeState.ACTIVATED
+    return result
+
+
+def start_activity(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str,
+    *,
+    absent_agents: frozenset[str] = frozenset(),
+) -> ProcessInstance:
+    """Move an activated ACTIVITY into the RUNNING state (E1: Started).
+
+    Starting presupposes ownership (W4): an unclaimed step is claimed
+    implicitly for ``agent_id`` (Offered -> Started collapses Allocated), a
+    step claimed by someone else is refused. The RUNNING marking is what the
+    §6.2.1 state machine calls *Started*.
+    """
+
+    claimed = claim_activity(
+        instance, schema, node_id, agent_id, absent_agents=absent_agents
+    )
+    claimed.node_states[node_id] = NodeState.RUNNING
+    return claimed
 
 
 def complete_activity(
@@ -229,9 +329,19 @@ def complete_activity(
             raise ExecutionError(
                 f"agent '{agent_id}' is not eligible to perform activity '{node_id}'"
             )
+    holder = instance.claimed_by.get(node.id)
+    if holder is not None and holder != agent_id:
+        # W2 (E1): a claim is binding -- once someone has taken the step over,
+        # nobody else (including an anonymous caller) may complete it.
+        raise ExecutionError(
+            f"activity '{node_id}' is claimed by '{holder}' and can only be "
+            "completed by them (W2)"
+        )
     result = instance.model_copy(deep=True)
     if agent_id is not None:
         result.performed_by[node.id] = agent_id
+    result.claimed_by.pop(node.id, None)
+    result.node_claimed_at.pop(node.id, None)
     if data:
         result.data_values.update(data)
     _complete_node(result, schema, node)
@@ -274,6 +384,10 @@ def _advance(
                 _complete_node(instance, schema, node, chosen_target=target)
                 progress = True
                 continue
+            if node.type is NodeType.LOOP_END:
+                _resolve_loop_end(instance, schema, node)
+                progress = True
+                continue
             _complete_node(instance, schema, node)
             progress = True
         if _evaluate_targets(instance, schema):
@@ -308,6 +422,108 @@ def _resolve_xor_branch(
             f"'{decision.discriminator}'={value!r}"
         )
     return target
+
+
+def _resolve_loop_end(
+    instance: ProcessInstance, schema: ProcessSchema, node: Node
+) -> None:
+    """Decide a REPEAT-UNTIL loop at its LOOP_END (K6, Schleifen-Konzept §6).
+
+    Evaluates the structured ``LoopDecision`` against the instance data via
+    :func:`procworks.model.resolve_loop_repeat` (boolean shorthand or S3
+    repeat/exit partition). On repeat the markings of the whole block
+    (LOOP_START, body, LOOP_END) are reset to NOT_ACTIVATED and every
+    block-internal edge to NOT_SIGNALED, while the loop start's *incoming*
+    edge stays signalled, so the standard fixpoint re-activates the start and
+    the body runs again. Otherwise the LOOP_END completes normally and the
+    flow leaves the block.
+
+    K6c guarantees the discriminator is freshly written on every path through
+    the body, so the decision is defined in every iteration; a missing or
+    (for a partition) ill-typed value can only mean the model bypassed
+    validation and is a runtime error.
+    """
+
+    decision = schema.loop_decisions.get(node.id)
+    if decision is None:  # pragma: no cover - guarded by K6b at commit time
+        raise ExecutionError(f"LOOP_END '{node.id}' has no loop decision")
+    if decision.discriminator not in instance.data_values:
+        raise ExecutionError(
+            f"LOOP_END '{node.id}' needs data element "
+            f"'{decision.discriminator}' but it is not set"
+        )
+    value = instance.data_values[decision.discriminator]
+    repeat = resolve_loop_repeat(decision, value)
+    if repeat is None:
+        raise ExecutionError(
+            f"LOOP_END '{node.id}' could not classify "
+            f"'{decision.discriminator}'={value!r} into repeat or exit"
+        )
+    if repeat and decision.max_iterations is not None:
+        # Deterministic hard brake (S3): the body has already run
+        # (iterations + 1) times; another repeat would make it iterations + 2.
+        # At the bound the loop exits even though the data says repeat.
+        if instance.loop_iterations.get(node.id, 0) + 2 > decision.max_iterations:
+            repeat = False
+    if repeat:
+        start_id = next(
+            nid
+            for nid, n in schema.nodes.items()
+            if n.type is NodeType.LOOP_START
+            and loop_block(schema, nid)[0] == node.id
+        )
+        _, body = loop_block(schema, start_id)
+        _reset_loop_block(instance, schema, start_id, node.id, body)
+        instance.loop_iterations[node.id] = (
+            instance.loop_iterations.get(node.id, 0) + 1
+        )
+        return
+    _complete_node(instance, schema, node)
+
+
+def _reset_loop_block(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    start_id: str,
+    end_id: str,
+    body: set[str],
+) -> None:
+    """Reset a loop block's markings for the next iteration.
+
+    All block nodes go back to NOT_ACTIVATED and all block-internal edges
+    (those leaving the start or a body node) to NOT_SIGNALED. The start's
+    incoming edge keeps its TRUE signal from before the loop, which is exactly
+    what re-activates the start in the next ``_evaluate_targets`` pass; the
+    end's outgoing edge is untouched (still NOT_SIGNALED -- the loop has not
+    been left). Data values persist across iterations by design (the body
+    overwrites what it re-writes, K6c guarantees the discriminator among it).
+
+    A body SUBPROCESS node also sheds its child-instance link: the block
+    structure guarantees the child of a completed iteration is COMPLETED
+    (otherwise its node -- and thus the LOOP_END -- could never have been
+    reached), so dropping the link is what lets ``_handle_subprocess`` spawn a
+    *fresh* child in the next iteration instead of waiting forever on the old
+    one (stage S3 -- the reason the former K6e restriction could be lifted).
+    ``child_instances`` therefore always maps a node to its *latest* child;
+    earlier iterations' children remain in the store and keep their own
+    ``parent_instance_id``/``parent_node_id`` back-references.
+    """
+
+    block = body | {start_id, end_id}
+    for nid in block:
+        instance.node_states[nid] = NodeState.NOT_ACTIVATED
+        instance.child_instances.pop(nid, None)
+        # W4 (E1): every iteration is a fresh offer -- a claim never survives
+        # the activation it was made for.
+        instance.claimed_by.pop(nid, None)
+        instance.node_claimed_at.pop(nid, None)
+        # T3/E9: each round measures its own target time -- fired escalation
+        # stages belong to the activation, not the node.
+        instance.escalated_stages.pop(nid, None)
+    internal_sources = body | {start_id}
+    for edge in schema.edges:
+        if edge.source in internal_sources:
+            instance.edge_states[_edge_key(edge)] = EdgeState.NOT_SIGNALED
 
 
 # --- sub-process composition --------------------------------------------
@@ -451,7 +667,14 @@ def _join_subprocess(
 def _propagate_completion(
     instance: ProcessInstance, context: ExecutionContext
 ) -> None:
-    """Walk up the parent chain, joining each completed child into its parent."""
+    """Walk up the parent chain, joining each completed child into its parent.
+
+    Only the child the parent *currently* waits for may join: with loops a
+    SUBPROCESS node can spawn one child per iteration, and the loop reset
+    re-keys ``child_instances`` to the latest child. A child from an earlier
+    iteration whose link was dropped must never complete the (re-activated)
+    parent node of a later iteration, so a stale child stops the walk.
+    """
 
     current = instance
     while current.state is InstanceState.COMPLETED and current.parent_instance_id:
@@ -465,6 +688,8 @@ def _propagate_completion(
         binding = parent_schema.sub_process_bindings.get(current.parent_node_id)
         if node is None or binding is None:
             return
+        if parent.child_instances.get(current.parent_node_id) != current.id:
+            return  # stale child of an earlier loop iteration
         _join_subprocess(parent, parent_schema, node, current, binding)
         _advance(parent, parent_schema, context)
         context.instances.put(parent)

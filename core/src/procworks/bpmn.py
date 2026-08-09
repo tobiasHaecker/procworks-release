@@ -20,6 +20,20 @@ The mapping uses semantic BPMN only (no diagram interchange / layout):
     XOR_SPLIT/JOIN <-> bpmn:exclusiveGateway  (role inferred from degree)
     SUBPROCESS     ->  bpmn:callActivity       (export only; calledElement)
     ControlEdge    <-> bpmn:sequenceFlow (+ conditionExpression on XOR branches)
+    LOOP_START/END <-> bpmn:exclusiveGateway pair + loop-back sequenceFlow
+
+Loops (K6, stage S3): a loop exports as the canonical REPEAT-UNTIL gateway
+pattern -- an exclusiveGateway pair whose back flow ``LOOP_END -> LOOP_START``
+carries the derived repeat predicate. Internally the back edge is never a
+datum (the stored graph stays acyclic); it exists only in the interchange
+document. The import recognises the pattern structurally *before* node-type
+resolution: a flow between two exclusive gateways of the right degrees whose
+*target still reaches its source without that flow* is a loop-back edge (that
+reachability test is what tells a loop apart from an empty XOR branch, where
+the join can never reach the split). The back flow is dropped, the pair is
+retyped to LOOP_START/LOOP_END, and the structured ``LoopDecision`` comes from
+the ProcWorks extension -- a recognised cycle without one fails K6b in the
+validating import (No-Bypass), it is never stored undecidable.
 """
 
 from __future__ import annotations
@@ -36,16 +50,20 @@ from procworks.model import (
     DataElement,
     EdgeType,
     Form,
+    LoopDecision,
     Node,
     NodeType,
     ProcessSchema,
     XorDecision,
+    loop_block,
+    loop_condition_text,
 )
 from procworks.validator import SchemaResolver, raise_if_invalid
 
 _DATA_ELEMENTS = TypeAdapter(list[DataElement])
 _DATA_ACCESSES = TypeAdapter(list[DataAccess])
 _XOR_DECISIONS = TypeAdapter(dict[str, XorDecision])
+_LOOP_DECISIONS = TypeAdapter(dict[str, LoopDecision])
 _FORMS = TypeAdapter(dict[str, Form])
 _CONNECTORS = TypeAdapter(dict[str, ConnectorDescriptor])
 
@@ -77,6 +95,8 @@ _EXPORT_TAG: dict[NodeType, str] = {
     NodeType.AND_JOIN: "parallelGateway",
     NodeType.XOR_SPLIT: "exclusiveGateway",
     NodeType.XOR_JOIN: "exclusiveGateway",
+    NodeType.LOOP_START: "exclusiveGateway",
+    NodeType.LOOP_END: "exclusiveGateway",
 }
 
 
@@ -85,6 +105,15 @@ def export_bpmn(schema: ProcessSchema) -> str:
 
     A ``SUBPROCESS`` node is exported as ``bpmn:callActivity`` (its bound target
     schema id as ``calledElement``); the I/O mapping is not carried by BPMN.
+
+    A loop (K6) exports as the canonical gateway pattern: LOOP_START/LOOP_END
+    become an ``exclusiveGateway`` pair and the -- internally never stored --
+    loop-back edge is emitted as an extra ``sequenceFlow`` from the end to the
+    start gateway, carrying the derived repeat predicate as its
+    ``conditionExpression`` (the exit flow stays uncaptioned: on re-import the
+    back flow is dropped, and only edges leaving an XOR split may carry a
+    caption). The structured ``LoopDecision`` itself round-trips through the
+    ProcWorks extension (Schleifen-Konzept §8, stage S3).
     """
 
     ET.register_namespace("bpmn", BPMN_NS)
@@ -121,23 +150,69 @@ def export_bpmn(schema: ProcessSchema) -> str:
                 {f"{{{XSI_NS}}}type": "bpmn:tFormalExpression"},
             )
             condition.text = edge.condition
+    _export_loop_back_flows(process, schema)
     _export_procworks_model(process, schema)
     ET.indent(definitions)
     return ET.tostring(definitions, encoding="unicode", xml_declaration=True)
 
 
-def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
-    """Round-trip the data layer BPMN cannot express (elements, accesses, K7).
+def _export_loop_back_flows(process: ET.Element, schema: ProcessSchema) -> None:
+    """Emit the canonical loop-back sequenceFlow per loop pair (K6, S3).
 
-    Standard BPMN only carries control flow; the structured XOR partition (K7)
-    and its typed discriminator live in a ProcWorks extension so an exported
-    document re-imports to the very same, still-correct schema.
+    The back edge is never stored internally (the graph stays acyclic); in the
+    interchange document it is what makes the exported gateway pair a real
+    BPMN REPEAT-UNTIL loop. It carries the derived repeat predicate as caption
+    so foreign tools and readers see the condition; on re-import the flow is
+    recognised structurally and dropped again (:func:`_split_loop_back_flows`).
+    """
+
+    starts = [
+        nid for nid, n in schema.nodes.items() if n.type is NodeType.LOOP_START
+    ]
+    for index, start_id in enumerate(sorted(starts), start=1):
+        try:
+            end_id, _body = loop_block(schema, start_id)
+        except ValueError:  # pragma: no cover - K6a guards released schemas
+            continue
+        flow = ET.SubElement(
+            process,
+            f"{{{BPMN_NS}}}sequenceFlow",
+            {
+                "id": f"loopflow_{index}",
+                "sourceRef": end_id,
+                "targetRef": start_id,
+            },
+        )
+        decision = schema.loop_decisions.get(end_id)
+        if decision is None:  # pragma: no cover - K6b guards released schemas
+            continue
+        element = schema.data_elements.get(decision.discriminator)
+        caption = loop_condition_text(
+            element.name if element is not None else decision.discriminator,
+            decision,
+        )
+        condition = ET.SubElement(
+            flow,
+            f"{{{BPMN_NS}}}conditionExpression",
+            {f"{{{XSI_NS}}}type": "bpmn:tFormalExpression"},
+        )
+        condition.text = caption
+
+
+def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
+    """Round-trip the data layer BPMN cannot express (elements, accesses, K7/K6).
+
+    Standard BPMN only carries control flow; the structured XOR partition (K7),
+    the loop decisions (K6) and the typed discriminators live in a ProcWorks
+    extension so an exported document re-imports to the very same,
+    still-correct schema.
     """
 
     if not (
         schema.data_elements
         or schema.data_accesses
         or schema.xor_decisions
+        or schema.loop_decisions
         or schema.forms
         or schema.connectors
     ):
@@ -148,6 +223,9 @@ def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
         "data_accesses": [a.model_dump(mode="json") for a in schema.data_accesses],
         "xor_decisions": {
             nid: d.model_dump(mode="json") for nid, d in schema.xor_decisions.items()
+        },
+        "loop_decisions": {
+            nid: d.model_dump(mode="json") for nid, d in schema.loop_decisions.items()
         },
         "forms": {nid: f.model_dump(mode="json") for nid, f in schema.forms.items()},
         "connectors": {
@@ -272,17 +350,26 @@ def import_bpmn(
         else:
             raise BpmnError(f"unsupported BPMN element '{local}'")
 
-    indegree = {nid: 0 for nid in raw_nodes}
-    outdegree = {nid: 0 for nid in raw_nodes}
     for source, target, _ in flows:
         if source not in raw_nodes or target not in raw_nodes:
             raise BpmnError("sequenceFlow references an unknown flow node")
+
+    # Loop recognition must run before node-type resolution: after dropping a
+    # loop-back flow both gateways have in=1/out=1, which is neither a pure
+    # split nor a pure join.
+    flows, loop_roles = _split_loop_back_flows(raw_nodes, flows)
+
+    indegree = {nid: 0 for nid in raw_nodes}
+    outdegree = {nid: 0 for nid in raw_nodes}
+    for source, target, _ in flows:
         outdegree[source] += 1
         indegree[target] += 1
 
     nodes: dict[str, Node] = {}
     for node_id, (local, label) in raw_nodes.items():
-        node_type = _resolve_node_type(local, indegree[node_id], outdegree[node_id])
+        node_type = loop_roles.get(node_id) or _resolve_node_type(
+            local, indegree[node_id], outdegree[node_id]
+        )
         nodes[node_id] = Node(id=node_id, type=node_type, label=label)
 
     edges = [
@@ -295,6 +382,7 @@ def import_bpmn(
     }
     data_accesses = _DATA_ACCESSES.validate_python(model.get("data_accesses", []))
     xor_decisions = _XOR_DECISIONS.validate_python(model.get("xor_decisions", {}))
+    loop_decisions = _LOOP_DECISIONS.validate_python(model.get("loop_decisions", {}))
     forms = _FORMS.validate_python(model.get("forms", {}))
     connectors = _CONNECTORS.validate_python(model.get("connectors", {}))
     schema = ProcessSchema(
@@ -305,10 +393,85 @@ def import_bpmn(
         data_elements=data_elements,
         data_accesses=data_accesses,
         xor_decisions=xor_decisions,
+        loop_decisions=loop_decisions,
         forms=forms,
         connectors=connectors,
     )
     return raise_if_invalid(schema, resolver)
+
+
+def _split_loop_back_flows(
+    raw_nodes: dict[str, tuple[str, str]],
+    flows: list[tuple[str, str, str | None]],
+) -> tuple[list[tuple[str, str, str | None]], dict[str, NodeType]]:
+    """Recognise canonical loop-back flows and retype their gateway pair (K6).
+
+    A flow ``s -> t`` is a loop-back edge iff
+
+    * both endpoints are ``exclusiveGateway`` elements,
+    * ``s`` has in=1/out=2 (the loop end) and ``t`` has in=2/out=1 (the loop
+      start), and
+    * **without this flow, ``t`` still reaches ``s``** -- the body path from
+      the start down to the end. This reachability test is what tells a real
+      loop apart from an *empty XOR branch*: there the shape-identical
+      ``split -> join`` flow points forward, and the join can never reach the
+      split again in the remaining DAG.
+
+    Every recognised back flow is removed (the internal graph must stay
+    acyclic -- the loop-back is derived, never stored) and its endpoints are
+    pinned to LOOP_END/LOOP_START. Nested loops just yield several disjoint
+    pairs. The structured ``LoopDecision`` is *not* reconstructed here -- it
+    comes from the ProcWorks extension; a recognised loop without one fails
+    K6b in the validating import (never stored undecidable).
+    """
+
+    indegree = {nid: 0 for nid in raw_nodes}
+    outdegree = {nid: 0 for nid in raw_nodes}
+    for source, target, _ in flows:
+        outdegree[source] += 1
+        indegree[target] += 1
+
+    def is_exclusive(node_id: str) -> bool:
+        return raw_nodes[node_id][0] == "exclusiveGateway"
+
+    def reaches(origin: str, goal: str, skipped: tuple[str, str, str | None]) -> bool:
+        succ: dict[str, list[str]] = {}
+        for flow in flows:
+            if flow is skipped:
+                continue
+            succ.setdefault(flow[0], []).append(flow[1])
+        seen = {origin}
+        frontier = [origin]
+        while frontier:
+            current = frontier.pop()
+            if current == goal:
+                return True
+            for nxt in succ.get(current, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    frontier.append(nxt)
+        return False
+
+    loop_roles: dict[str, NodeType] = {}
+    kept: list[tuple[str, str, str | None]] = []
+    for flow in flows:
+        source, target, _condition = flow
+        if (
+            is_exclusive(source)
+            and is_exclusive(target)
+            and indegree[source] == 1
+            and outdegree[source] == 2
+            and indegree[target] == 2
+            and outdegree[target] == 1
+            and source not in loop_roles
+            and target not in loop_roles
+            and reaches(target, source, flow)
+        ):
+            loop_roles[source] = NodeType.LOOP_END
+            loop_roles[target] = NodeType.LOOP_START
+            continue  # drop the back flow -- it is derived, never stored
+        kept.append(flow)
+    return kept, loop_roles
 
 
 def _resolve_node_type(local: str, indegree: int, outdegree: int) -> NodeType:

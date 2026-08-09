@@ -11,7 +11,7 @@ every node COMPLETED or SKIPPED.
 from __future__ import annotations
 
 import pytest
-from staffing import staffed
+from staffing import TEST_AGENT_ID, staffed
 
 from procworks import (
     AccessMode,
@@ -82,9 +82,11 @@ def test_serial_run_completes() -> None:
     ready = worklist(instance, schema)
     assert len(ready) == 1
     first = ready[0]
-    instance = start_activity(instance, schema, first)
+    instance = start_activity(instance, schema, first, TEST_AGENT_ID)
     assert instance.node_states[first] is NodeState.RUNNING
-    instance = complete_activity(instance, schema, first)
+    # Starting claims the step (E1, W4) -- completing it now requires the
+    # owner's identity; an anonymous completion would be refused (W2).
+    instance = complete_activity(instance, schema, first, agent_id=TEST_AGENT_ID)
 
     ready = worklist(instance, schema)
     assert len(ready) == 1
@@ -174,7 +176,7 @@ def test_start_non_activated_activity_fails() -> None:
         and schema.nodes[nid].type is NodeType.ACTIVITY
     )
     with pytest.raises(ExecutionError):
-        start_activity(instance, schema, not_ready)
+        start_activity(instance, schema, not_ready, TEST_AGENT_ID)
 
 
 def test_missing_discriminator_value_raises() -> None:
@@ -183,6 +185,6 @@ def test_missing_discriminator_value_raises() -> None:
     instance = instantiate(schema)
     # completing the writing step without supplying the discriminator leaves the
     # split unable to resolve -> a runtime error (never a silent deadlock).
-    instance = start_activity(instance, schema, erfassen)
+    instance = start_activity(instance, schema, erfassen, TEST_AGENT_ID)
     with pytest.raises(ExecutionError):
         complete_activity(instance, schema, erfassen)

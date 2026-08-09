@@ -10,13 +10,14 @@ satisfies the structural correctness invariant.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from pydantic import BaseModel
 
 from procworks.conditions import ConditionError, referenced_names
 from procworks.model import (
     JOIN_TYPES,
+    LOOP_TYPES,
     READ_MODES,
     SPLIT_JOIN_PAIR,
     SPLIT_TYPES,
@@ -30,6 +31,7 @@ from procworks.model import (
     Cardinality,
     DataSourceKind,
     DataType,
+    EscalationKind,
     FilterOperator,
     FollowUpTrigger,
     LifecycleState,
@@ -37,6 +39,7 @@ from procworks.model import (
     MailRecipientMode,
     NodeType,
     OrgModel,
+    PartitionCell,
     ProcessSchema,
     ServiceBinding,
     SqlSelectBinding,
@@ -44,14 +47,15 @@ from procworks.model import (
     StaffRuleKind,
     SubProcessBinding,
     WidgetKind,
-    XorDecision,
     XorDecisionKind,
     aggregate_result_type,
     discriminator_kind,
     is_valid_email,
+    loop_block,
     template_placeholders,
     widget_matches_type,
 )
+from procworks.worklist_priority import target_seconds
 
 #: Resolves a (schema id, version) reference to a schema, or ``None`` if the
 #: version is ``None`` it resolves the latest known schema for that id. Used by
@@ -78,7 +82,7 @@ class CorrectnessError(Exception):
 def validate(
     schema: ProcessSchema, resolver: SchemaResolver | None = None
 ) -> list[ValidationFinding]:
-    """Run structural rules K1-K3, data-flow D1-D4, resource rules Z1-Z4,
+    """Run structural rules K1-K3/K6/K7, data-flow D1-D4, resource rules Z1-Z4,
     activity-repository rules A1-A3, composition rules H1-H4/F1-F4, the
     integration rules I1-I4, the temporal rules T1-T2 and the input-mask rules
     U1-U3.
@@ -98,6 +102,7 @@ def validate(
     findings: list[ValidationFinding] = []
     findings += _check_k2_endpoints_and_degrees(schema)
     findings += _check_k1_gateways(schema)
+    findings += _check_k6_loops(schema)
     findings += _check_k7_xor_decisions(schema)
     findings += _check_k3_reachability(schema)
     findings += _check_data_flow(schema)
@@ -109,6 +114,7 @@ def validate(
     findings += _check_integration(schema)
     findings += _check_composition(schema, resolver)
     findings += _check_temporal(schema)
+    findings += _check_t3_escalations(schema)
     findings += _check_mail(schema)
     return findings
 
@@ -222,6 +228,12 @@ def _check_k2_endpoints_and_degrees(schema: ProcessSchema) -> list[ValidationFin
             if ind < 2 or outd != 1:
                 msg = f"{node.type.value} must have in>=2, out=1"
                 findings.append(_deg(node.id, msg, ind, outd))
+        elif node.type in LOOP_TYPES:
+            # Loop delimiters are serial nodes on the stored (acyclic) graph;
+            # the back edge is implicit in the K6 pairing, never a stored edge.
+            if ind != 1 or outd != 1:
+                msg = f"{node.type.value} must have in=1, out=1"
+                findings.append(_deg(node.id, msg, ind, outd))
 
     return findings
 
@@ -249,6 +261,192 @@ def _check_k1_gateways(schema: ProcessSchema) -> list[ValidationFinding]:
                 )
             )
     return findings
+
+
+# --- K6: structured REPEAT-UNTIL loops ------------------------------------
+
+
+def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
+    """K6: loops are properly paired and decidable per iteration.
+
+    Fully additive -- a schema without LOOP nodes produces no findings. The
+    sub-rules (Schleifen-Konzept §4):
+
+    - K6a: LOOP_START/LOOP_END occur only as properly nested pairs.
+    - K6b: every LOOP_END carries exactly one ``LoopDecision`` over an
+      existing BOOLEAN INSTANCE element; no stale decisions elsewhere.
+    - K6c: the discriminator is mandatorily written on **every** path through
+      the loop body, so each iteration decides on fresh data (D1-analog,
+      block-local must-write analysis).
+    - K6d: the body is non-empty (an empty loop is meaningless).
+
+    The former stage-S1 restriction K6e (no SUBPROCESS / automatic activity in
+    the body) was lifted in stage S3: the loop reset clears the body's
+    child-instance links so a repeated SUBPROCESS spawns a fresh child, and the
+    external-task machinery is iteration-safe by construction (an *open* task
+    keeps its step uncompleted, so no open task can ever cross a reset, while a
+    COMPLETED one does not block re-materialisation).
+    """
+
+    findings: list[ValidationFinding] = []
+
+    def fail(message: str, node_id: str | None = None) -> None:
+        findings.append(ValidationFinding(rule="K6", node_id=node_id, message=message))
+
+    starts = [n.id for n in schema.nodes.values() if n.type is NodeType.LOOP_START]
+    ends = {n.id for n in schema.nodes.values() if n.type is NodeType.LOOP_END}
+    if not starts and not ends and not schema.loop_decisions:
+        return findings
+
+    for node_id in schema.loop_decisions:
+        node = schema.nodes.get(node_id)
+        if node is None or node.type is not NodeType.LOOP_END:
+            fail("loop decision references a node that is not a LOOP_END", node_id)
+
+    if len(starts) != len(ends):
+        fail(f"unbalanced loops: {len(starts)} x LOOP_START vs {len(ends)} x LOOP_END")
+
+    claimed: dict[str, str] = {}
+    for start_id in starts:
+        try:
+            end_id, body = loop_block(schema, start_id)
+        except ValueError:
+            fail("LOOP_START has no matching LOOP_END", start_id)
+            continue
+        if end_id in claimed:
+            fail(
+                f"LOOP_END '{end_id}' is claimed by two loop starts "
+                f"('{claimed[end_id]}' and '{start_id}')",
+                end_id,
+            )
+            continue
+        claimed[end_id] = start_id
+        findings += _check_single_loop(schema, start_id, end_id, body)
+
+    for end_id in ends - set(claimed):
+        fail("LOOP_END has no matching LOOP_START", end_id)
+
+    return findings
+
+
+def _check_single_loop(
+    schema: ProcessSchema, start_id: str, end_id: str, body: set[str]
+) -> list[ValidationFinding]:
+    """K6b-K6d for one paired loop block (see :func:`_check_k6_loops`)."""
+
+    findings: list[ValidationFinding] = []
+
+    def fail(message: str, node_id: str | None = None) -> None:
+        findings.append(ValidationFinding(rule="K6", node_id=node_id, message=message))
+
+    if not body:
+        fail("loop body is empty (K6d)", start_id)
+        return findings
+
+    decision = schema.loop_decisions.get(end_id)
+    if decision is None:
+        fail("LOOP_END has no loop decision (K6b)", end_id)
+        return findings
+    element = schema.data_elements.get(decision.discriminator)
+    if element is None:
+        fail(
+            f"loop discriminator '{decision.discriminator}' does not exist (K6b)",
+            end_id,
+        )
+        return findings
+    if element.source is not DataSourceKind.INSTANCE:
+        fail(
+            f"loop discriminator '{element.name}' must be an INSTANCE element (K6b)",
+            end_id,
+        )
+    if not decision.cells:
+        # Boolean shorthand (stage S1): repeat while value == repeat_value.
+        if element.data_type is not DataType.BOOLEAN:
+            fail(
+                f"loop discriminator '{element.name}' must be BOOLEAN "
+                f"(is {element.data_type.value}; K6b)",
+                end_id,
+            )
+        if decision.kind is not XorDecisionKind.BOOLEAN:
+            fail("a loop decision without cells must be of kind BOOLEAN (K6b)", end_id)
+    else:
+        # Partitioned decision (stage S3): the cells must tile the domain like
+        # a K7 partition and classify it into at least one repeat and one exit
+        # cell -- otherwise the loop could never terminate (all repeat) or
+        # never repeat (all exit), both of which K6 rejects by construction.
+        expected_kind = discriminator_kind(element.data_type)
+        if expected_kind is None:
+            fail(
+                f"data type {element.data_type.value} cannot be used as a "
+                "loop discriminator (K6b)",
+                end_id,
+            )
+        elif expected_kind is not decision.kind:
+            fail(
+                f"loop decision kind {decision.kind.value} does not match "
+                f"discriminator type {element.data_type.value} (K6b)",
+                end_id,
+            )
+        _check_partition(end_id, decision.kind, decision.cells, fail, noun="loop")
+        if all(cell.repeat for cell in decision.cells):
+            fail("a loop partition needs at least one exit cell (K6b)", end_id)
+        if all(not cell.repeat for cell in decision.cells):
+            fail("a loop partition needs at least one repeat cell (K6b)", end_id)
+
+    if decision.max_iterations is not None and decision.max_iterations < 2:
+        # A bound of 1 (or less) would forbid every repetition -- the loop
+        # would be pure ballast, which K6 rejects like an empty body (K6d).
+        fail(
+            f"max_iterations must allow at least one repetition (>= 2), "
+            f"got {decision.max_iterations} (K6b)",
+            end_id,
+        )
+
+    if decision.discriminator not in _written_through_body(schema, start_id, end_id, body):
+        fail(
+            f"loop discriminator '{element.name}' is not written on every path "
+            f"through the loop body (K6c)",
+            end_id,
+        )
+    return findings
+
+
+def _written_through_body(
+    schema: ProcessSchema, start_id: str, end_id: str, body: set[str]
+) -> set[str]:
+    """Elements guaranteed written on all paths from LOOP_START to LOOP_END.
+
+    Block-local variant of :func:`_must_written_before`: the analysis is seeded
+    empty at the loop start, so only writes *inside* the body count -- exactly
+    the K6c requirement that every iteration re-decides on fresh data. Same
+    join semantics as the global analysis (AND_JOIN unions, everything else
+    intersects).
+    """
+
+    mandatory_writes: dict[str, set[str]] = {}
+    for access in schema.data_accesses:
+        if access.mode in WRITE_MODES and access.mandatory:
+            mandatory_writes.setdefault(access.node_id, set()).add(access.element_id)
+
+    block = body | {start_id, end_id}
+    available_after: dict[str, set[str]] = {start_id: set()}
+    for node_id in _topological_order(schema):
+        if node_id not in block or node_id == start_id:
+            continue
+        preds = [
+            e.source for e in schema.incoming(node_id) if e.source in block
+        ]
+        contributions = [available_after.get(p, set()) for p in preds]
+        if not contributions:
+            guaranteed: set[str] = set()
+        elif schema.nodes[node_id].type is NodeType.AND_JOIN:
+            guaranteed = set().union(*contributions)
+        else:
+            guaranteed = set(contributions[0]).intersection(*contributions[1:])
+        if node_id == end_id:
+            return guaranteed
+        available_after[node_id] = guaranteed | mandatory_writes.get(node_id, set())
+    return set()
 
 
 # --- K7: complete, overlap-free XOR branch partitions ---------------------
@@ -338,52 +536,60 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
                 split_id,
             )
 
-        _check_partition(split_id, decision, fail)
+        _check_partition(split_id, decision.kind, decision.branches, fail)
 
     return findings
 
 
 def _check_partition(
-    split_id: str,
-    decision: XorDecision,
+    node_id: str,
+    kind: XorDecisionKind,
+    cells: Sequence[PartitionCell],
     fail: Callable[[str, str | None], None],
+    *,
+    noun: str = "split",
 ) -> None:
-    """Check that ``decision`` tiles its discriminator's domain (total+disjoint)."""
+    """Check that ``cells`` tile the discriminator's domain (total + disjoint).
 
-    if decision.kind is XorDecisionKind.THRESHOLD:
-        last = len(decision.branches) - 1
+    Shared partition wellformedness for XOR branches (K7) and loop repeat/exit
+    cells (K6b) -- both carry the same cell shape (:class:`PartitionCell`).
+    ``noun`` only flavours the finding texts ("split" vs. "loop").
+    """
+
+    if kind is XorDecisionKind.THRESHOLD:
+        last = len(cells) - 1
         prev: float | None = None
-        for i, branch in enumerate(decision.branches):
+        for i, cell in enumerate(cells):
             if i == last:
-                if branch.upper is not None:
-                    fail("the last threshold branch must be unbounded (+inf)", split_id)
-            elif branch.upper is None:
-                fail("only the last threshold branch may be unbounded", split_id)
+                if cell.upper is not None:
+                    fail("the last threshold branch must be unbounded (+inf)", node_id)
+            elif cell.upper is None:
+                fail("only the last threshold branch may be unbounded", node_id)
             else:
-                if prev is not None and branch.upper <= prev:
-                    fail("threshold bounds must be strictly ascending", split_id)
-                prev = branch.upper
-    elif decision.kind is XorDecisionKind.BOOLEAN:
-        if len(decision.branches) != 2:
-            fail("a boolean split must have exactly two branches", split_id)
-        truths = {b.bool_value for b in decision.branches}
+                if prev is not None and cell.upper <= prev:
+                    fail("threshold bounds must be strictly ascending", node_id)
+                prev = cell.upper
+    elif kind is XorDecisionKind.BOOLEAN:
+        if len(cells) != 2:
+            fail(f"a boolean {noun} must have exactly two branches", node_id)
+        truths = {c.bool_value for c in cells}
         if truths != {True, False}:
-            fail("boolean branches must cover both true and false exactly once", split_id)
+            fail("boolean branches must cover both true and false exactly once", node_id)
     else:  # ENUM
-        else_count = sum(1 for b in decision.branches if b.is_else)
+        else_count = sum(1 for c in cells if c.is_else)
         if else_count != 1:
-            fail("an enum split must have exactly one catch-all (otherwise) branch", split_id)
+            fail(f"an enum {noun} must have exactly one catch-all (otherwise) branch", node_id)
         seen: set[str] = set()
-        for branch in decision.branches:
-            if branch.is_else:
-                if branch.values:
-                    fail("the catch-all branch must not list values", split_id)
+        for cell in cells:
+            if cell.is_else:
+                if cell.values:
+                    fail("the catch-all branch must not list values", node_id)
                 continue
-            if not branch.values:
-                fail("each enum branch must list at least one value", split_id)
-            for value in branch.values:
+            if not cell.values:
+                fail("each enum branch must list at least one value", node_id)
+            for value in cell.values:
                 if value in seen:
-                    fail(f"enum value {value!r} is matched by more than one branch", split_id)
+                    fail(f"enum value {value!r} is matched by more than one branch", node_id)
                 seen.add(value)
 
 
@@ -1748,6 +1954,80 @@ def _check_no_inline_secret(
     return []
 
 
+def _check_t3_escalations(schema: ProcessSchema) -> list[ValidationFinding]:
+    """T3: every modelled overdue reaction is well-formed and decidable.
+
+    Fully additive -- a schema without escalation policies produces no
+    findings (Eskalations-Konzept §3):
+
+    - T3a: the policy sits on an existing, *interactive* ACTIVITY with a
+      resolvable target time (otherwise the due instant -- and thus every
+      stage's trigger -- would be undefined).
+    - T3b: at least one stage; offsets >= 0 and strictly ascending.
+    - T3c: every stage rule is structurally well-formed (Z1-checked), free of
+      node-referencing kinds (an escalation targets a role/unit, never a
+      relative performer) and resolves to at least one possible agent
+      (Z2-analog over the design-time over-approximation).
+    """
+
+    findings: list[ValidationFinding] = []
+
+    def fail(message: str, node_id: str) -> None:
+        findings.append(ValidationFinding(rule="T3", node_id=node_id, message=message))
+
+    for node_id, policy in schema.escalation_policies.items():
+        node = schema.nodes.get(node_id)
+        if node is None or node.type is not NodeType.ACTIVITY:
+            fail("escalation policy must sit on an ACTIVITY node (T3a)", node_id)
+            continue
+        binding = schema.service_bindings.get(node_id)
+        if binding is not None and binding.automatic:
+            fail(
+                "an automatic activity cannot carry an escalation policy "
+                "(incidents/retries cover machines; T3a)",
+                node_id,
+            )
+        if target_seconds(schema.time_constraints.get(node_id)) is None:
+            fail(
+                "escalation requires a resolvable target time on the node "
+                "(target_lead_seconds or max_duration_seconds; T3a)",
+                node_id,
+            )
+        if not policy.stages:
+            fail("escalation policy needs at least one stage (T3b)", node_id)
+        previous: float | None = None
+        for stage in policy.stages:
+            if stage.after_seconds < 0:
+                fail("stage offset must be >= 0 seconds (T3b)", node_id)
+            if previous is not None and stage.after_seconds <= previous:
+                fail("stage offsets must be strictly ascending (T3b)", node_id)
+            previous = stage.after_seconds
+            findings += _check_staff_rule_node(schema, node_id, stage.rule)
+            if _contains_node_ref(stage.rule):
+                fail(
+                    "escalation targets must not use node-referencing staff "
+                    "rule kinds (T3c)",
+                    node_id,
+                )
+                continue
+            possible = _possible_agents(schema.org_model, stage.rule)
+            if possible is not None and not possible:
+                fail(
+                    "escalation target cannot resolve to any agent in the "
+                    "org model (T3c)",
+                    node_id,
+                )
+    return findings
+
+
+def _contains_node_ref(rule: StaffRule) -> bool:
+    """True when a rule tree uses a node-referencing kind (forbidden in T3c)."""
+
+    if rule.kind in STAFF_NODE_REF_KINDS:
+        return True
+    return any(_contains_node_ref(op) for op in rule.operands)
+
+
 def _check_z2_resolvable(schema: ProcessSchema) -> list[ValidationFinding]:
     """Z2: each staff rule can potentially resolve to at least one agent."""
 
@@ -1968,19 +2248,42 @@ def _check_mail_binding(
                 ),
             )
         ]
-    findings = _check_n3_addresses(schema.org_model, node_id, binding, rule)
+    policy = schema.escalation_policies.get(node_id)
+    functional_rules = [
+        stage.rule
+        for stage in (policy.stages if policy is not None else [])
+        if stage.kind is EscalationKind.FUNCTIONAL
+    ]
+    findings = _check_n3_addresses(
+        schema.org_model, node_id, binding, rule, extra_rules=functional_rules
+    )
     findings += _check_n4_template(schema, node_id, binding, before)
     return findings
 
 
 def _check_n3_addresses(
-    org: OrgModel, node_id: str, binding: MailBinding, rule: StaffRule
+    org: OrgModel,
+    node_id: str,
+    binding: MailBinding,
+    rule: StaffRule,
+    *,
+    extra_rules: Sequence[StaffRule] = (),
 ) -> list[ValidationFinding]:
-    """N3: every address the binding could ever need is present in the org."""
+    """N3: every address the binding could ever need is present in the org.
+
+    ``extra_rules`` are additional *possible performer* sets beyond the staff
+    rule -- today the FUNCTIONAL escalation stage targets (T3/E9): any stage
+    may fire, so its agents are possible recipients of the task notification
+    and must be addressable too.
+    """
 
     findings: list[ValidationFinding] = []
     if binding.mode is MailRecipientMode.TO_ELIGIBLE_AGENTS:
         possible = _possible_agents(org, rule)
+        for extra in extra_rules:
+            extra_possible = _possible_agents(org, extra)
+            if possible is not None and extra_possible is not None:
+                possible = set(possible) | extra_possible
         if possible is None:
             # The rule depends on a prior node's performer (universe); the
             # recipient set is not statically bounded, so we cannot guarantee
@@ -2529,6 +2832,13 @@ def _critical_path_seconds(schema: ProcessSchema) -> float | None:
 
     Returns ``None`` if the control graph is not a well-formed DAG (e.g. during
     incremental construction); the structural rules cover those cases instead.
+
+    Loop-aware (stage S3): a loop whose decision carries ``max_iterations``
+    charges its body ``max_iterations`` times -- the extra passes are folded
+    into the LOOP_END's duration (:func:`_loop_time_extras`), so the plain
+    one-pass DAG walk below stays correct. A loop without the bound keeps the
+    documented one-pass approximation (a deadline over such a loop is a
+    promise for the run without repetition, Schleifen-Konzept §7).
     """
 
     nodes = schema.nodes
@@ -2541,11 +2851,14 @@ def _critical_path_seconds(schema: ProcessSchema) -> float | None:
             succ[edge.source].append(edge.target)
             indegree[edge.target] += 1
 
+    extras = _loop_time_extras(schema)
+
     def duration(node_id: str) -> float:
         constraint = schema.time_constraints.get(node_id)
-        if constraint is None or constraint.max_duration_seconds is None:
-            return 0.0
-        return constraint.max_duration_seconds
+        base = 0.0
+        if constraint is not None and constraint.max_duration_seconds is not None:
+            base = constraint.max_duration_seconds
+        return base + extras.get(node_id, 0.0)
 
     complete: dict[str, float] = {}
     queue: deque[str] = deque(nid for nid, deg in indegree.items() if deg == 0)
@@ -2562,3 +2875,58 @@ def _critical_path_seconds(schema: ProcessSchema) -> float | None:
     if visited != len(nodes):  # a cycle -> not a DAG, leave to structural rules
         return None
     return max(complete.values(), default=0.0)
+
+
+def _loop_time_extras(schema: ProcessSchema) -> dict[str, float]:
+    """Extra seconds charged to each LOOP_END for its bounded repetitions (T2).
+
+    For every loop whose decision carries ``max_iterations`` = m, the longest
+    internal path through the block (LOOP_START to LOOP_END) is charged
+    ``(m - 1)`` additional times onto the LOOP_END. Blocks are processed
+    innermost-first (smaller bodies first), so a nested bounded loop's extra
+    is already part of the enclosing block's internal path and multiplies
+    correctly. Loops without the bound contribute nothing (one-pass
+    approximation preserved).
+    """
+
+    blocks: list[tuple[int, str, str, set[str]]] = []
+    for nid, node in schema.nodes.items():
+        if node.type is not NodeType.LOOP_START:
+            continue
+        try:
+            end_id, body = loop_block(schema, nid)
+        except ValueError:
+            continue  # unpaired start -> K6a reports it, no time charge
+        blocks.append((len(body), nid, end_id, body))
+
+    extras: dict[str, float] = {}
+    for _, start_id, end_id, body in sorted(blocks, key=lambda b: b[0]):
+        decision = schema.loop_decisions.get(end_id)
+        if decision is None or decision.max_iterations is None:
+            continue
+        if decision.max_iterations < 2:
+            continue  # ill-formed bound -> K6b reports it, no time charge
+
+        def duration(node_id: str) -> float:
+            constraint = schema.time_constraints.get(node_id)
+            base = 0.0
+            if constraint is not None and constraint.max_duration_seconds is not None:
+                base = constraint.max_duration_seconds
+            return base + extras.get(node_id, 0.0)
+
+        block = body | {start_id, end_id}
+        longest: dict[str, float] = {start_id: duration(start_id)}
+        for node_id in _topological_order(schema):
+            if node_id not in block or node_id == start_id:
+                continue
+            preds = [
+                e.source for e in schema.incoming(node_id) if e.source in block
+            ]
+            best = max(
+                (longest.get(p, 0.0) for p in preds), default=0.0
+            )
+            longest[node_id] = best + duration(node_id)
+        extras[end_id] = extras.get(end_id, 0.0) + (
+            decision.max_iterations - 1
+        ) * longest.get(end_id, 0.0)
+    return extras

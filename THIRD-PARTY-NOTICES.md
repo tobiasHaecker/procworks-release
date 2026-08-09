@@ -27,7 +27,6 @@ follow each project's own published metadata at the time of writing.
 | python-dotenv (via uvicorn extra) | BSD-3-Clause | env loading |
 | watchfiles (via uvicorn extra) | MIT | reload watcher |
 | PyYAML (via uvicorn extra) | MIT | config parsing |
-| NetworkX | BSD-3-Clause | reachability (K3), cycle checks (H3) |
 | SQLAlchemy | MIT | persistence (optional) |
 | anyio / sniffio | MIT / (MIT or Apache-2.0) | async runtime |
 | h11 | MIT | HTTP/1.1 |

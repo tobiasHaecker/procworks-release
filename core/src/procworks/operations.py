@@ -14,6 +14,7 @@ Correctness by Construction in practice.
 from __future__ import annotations
 
 import itertools
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -33,6 +34,7 @@ from procworks.model import (
     DataElement,
     DataSourceKind,
     DataType,
+    EscalationPolicy,
     ExecutorKind,
     ExternalBinding,
     FollowUpLink,
@@ -41,6 +43,8 @@ from procworks.model import (
     Form,
     FormField,
     LifecycleState,
+    LoopCell,
+    LoopDecision,
     MailBinding,
     Node,
     NodeType,
@@ -65,6 +69,7 @@ from procworks.model import (
     XorBranch,
     XorDecision,
     discriminator_kind,
+    loop_block,
     xor_condition_text,
 )
 from procworks.validator import (
@@ -358,6 +363,209 @@ def _insert_block(
     return raise_if_invalid(candidate)
 
 
+def _build_loop_decision(
+    schema: ProcessSchema,
+    discriminator: str,
+    repeat_value: bool,
+    cells: Sequence[LoopCell] | None,
+    max_iterations: int | None,
+) -> LoopDecision:
+    """Assemble a :class:`LoopDecision` from operation arguments (K6b).
+
+    Shared by :func:`insert_loop` and :func:`set_loop_decision`. Without
+    ``cells`` the boolean S1 shorthand is built (the discriminator must be a
+    BOOLEAN INSTANCE element); with ``cells`` the S3 repeat/exit partition is
+    built and the kind derives from the element's type -- wellformedness of the
+    partition itself is the validator's job (K6b, validate-before-commit).
+    """
+
+    element = schema.data_elements.get(discriminator)
+    if element is None:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"loop discriminator '{discriminator}' does not exist",
+                )
+            ]
+        )
+    if element.source is not DataSourceKind.INSTANCE:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=(
+                        f"loop discriminator '{element.name}' must be an "
+                        "INSTANCE element"
+                    ),
+                )
+            ]
+        )
+    if not cells:
+        if element.data_type is not DataType.BOOLEAN:
+            raise CorrectnessError(
+                [
+                    ValidationFinding(
+                        rule="OP",
+                        message=(
+                            f"loop discriminator '{element.name}' must be BOOLEAN "
+                            "unless repeat/exit cells are given"
+                        ),
+                    )
+                ]
+            )
+        return LoopDecision(
+            discriminator=discriminator,
+            repeat_value=repeat_value,
+            max_iterations=max_iterations,
+        )
+    kind = discriminator_kind(element.data_type)
+    if kind is None:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=(
+                        f"data type {element.data_type.value} cannot be used "
+                        "as a loop discriminator"
+                    ),
+                )
+            ]
+        )
+    return LoopDecision(
+        discriminator=discriminator,
+        kind=kind,
+        cells=[cell.model_copy(deep=True) for cell in cells],
+        max_iterations=max_iterations,
+    )
+
+
+def insert_loop(
+    schema: ProcessSchema,
+    after_node_id: str,
+    body_label: str,
+    *,
+    discriminator: str,
+    repeat_value: bool = True,
+    cells: Sequence[LoopCell] | None = None,
+    max_iterations: int | None = None,
+) -> ProcessSchema:
+    """Insert a REPEAT-UNTIL loop block after the anchor (K6).
+
+    ``max_iterations`` (optional) caps the total number of body runs as a
+    deterministic hard brake and makes the T2 critical path charge the body
+    that many times; at least 2 when set (K6b).
+
+    Builds ``LOOP_START -> body activity -> LOOP_END`` on the anchor's outgoing
+    edge and stores the structured :class:`LoopDecision` on the LOOP_END.
+    Without ``cells`` the boolean shorthand applies: when the BOOLEAN
+    ``discriminator`` equals ``repeat_value`` at the loop end, the body runs
+    again, otherwise the flow leaves the block. With ``cells`` (stage S3) the
+    discriminator may be any partitionable type (INTEGER/FLOAT -> THRESHOLD,
+    BOOLEAN, STRING -> ENUM) and the cells classify its domain into repeat and
+    exit -- same wellformedness as a K7 partition, plus at least one cell of
+    each class (K6b). The loop-back edge is **not stored** -- it derives from
+    the K6 pairing, keeping the graph acyclic.
+
+    Automatic structure completion (the loop brings its decidability along):
+    the fresh body activity receives a mandatory WRITE access on the
+    discriminator, because K6c demands a write on every body path and an empty
+    body write-set would make the operation unusable. The modeller may later
+    relocate that write onto another body node; only removing it without a
+    replacement is rejected (K6c).
+
+    requires: schema editable (R0); anchor exists, is not END and has exactly
+              one outgoing edge; ``discriminator`` is an existing INSTANCE
+              data element (BOOLEAN without ``cells``, any partitionable type
+              with ``cells``).
+    ensures:  a properly paired, decidable, non-empty loop block sits on the
+              anchor's outgoing edge; the full rule catalogue holds
+              (validate-before-commit).
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    anchor = _require_node(candidate, after_node_id)
+    if anchor.type is NodeType.END:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP", node_id=after_node_id, message="cannot insert after END"
+                )
+            ]
+        )
+    decision = _build_loop_decision(
+        candidate, discriminator, repeat_value, cells, max_iterations
+    )
+    edge = _single_outgoing(candidate, after_node_id)
+    successor_id = edge.target
+
+    loop_start = Node(id=_new_id("loop"), type=NodeType.LOOP_START, label="Wiederholen")
+    body = Node(id=_new_id("act"), type=NodeType.ACTIVITY, label=body_label)
+    loop_end = Node(id=_new_id("loopend"), type=NodeType.LOOP_END, label="Bis erfüllt")
+    candidate.nodes[loop_start.id] = loop_start
+    candidate.nodes[body.id] = body
+    candidate.nodes[loop_end.id] = loop_end
+    candidate.edges.remove(edge)
+    candidate.edges.append(ControlEdge(source=after_node_id, target=loop_start.id))
+    candidate.edges.append(ControlEdge(source=loop_start.id, target=body.id))
+    candidate.edges.append(ControlEdge(source=body.id, target=loop_end.id))
+    candidate.edges.append(ControlEdge(source=loop_end.id, target=successor_id))
+    candidate.loop_decisions[loop_end.id] = decision
+    candidate.data_accesses.append(
+        DataAccess(
+            node_id=body.id,
+            element_id=discriminator,
+            mode=AccessMode.WRITE,
+            mandatory=True,
+        )
+    )
+    return raise_if_invalid(candidate)
+
+
+def set_loop_decision(
+    schema: ProcessSchema,
+    loop_end_id: str,
+    *,
+    discriminator: str,
+    repeat_value: bool = True,
+    cells: Sequence[LoopCell] | None = None,
+    max_iterations: int | None = None,
+) -> ProcessSchema:
+    """Replace the exit condition of an existing loop (K6b).
+
+    Lets the modeller retarget the decision to another discriminator, flip the
+    boolean shorthand, switch between the shorthand and an S3 repeat/exit
+    partition, or set/clear the ``max_iterations`` hard brake -- without
+    rebuilding the loop. The body must (still) write the new discriminator on
+    every path; otherwise K6c rejects the change and the schema stays
+    untouched (validate-before-commit).
+
+    requires: schema editable (R0); ``loop_end_id`` is a LOOP_END node;
+              ``discriminator`` as in :func:`insert_loop`.
+    ensures:  the LOOP_END carries the new decision and the full rule
+              catalogue holds.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    node = _require_node(candidate, loop_end_id)
+    if node.type is not NodeType.LOOP_END:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=loop_end_id,
+                    message="a loop decision can only be set on a LOOP_END node",
+                )
+            ]
+        )
+    candidate.loop_decisions[loop_end_id] = _build_loop_decision(
+        candidate, discriminator, repeat_value, cells, max_iterations
+    )
+    return raise_if_invalid(candidate)
+
+
 def rename_node(schema: ProcessSchema, node_id: str, label: str) -> ProcessSchema:
     """Change the label of an ACTIVITY or SUBPROCESS node.
 
@@ -382,6 +590,172 @@ def rename_node(schema: ProcessSchema, node_id: str, label: str) -> ProcessSchem
             ]
         )
     node.label = label
+    return raise_if_invalid(candidate)
+
+
+def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> ProcessSchema:
+    """Move an existing ACTIVITY/SUBPROCESS to a new serial position.
+
+    Unlike delete + re-insert, the node travels with **all** its bindings
+    (data accesses, staff rule, service binding, form, mail binding, time
+    constraint, priority, value class) -- they hang off the node id, which is
+    preserved. Structurally the node is spliced out of its current position
+    (predecessor reconnected to successor) and spliced back in between
+    ``after_node_id`` and that anchor's successor: the serial mechanics of
+    :func:`delete_node` and :func:`serial_insert` composed into one atomic,
+    validated operation.
+
+    requires: schema editable (R0); node exists and is an ACTIVITY or
+              SUBPROCESS on a serial stretch (one in/one out); the anchor
+              exists, is not END, is not the node itself and -- after the
+              splice-out -- has exactly one outgoing edge (so a split can never
+              be an anchor). Moving the sole node of an **AND** branch is
+              rejected (an empty parallel branch is meaningless; delete it or
+              grow the branch first).
+    ensures:  the node sits between the anchor and the anchor's former
+              successor. Moving the sole node of an **XOR** branch leaves the
+              branch standing **empty** (direct ``split -> join`` edge keeping
+              its K7 cell) -- exactly the :func:`delete_node` semantics -- and
+              is subject to the same one-empty-branch cap. If the node opened a
+              (longer) XOR branch, the branch's partition cell is retargeted to
+              the node's former successor and the derived edge captions are
+              refreshed. The full rule catalogue re-validates before commit:
+              a move that would let a reader run before its writer (D1), break
+              a staff-rule back-reference (Z3), reorder a time-critical path
+              (T2) or orphan a mail placeholder (N4) is rejected with localised
+              findings and the schema stays unchanged. Moving a node directly
+              behind its current predecessor is an allowed no-op.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    node = _require_node(candidate, node_id)
+    if node.type not in (NodeType.ACTIVITY, NodeType.SUBPROCESS):
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message="only ACTIVITY or SUBPROCESS nodes can be moved",
+                )
+            ]
+        )
+    if node_id == after_node_id:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message="cannot move a node after itself",
+                )
+            ]
+        )
+    anchor = _require_node(candidate, after_node_id)
+    if anchor.type is NodeType.END:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP", node_id=after_node_id, message="cannot insert after END"
+                )
+            ]
+        )
+
+    incoming = candidate.incoming(node_id)
+    outgoing = candidate.outgoing(node_id)
+    if len(incoming) != 1 or len(outgoing) != 1:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message=(
+                        f"node '{node_id}' is not on a serial stretch (one in/one out)"
+                    ),
+                )
+            ]
+        )
+    predecessor_id = incoming[0].source
+    successor_id = outgoing[0].target
+    pred_type = candidate.nodes[predecessor_id].type
+    if (
+        pred_type is NodeType.LOOP_START
+        and candidate.nodes[successor_id].type is NodeType.LOOP_END
+    ):
+        # Sole content of a loop body: moving it out would leave an empty loop
+        # (meaningless, K6d). Mirrors the AND-branch rule.
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message=(
+                        "cannot move the sole node of a loop body; "
+                        "delete the loop or add another node first"
+                    ),
+                )
+            ]
+        )
+
+    # Splice out. Three cases for the gap left behind, mirroring delete_node:
+    # sole content of an AND branch (rejected), sole content of an XOR branch
+    # (branch stays standing but empty, keeping its K7 cell), or a plain serial
+    # stretch (predecessor reconnected to successor).
+    sole_branch_content = False
+    if pred_type in SPLIT_TYPES and candidate.nodes[successor_id].type in JOIN_TYPES:
+        join_id, _ = _matching_block(candidate, predecessor_id)
+        sole_branch_content = join_id == successor_id
+    decision = candidate.xor_decisions.get(predecessor_id)
+    if sole_branch_content:
+        if pred_type is not NodeType.XOR_SPLIT:
+            raise CorrectnessError(
+                [
+                    ValidationFinding(
+                        rule="OP",
+                        node_id=node_id,
+                        message=(
+                            "cannot move the sole node of a parallel branch; "
+                            "delete the branch or add another node first"
+                        ),
+                    )
+                ]
+            )
+        if decision is not None and any(
+            b.target == successor_id for b in decision.branches
+        ):
+            raise CorrectnessError(
+                [
+                    ValidationFinding(
+                        rule="OP",
+                        node_id=predecessor_id,
+                        message=(
+                            "an XOR split must keep at least one non-empty branch; "
+                            "remove the whole branch block instead"
+                        ),
+                    )
+                ]
+            )
+    candidate.edges = [
+        e for e in candidate.edges if e.source != node_id and e.target != node_id
+    ]
+    candidate.edges.append(ControlEdge(source=predecessor_id, target=successor_id))
+    if decision is not None:
+        # The node opened an XOR branch: its partition cell now starts at the
+        # former successor (the matching join itself if the branch ran empty).
+        for branch in decision.branches:
+            if branch.target == node_id:
+                branch.target = successor_id
+                break
+        _refresh_xor_captions(candidate, predecessor_id)
+
+    # Splice in after the anchor. If the anchor was the node's predecessor the
+    # single outgoing edge is the gap-closing edge just added -- the move
+    # degenerates to a no-op, which is fine.
+    edge = _single_outgoing(candidate, after_node_id)
+    candidate.edges.remove(edge)
+    candidate.edges.append(
+        ControlEdge(source=after_node_id, target=node_id, condition=edge.condition)
+    )
+    candidate.edges.append(ControlEdge(source=node_id, target=edge.target))
     return raise_if_invalid(candidate)
 
 
@@ -435,7 +809,15 @@ def _drop_nodes(candidate: ProcessSchema, to_remove: set[str]) -> None:
         candidate.service_bindings.pop(removed, None)
         candidate.sub_process_bindings.pop(removed, None)
         candidate.xor_decisions.pop(removed, None)
+        candidate.loop_decisions.pop(removed, None)
         candidate.forms.pop(removed, None)
+        # Time/mail/priority annotations would otherwise survive as stale keys
+        # -- and T1/N2 flag unknown nodes, so a node carrying one could never
+        # be deleted at all (validate-before-commit rejected the deletion).
+        candidate.time_constraints.pop(removed, None)
+        candidate.mail_bindings.pop(removed, None)
+        candidate.node_priorities.pop(removed, None)
+        candidate.escalation_policies.pop(removed, None)  # T3: same lesson
     candidate.data_accesses = [
         a for a in candidate.data_accesses if a.node_id not in to_remove
     ]
@@ -617,8 +999,25 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
                 )
             ]
         )
+    if node.type is NodeType.LOOP_END:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message="delete the LOOP_START to remove the whole loop block",
+                )
+            ]
+        )
 
-    if node.type in SPLIT_TYPES:
+    if node.type is NodeType.LOOP_START:
+        # Deleting the loop start removes the whole loop block (start, body,
+        # end, decision) -- the loop counterpart of deleting a split.
+        end_id, body = loop_block(candidate, node_id)
+        to_remove = {node_id, end_id} | body
+        predecessor_id = candidate.incoming(node_id)[0].source
+        successor_id = candidate.outgoing(end_id)[0].target
+    elif node.type in SPLIT_TYPES:
         join_id, inner = _matching_block(candidate, node_id)
         to_remove = {node_id, join_id} | inner
         predecessor_id = candidate.incoming(node_id)[0].source
@@ -652,6 +1051,26 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
                 return _delete_single_node_branch(
                     candidate, node_id, predecessor_id, successor_id
                 )
+        if (
+            pred_type is NodeType.LOOP_START
+            and succ_type is NodeType.LOOP_END
+        ):
+            # Sole content of a loop body: an empty loop is meaningless (K6d),
+            # so deleting the last body node dissolves the whole loop -- the
+            # counterpart of the single-branch gateway dissolution.
+            to_remove = {predecessor_id, node_id, successor_id}
+            outer_pred = candidate.incoming(predecessor_id)[0].source
+            outer_succ = candidate.outgoing(successor_id)[0].target
+            _drop_nodes(candidate, to_remove)
+            candidate.edges = [
+                e
+                for e in candidate.edges
+                if e.source not in to_remove and e.target not in to_remove
+            ]
+            candidate.edges.append(
+                ControlEdge(source=outer_pred, target=outer_succ)
+            )
+            return raise_if_invalid(candidate)
         to_remove = {node_id}
 
     _drop_nodes(candidate, to_remove)
@@ -2337,6 +2756,33 @@ def set_time_constraint(
         candidate.time_constraints.pop(node_id, None)
     else:
         candidate.time_constraints[node_id] = constraint
+    return raise_if_invalid(candidate)
+
+
+def set_escalation_policy(
+    schema: ProcessSchema,
+    node_id: str,
+    policy: EscalationPolicy | None,
+) -> ProcessSchema:
+    """Set (or clear with ``None``) a node's overdue reaction (T3/E9).
+
+    The policy's wellformedness -- interactive carrier with a resolvable
+    target time, strictly ascending stages, resolvable non-node-referencing
+    targets -- is the validator's job (T3a-T3c, validate-before-commit): an
+    undecidable escalation can never be stored.
+
+    requires: schema editable (R0); node exists.
+    ensures:  ``escalation_policies[node_id]`` is set or removed and the full
+              rule catalogue (incl. T3 and the N3 coupling) holds.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    _require_node(candidate, node_id)
+    if policy is None:
+        candidate.escalation_policies.pop(node_id, None)
+    else:
+        candidate.escalation_policies[node_id] = policy.model_copy(deep=True)
     return raise_if_invalid(candidate)
 
 

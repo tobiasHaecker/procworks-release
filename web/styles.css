@@ -589,6 +589,22 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   stroke: var(--amber); stroke-width: 1.6px; fill: none;
   stroke-dasharray: 5 4; opacity: .9; pointer-events: none;
 }
+/* Rücksprung-Bogen einer Schleife (K6): gehört zum Kontrollfluss (gleiche
+   Farbfamilie wie .gedge), ist aber als abgeleitete – nie gespeicherte –
+   Kante leicht abgesetzt (feiner + halbtransparent). */
+.gloop {
+  stroke: var(--gray); stroke-width: 1.4px; fill: none;
+  opacity: .75; pointer-events: none;
+}
+.gloop-txt {
+  font-size: 9px; fill: var(--muted); pointer-events: none;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+}
+/* Iterationszähler unter dem Schleifenende (nur Laufzeit-Sichten). */
+.gloop-iter {
+  font-size: 9px; fill: var(--muted); pointer-events: none;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+}
 /* Kontur-Halo in Hintergrundfarbe, damit die Beschriftung auch ueber
    Kontrollflusskanten/Knoten und bei dicht gestaffelten Boegen lesbar bleibt. */
 .gprov-txt {

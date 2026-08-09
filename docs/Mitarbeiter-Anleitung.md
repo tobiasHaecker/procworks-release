@@ -68,14 +68,26 @@ Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt s
    Klicke links in der Navigation auf **„Meine Aufgaben"**.
    - Oben siehst du „✓ Angemeldet als &lt;dein Name&gt;".
    - Darunter stehen unter **„Offene Aufgaben"** deine Aufgaben
-     (Spalten: Aufgabe, Prozess, Berechtigte).
+     (Spalten: Aufgabe, Prozess, Fällig, Berechtigte, Status).
 
-5. **Aufgabe erledigen.**
+5. **Aufgabe übernehmen (optional, empfohlen im Team).**
+   Sehen mehrere Kollegen dieselbe Aufgabe (Status **„angeboten"**), kannst du
+   sie mit **„Übernehmen"** für dich reservieren: Bei allen anderen
+   verschwindet sie aus der Liste, bei dir steht sie fortan als
+   **„übernommen"** – niemand arbeitet versehentlich doppelt. Eine übernommene
+   Aufgabe kann nur **du** erledigen. Passt es doch nicht (z. B. keine Zeit),
+   klicke auf **„Zurücklegen"** – die Aufgabe wird wieder allen Berechtigten
+   angeboten. Auch eine Führungskraft kann eine übernommene Aufgabe
+   zurücklegen, falls jemand unerwartet ausfällt.
+
+6. **Aufgabe erledigen.**
    Klicke bei einer Aufgabe auf **„Erledigen"**, fülle ggf. die abgefragten
-   Daten aus und bestätige. Die Aufgabe verschwindet danach aus der Liste;
-   Folgeaufgaben erscheinen automatisch.
+   Daten aus und bestätige. Das geht auch **ohne** vorheriges Übernehmen –
+   Übernehmen lohnt sich, sobald mehrere Personen dieselbe Liste sehen. Die
+   Aufgabe verschwindet danach aus der Liste; Folgeaufgaben erscheinen
+   automatisch.
 
-6. **Abwesenheit eintragen (Urlaub / Vertretung).**
+7. **Abwesenheit eintragen (Urlaub / Vertretung).**
    Unten in **„Meine Aufgaben"** findest du den Bereich
    **„Abwesenheit / Vertretung"**. Trage dort einen Zeitraum ein (**Von** / **Bis**,
    optional eine Notiz wie „Urlaub") und klicke auf **„Abwesenheit eintragen"**.
@@ -86,7 +98,7 @@ Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt s
      Aufgaben bleiben dann während der Abwesenheit **dir** zugewiesen (die
      Vertretung legt der Administrator in der Organisation fest).
 
-7. **Abmelden.**
+8. **Abmelden.**
    Über **„Abmelden"** in der linken Seitenleiste. Beim nächsten Mal meldest du
    dich mit deinem selbst gewählten Passwort an. Das Passwort kannst du jederzeit
    über **„Passwort ändern"** anpassen.

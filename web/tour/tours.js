@@ -61,7 +61,10 @@ const TOURS = [
     // v2: Einstieg fachlich statt mechanisch erklärt und der eingefügte Schritt
     // von "Antragsteller informieren" zu "Resturlaub prüfen" geändert -- siehe
     // die Notiz in tour_fixture_build.py (build_stages).
-    version: 2,
+    // v3: Info-Schritt "patterns" ergänzt (Verzweigungen + Schleifen als
+    // vollständige Blöcke, Schleifen-Konzept S3) -- reine Erwähnung ohne
+    // Simulation, die Konserve bleibt unverändert.
+    version: 3,
     sandbox: true,
     // Modellieren ist auf dem Smartphone bewusst zweitrangig (keine
     // Bindungs-Palette), deshalb wird diese Tour dort nicht angeboten.
@@ -156,6 +159,16 @@ const TOURS = [
         also: ['[data-tour="model.graph"]', '[data-tour="model.palette"]'],
         sim: { stage: 2 },
         advance: (ctx) => ctx.stage >= 2,
+      },
+      {
+        id: "patterns",
+        view: "model",
+        anchor: '[data-tour="model.graph"]',
+        title: "Mehr als einzelne Schritte",
+        body: "Über dasselbe „+“ entstehen auch parallele und bedingte Verzweigungen — und Schleifen für echte Wiederholung („nacharbeiten, bis die Prüfung passt“). Alles entsteht als vollständiger Block: Ein Split bringt seinen Join mit, eine Schleife Anfang, Ende und Wiederhol-Bedingung; den Rücksprung-Bogen zeichnet das Werkzeug selbst. Eine Schleife, die nie enden könnte, lässt sich gar nicht erst speichern.",
+        hint: "Nur gut zu wissen — ausprobieren kannst du es nach der Tour.",
+        action: "none",
+        doc: "Modellierer-Anleitung.md",
       },
       {
         id: "release",

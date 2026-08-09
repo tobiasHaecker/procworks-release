@@ -16,7 +16,7 @@ migration criteria are:
 from __future__ import annotations
 
 import pytest
-from staffing import staffed
+from staffing import TEST_AGENT_ID, staffed
 
 from procworks import (
     ExecutionContext,
@@ -164,7 +164,7 @@ def test_m2_changing_executed_edge_blocks_migration() -> None:
     a_id, b_id = _ordered_activities(source)
     instance = complete_activity(instance, source, a_id, context=context)
     # Make B RUNNING so the A->B edge lies inside the executed region.
-    instance = start_activity(instance, source, b_id)
+    instance = start_activity(instance, source, b_id, TEST_AGENT_ID)
     assert instance.node_states[b_id] is NodeState.RUNNING
 
     # Splice C between A and B -> the executed edge A->B disappears.

@@ -335,6 +335,217 @@ def test_both_modelling_surfaces_stay_available() -> None:
         assert panel in classic, f"Der klassischen Sicht fehlt {panel}"
 
 
+def test_loop_support_is_shared_by_both_surfaces() -> None:
+    """Schleifen (K6) sind in beiden Modellier-Oberflaechen bedienbar.
+
+    Der Einfuege-Dialog traegt den Tab "Schleife" (spricht den
+    loop-insert-Endpunkt an), und die Schleifen-Begrenzer haben EIN geteiltes
+    Panel (loopNodePanel), das Karte und klassische Sicht aufrufen -- dieselbe
+    Regel wie fuer jede Knotenoperation. Die Knotentypen sind dem Client
+    bekannt, damit ein per API gebautes Schleifenmodell nicht als
+    Unbekannt-Typ strandet.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "LOOP_START" in src and "LOOP_END" in src, "Loop-Knotentypen fehlen im Client"
+    insert = _fn_body("openInsertModal")
+    assert "loop-insert" in insert, "Der Einfuege-Dialog spricht den loop-insert-Endpunkt nicht an"
+    assert "Schleife" in insert, "Der Einfuege-Dialog hat keinen Schleifen-Tab"
+    assert src.count("function loopNodePanel(") == 1, (
+        "loopNodePanel muss genau einmal existieren (geteilte Funktion)"
+    )
+    assert "loopNodePanel(schema, node, draft)" in _fn_body("stepCard"), (
+        "Die Schritt-Karte zeigt den Schleifenblock nicht"
+    )
+    assert "loopNodePanel(schema, node, draft)" in _fn_body("nodeInspectorPanel"), (
+        "Die klassische Sicht zeigt den Schleifenblock nicht"
+    )
+
+
+def test_loop_back_arc_and_iteration_counter_are_drawn() -> None:
+    """S2: Der Ruecksprung-Bogen wird gezeichnet, Iterationen werden gezaehlt.
+
+    Die Ruecksprungkante existiert bewusst nicht als Datum (der Graph bleibt
+    azyklisch) -- gezeichnet wird sie aus der LOOP_START/LOOP_END-Paarung
+    (loopPairsOf, der Client-Spiegel von model.loop_block). renderGraph ist die
+    EINE Kontrollfluss-Darstellung aller Sichten, deshalb erscheinen Bogen und
+    Iterationszaehler in Modellieren, Ausfuehrung und Monitoring zugleich.
+    Verhalten (Geometrie, Beschriftung, Zaehlerstand) wurde per Node-vm-Lauf
+    belegt; dieser Waechter sichert die Zusagen.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert src.count("function loopPairsOf(") == 1, (
+        "loopPairsOf muss genau einmal existieren (Spiegel von model.loop_block)"
+    )
+    graph = _fn_body("renderGraph")
+    assert "loopPairsOf(schema)" in graph and "gloop" in graph, (
+        "renderGraph zeichnet keinen Ruecksprung-Bogen"
+    )
+    assert "loop_iterations" in graph and "wiederholt" in graph, (
+        "renderGraph zeigt den Iterationszaehler nicht"
+    )
+    css = (APP_JS.parent / "styles.css").read_text(encoding="utf-8")
+    assert ".gloop" in css and ".gloop-iter" in css, (
+        "Die Stilklassen des Schleifen-Bogens fehlen"
+    )
+    assert "var(--" in css.split(".gloop", 1)[1][:400], (
+        "Der Bogen muss seine Farben ueber CSS-Variablen beziehen (helle Variante)"
+    )
+
+
+def test_loop_partition_cells_share_one_caption_and_reach_the_api() -> None:
+    """S3: THRESHOLD/ENUM-Abbruchpartitionen sind bedienbar und einheitlich.
+
+    Die Wiederhol-Bedingung hat EINE geteilte Beschriftungsquelle
+    (loopConditionCaption), die Bogen (renderGraph) und Schleifen-Panel
+    (loopNodePanel) gleichermassen nutzen -- sonst driften die Sichten. Der
+    Einfuege-Dialog laesst neben BOOLEAN auch Zahlen- und Text-Merkmale zu und
+    baut daraus die repeat/exit-Zellen des loop-insert-Payloads. Verhalten
+    (alle Beschriftungsfaelle inkl. Bereichs- und Sonst-Zellen) wurde per
+    Node-vm-Lauf belegt; dieser Waechter sichert die Zusagen.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert src.count("function loopConditionCaption(") == 1, (
+        "loopConditionCaption muss genau einmal existieren (geteilte Quelle)"
+    )
+    assert "loopConditionCaption(schema, d, 14)" in _fn_body("renderGraph"), (
+        "Der Ruecksprung-Bogen nutzt die geteilte Beschriftung nicht"
+    )
+    assert "loopConditionCaption(schema, d, 24)" in _fn_body("loopNodePanel"), (
+        "Das Schleifen-Panel nutzt die geteilte Beschriftung nicht"
+    )
+    insert = _fn_body("openInsertModal")
+    assert '"BOOLEAN", "INTEGER", "FLOAT", "STRING"' in insert.split("loopable", 1)[1][:200], (
+        "Der Schleifen-Tab laesst nur BOOLEAN-Merkmale zu (S3 fehlt)"
+    )
+    assert "payload.cells" in insert, (
+        "Der Schleifen-Tab baut keine repeat/exit-Zellen fuer loop-insert"
+    )
+    # max_iterations (Notbremse): Eingabe im Dialog, Anzeige an Bogen + Panel.
+    assert "loop-max" in insert and "payload.max_iterations" in insert, (
+        "Der Schleifen-Tab bietet die Hoechstzahl der Durchlaeufe nicht an"
+    )
+    assert "max_iterations" in _fn_body("renderGraph"), (
+        "Der Ruecksprung-Bogen zeigt die Hoechstzahl der Durchlaeufe nicht"
+    )
+    assert "max_iterations" in _fn_body("loopNodePanel"), (
+        "Das Schleifen-Panel zeigt die Hoechstzahl der Durchlaeufe nicht"
+    )
+
+
+def test_worklist_claiming_is_wired_in_the_tasks_view() -> None:
+    """E1: Uebernehmen/Zuruecklegen sind bedienbar und geteilt.
+
+    claimTask/returnTask existieren genau einmal (geteilte Funktionen fuer
+    jede Aufrufstelle), die Aufgabenliste zeigt den Zustand (uebernommen/
+    angeboten) und bietet je nach Inhaberschaft den passenden Knopf; die
+    Instanz-Detailsicht nennt den Inhaber transparent. Die eigentliche
+    Logik (Exklusivitaet W1, Berechtigung W2, Withdrawn-Filter) lebt im
+    Kern und ist dort getestet (test_worklist_claiming.py).
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert src.count("async function claimTask(") == 1, "claimTask fehlt/doppelt"
+    assert src.count("async function returnTask(") == 1, "returnTask fehlt/doppelt"
+    assert "/claim" in _fn_body("claimTask") and "/return" in _fn_body("returnTask"), (
+        "Die Funktionen sprechen die E1-Endpunkte nicht an"
+    )
+    view = _fn_body("viewTasks")
+    assert "claimTask(t, agentId)" in view and "returnTask(t, agentId)" in view, (
+        "Die Aufgabenliste bietet Uebernehmen/Zuruecklegen nicht an"
+    )
+    assert "claimed_by" in view, "Die Aufgabenliste kennt den Inhaber nicht"
+    # Der Quelltext schreibt Umlaute teils als \uXXXX-Escape, daher ohne "ü".
+    assert "bernommen von" in src, "Die Instanz-Sicht nennt den Inhaber nicht"
+
+
+def test_escalation_editor_is_shared_by_both_surfaces() -> None:
+    """T3/E9: die Eskalations-Bedienung ist geteilt und sichtbar.
+
+    escalationBlock existiert genau einmal und wird von der Schritt-Karte
+    (cardTimeSection) UND dem klassischen Inspektor (nodePerformSections)
+    aufgerufen; der Dialog setEscalationFor spricht den
+    escalation-policy-Endpunkt an, und die Aufgabenliste kennzeichnet
+    eskalierte Eintraege. Die Regellogik (T3a-T3c, Sweep) lebt im Kern
+    (test_escalation.py).
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert src.count("function escalationBlock(") == 1, "escalationBlock fehlt/doppelt"
+    assert "escalationBlock(body, schema, node" in _fn_body("cardTimeSection"), (
+        "Die Schritt-Karte zeigt die Eskalation nicht"
+    )
+    assert "escalationBlock(body, schema, node" in _fn_body("nodePerformSections"), (
+        "Der klassische Inspektor zeigt die Eskalation nicht"
+    )
+    assert "escalation-policy" in _fn_body("setEscalationFor"), (
+        "Der Eskalations-Dialog spricht den Endpunkt nicht an"
+    )
+    assert "escalated_stage" in _fn_body("viewTasks"), (
+        "Die Aufgabenliste kennzeichnet eskalierte Eintraege nicht"
+    )
+
+
+def test_model_hints_are_visible_in_both_surfaces() -> None:
+    """Die beratenden Modellhinweise (G-Gruppe, /metrics) sind sichtbar.
+
+    Der Kern berechnet die 7PMG-Hinweise plus G8 (Soll-Zeit-Luecke) seit jeher,
+    aber der Client fragte /metrics nie ab -- die Hinweise waren unsichtbar.
+    Jetzt laedt refreshSchema sie best-effort (ein Fehler blockiert das
+    Modellieren nie), die Statusleiste der Karten-Sicht zeigt sie als neutralen
+    Zaehler (grau -- ein Hinweis ist kein Befund), und das Korrektheits-Panel
+    der klassischen Sicht listet sie aus.
+    """
+
+    refresh = _fn_body("refreshSchema")
+    assert "/metrics" in refresh, "refreshSchema laedt die Modellhinweise nicht"
+    assert "catch" in refresh, "Der Hinweis-Abruf muss best-effort sein"
+
+    bar = _fn_body("modelStatusBar")
+    assert "state.hints" in bar and "Hinweis(e)" in bar, (
+        "Die Statusleiste (Karten-Sicht) zeigt die Hinweise nicht"
+    )
+    assert 'pill-gray' in bar, "Hinweise muessen neutral wirken, nicht wie Befunde"
+
+    panel = _fn_body("findingsPanel")
+    assert "state.hints" in panel, (
+        "Das Korrektheits-Panel (klassische Sicht) listet die Hinweise nicht"
+    )
+
+
+def test_move_node_action_is_shared_by_both_surfaces() -> None:
+    """„Verschieben…" ist EINE geteilte Funktion, die beide Sichten aufrufen.
+
+    Ein Schritt laesst sich samt aller Bindungen umhaengen (moveNode, Kern-
+    Endpunkt ``POST /schemas/{id}/nodes/{nid}/move``). Wie bei jeder
+    Knotenoperation gilt: eine gemeinsame Funktion fuer Karte und klassische
+    Sicht -- sonst driften die Oberflaechen auseinander. Die Zielliste ist nur
+    eine Anzeige-Vorauswahl; die Korrektheitsentscheidung trifft der Kern
+    (validate-before-commit).
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert src.count("function moveNodeDialog(") == 1, (
+        "moveNodeDialog muss genau einmal existieren (geteilte Funktion)"
+    )
+    dialog = _fn_body("moveNodeDialog")
+    assert "/move" in dialog and "after_node_id" in dialog, (
+        "moveNodeDialog spricht nicht den moveNode-Endpunkt an"
+    )
+    assert "moveNodeDialog(node.id)" in _fn_body("cardFlowSection"), (
+        "Die Schritt-Karte bietet kein Verschieben an"
+    )
+    assert "moveNodeDialog(node.id)" in _fn_body("nodeInspectorPanel"), (
+        "Die klassische Sicht bietet kein Verschieben an"
+    )
+    # Die Vorauswahl schliesst nur offensichtlich Unmoegliches aus: Splits
+    # (mehrere Ausgaenge), das Ende, den Schritt selbst und den No-op-Anker.
+    targets = _fn_body("moveTargetsFor")
+    assert "NODE_TYPE.END" in targets, "Das Ende darf kein Anker sein"
+
+
 def test_step_card_offers_every_binding_at_the_node() -> None:
     """An der Karte laesst sich jede Bindung des Schritts selbst setzen.
 

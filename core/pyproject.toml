@@ -1,6 +1,6 @@
 [project]
 name = "procworks"
-version = "1.13.0"
+version = "1.14.0"
 description = "Headless, block-structured process engine kernel with correctness-by-construction (ADEPT-/BPMN-inspired)."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -10,7 +10,6 @@ dependencies = [
     "fastapi>=0.110",
     "pydantic>=2.6",
     "uvicorn[standard]>=0.29",
-    "networkx>=3.2",
     "sqlalchemy>=2.0",
 ]
 

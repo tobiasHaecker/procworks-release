@@ -81,11 +81,13 @@ const TOUR_FIXTURES = {
             "type": "CONTROL"
           }
         ],
+        "escalation_policies": {},
         "follow_up_links": [],
         "forms": {},
         "id": "tour-schema",
         "is_library_subprocess": false,
         "lifecycle_state": "ENTWURF",
+        "loop_decisions": {},
         "mail_bindings": {},
         "name": "Urlaubsantrag (Tutorial)",
         "node_priorities": {},
@@ -246,11 +248,13 @@ const TOUR_FIXTURES = {
             "type": "CONTROL"
           }
         ],
+        "escalation_policies": {},
         "follow_up_links": [],
         "forms": {},
         "id": "tour-schema",
         "is_library_subprocess": false,
         "lifecycle_state": "ENTWURF",
+        "loop_decisions": {},
         "mail_bindings": {},
         "name": "Urlaubsantrag (Tutorial)",
         "node_priorities": {},
@@ -417,11 +421,13 @@ const TOUR_FIXTURES = {
             "type": "CONTROL"
           }
         ],
+        "escalation_policies": {},
         "follow_up_links": [],
         "forms": {},
         "id": "tour-schema",
         "is_library_subprocess": false,
         "lifecycle_state": "ENTWURF",
+        "loop_decisions": {},
         "mail_bindings": {},
         "name": "Urlaubsantrag (Tutorial)",
         "node_priorities": {},

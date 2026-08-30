@@ -162,10 +162,6 @@ class PendingClaim(BaseModel):
 # --------------------------------------------------------------------------
 
 
-class SignatureError(ValueError):
-    """Raised when a license token cannot be parsed or verified."""
-
-
 def _canonical_payload(lic: License) -> bytes:
     """Deterministic bytes over all license fields except ``signature``.
 

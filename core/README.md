@@ -1,14 +1,16 @@
 # ProcWorks — Headless Process Engine Kernel
 
-Walking Skeleton des Backend-Kerns (Roadmap-Schritte 0–11 mit Activity
-Repository, Daten-Connectoren, BPMN-Import/Export und schlankem Web-Client,
-Abschnitt 13 des Architektur-Konzepts). Demonstriert
-**Correctness by Construction (CbC)**:
+Der vollständige Backend-Kern von ProcWorks (alle Roadmap-Schritte des
+Architektur-Konzepts sind umgesetzt: Meta-Modell, Validator, Change-Operationen,
+Execution Engine, Komposition, Ad-hoc-Änderung, Migration, Activity Repository,
+Daten-Connectoren, BPMN-Import/Export, Monitoring/Audit und die offene
+`/v1`-Integrationsschicht). Er setzt **Correctness by Construction (CbC)** durch:
 Ein Prozessschema kann ausschließlich über geprüfte High-Level-Operationen
 verändert werden; jede Operation validiert das Ergebnis **vor** dem Commit
-gegen die Strukturregeln K1–K3. Ein inkorrektes Modell kann nicht entstehen.
+gegen den vollständigen Regelkatalog. Ein inkorrektes Modell kann nicht
+entstehen.
 
-## Umfang dieses Skeletons
+## Funktionsumfang
 
 - **Meta-Modell** (`model.py`): block-strukturiertes Schema mit Status-Lebenszyklus.
 - **Correctness Validator** (`validator.py`): K1 (balancierte Gateways), K2
@@ -76,7 +78,7 @@ gegen die Strukturregeln K1–K3. Ein inkorrektes Modell kann nicht entstehen.
   referenzierende Schemata eingespielt.
 - **Execution Engine** (`execution.py`): instanziiert ein **freigegebenes**
   Schema (`instantiate`) und führt es über die ADEPT-Knoten-/Kantenmarkierung
-  aus — Knotenmarkierung NS (`NOT_ACTIVATED`?`ACTIVATED`?`RUNNING`?`COMPLETED`
+  aus — Knotenmarkierung NS (`NOT_ACTIVATED`→`ACTIVATED`→`RUNNING`→`COMPLETED`
   bzw. `SKIPPED`), Kantenmarkierung ES (`TRUE_SIGNALED`/`FALSE_SIGNALED`).
   Gateways/Start laufen automatisch, Aktivitäten warten auf `start_activity`/
   `complete_activity`, **XOR-Splits entscheiden automatisch** anhand der
@@ -147,7 +149,7 @@ gegen die Strukturregeln K1–K3. Ein inkorrektes Modell kann nicht entstehen.
   Systeme (MS SQL, MySQL, Dynamics 365, SAP, plus offene `CUSTOM`-SPI). Ein als
   `EXTERNAL` markiertes Datenelement wird zur Laufzeit über den gebundenen
   Connector aufgelöst; Schlüssel und Werte werden stets **parametrisiert**
-  übergeben (kein String-Concat ? kein Injection-Risiko), Zugangsdaten liegen
+  übergeben (kein String-Concat → kein Injection-Risiko), Zugangsdaten liegen
   nur serverseitig im Connector, nie im Schema. `InMemoryConnector` ist die
   Referenz-Implementierung für Tests/Demos. Über die Record-Bindung hinaus gibt
   es eine **typ- und kardinalitätssichere Skalar-Bindung** (Correctness by
@@ -200,8 +202,8 @@ gegen die Strukturregeln K1–K3. Ein inkorrektes Modell kann nicht entstehen.
   Endpunkt-Referenz: [../docs/Integrations-Leitfaden.md](../docs/Integrations-Leitfaden.md).
 
 - **BPMN-Import/Export** (`bpmn.py`): exportiert ein Schema als semantisches
-  **BPMN 2.0**-Dokument (Start/Ende ? Events, Aktivität ? `task`,
-  Sub-Prozess ? `callActivity`, AND ? `parallelGateway`, XOR ?
+  **BPMN 2.0**-Dokument (Start/Ende → Events, Aktivität → `task`,
+  Sub-Prozess → `callActivity`, AND → `parallelGateway`, XOR →
   `exclusiveGateway`, Bedingungen als `conditionExpression`) und liest BPMN
   zurück auf die geprüfte Block-Teilsprache. Der Import folgt dem
   **No-Bypass-Prinzip**: das gemappte Modell wird vor der Rückgabe gegen die
@@ -450,7 +452,7 @@ I/O-Schnittstelle und einen Executor (`MANUAL`/`SCRIPT`/`SERVICE`/`WEB_SERVICE`)
 Wird sie an einen Schritt gebunden, prüft der Validator A1 (Vorlage existiert),
 A2 (`automatic`-Flag passt zum Executor — `MANUAL` ist interaktiv) und A3
 (typkonforme Bindung: Pflicht-Parameter gemappt, Namen gehören zur Vorlage,
-Datenelemente existieren und sind typgleich). Verletzungen ? **HTTP 422**.
+Datenelemente existieren und sind typgleich). Verletzungen → **HTTP 422**.
 
 Externe Daten (Connectoren) werden über denselben CbC-Pfad modelliert: ein
 Connector wird registriert, dann ein Datenelement als `EXTERNAL` an eine

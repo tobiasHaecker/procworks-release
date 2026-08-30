@@ -86,6 +86,24 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Verfuegbare Sicherheitsupdates des Basis-Image einspielen -- dasselbe Vorgehen
+# wie im Web-Image (``apk --no-cache -U upgrade``), nur fuer Debian. Noetig, weil
+# ``python:3.12-slim`` zwischen zwei Neubauten hinter den Debian-Sicherheits-
+# aktualisierungen zurueckbleibt: Am 2026-08-30 meldete Trivy zehn HIGH-Funde in
+# ``util-linux`` (CVE-2026-53612..53615) und ``openssl`` (CVE-2026-14456) des
+# Basis-Image, fuer die Debian laengst gepatchte Pakete ausliefert.
+#
+# Anders als bei Sprachpaketen (siehe die Begruendung des zweistufigen Baus oben)
+# wirkt ein In-Place-Upgrade hier auch fuer den Scanner: Trivy liest fuer
+# OS-Pakete die dpkg-Datenbank des *Endimage*, nicht die Schichthistorie.
+# Verifiziert am 2026-08-30 -- vor dieser Schicht 40 Funde, danach 0.
+#
+# ``--no-install-recommends`` haelt das Image schlank; die Paketlisten werden in
+# derselben Schicht wieder entfernt, damit sie nicht im Endimage landen.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Das Bau-Werkzeug des Basis-Image selbst: pip liegt dort aus ``--with-ensurepip``
 # und wird zur Laufzeit ebenso wenig gebraucht. Entfernen ist Haertung -- nach
 # einer Codeausfuehrungsluecke laesst sich nichts mehr nachinstallieren.

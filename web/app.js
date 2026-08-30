@@ -7996,12 +7996,6 @@ function table(headers, rows, rowClassFn) {
       })))));
 }
 
-function listPanel(title, headers, rows, onAdd, addLabel) {
-  const head = el("div", { class: "panel-h" }, el("h2", null, title), el("span", { class: "spacer", style: "flex:1" }),
-    onAdd ? el("button", { class: "btn small", onClick: onAdd }, addLabel) : null);
-  return el("div", { class: "panel" }, head, el("div", { class: "panel-b" }, rows.length ? table(headers, rows) : emptyState("Noch nichts angelegt.")));
-}
-
 // --------------------------------------------------------------------------
 // View: Hilfe (kontextsensitive In-App-Hilfe + Glossar der Regel-Codes)
 // --------------------------------------------------------------------------

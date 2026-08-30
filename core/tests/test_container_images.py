@@ -35,6 +35,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WEB_DOCKERFILE = _REPO_ROOT / "web" / "Dockerfile"
 _API_DOCKERFILE = _REPO_ROOT / "core" / "Dockerfile"
 _TRIVYIGNORE = _REPO_ROOT / ".trivyignore"
+_RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 
 
 def test_web_image_compiles_caddy_from_source() -> None:
@@ -55,10 +56,13 @@ def test_both_caddy_stages_use_the_same_tag() -> None:
     """Builder and runtime stage must stay on the same Caddy tag."""
 
     text = _WEB_DOCKERFILE.read_text(encoding="utf-8")
-    builder = re.findall(r"^FROM caddy:(\S+)-builder-alpine", text, re.M)
+    # ``FROM`` kann ein ``--platform=...`` tragen (Kreuz-Uebersetzung), deshalb
+    # optional mitparsen statt strikt am Zeilenanfang zu verankern.
+    stage = r"^FROM (?:--platform=\S+ )?caddy:"
+    builder = re.findall(stage + r"(\S+)-builder-alpine", text, re.M)
     runtime = [
         tag
-        for tag in re.findall(r"^FROM caddy:(\S+?)-alpine", text, re.M)
+        for tag in re.findall(stage + r"(\S+?)-alpine", text, re.M)
         if not tag.endswith("-builder")
     ]
     assert len(builder) == 1, f"expected exactly one builder stage, got {builder}"
@@ -103,4 +107,40 @@ def test_every_trivy_exception_states_when_it_may_be_removed() -> None:
     assert not undocumented, (
         "Trivy exceptions without a resolution condition "
         "(add a comment saying 'entfernen, sobald ...'): " + ", ".join(undocumented)
+    )
+
+
+def test_release_builds_and_scans_both_architectures() -> None:
+    """Images must ship for amd64 *and* arm64, and every architecture is scanned.
+
+    Until 2026-08-30 the release built amd64 only, so ``docker pull`` on an ARM
+    machine (Apple Silicon, ARM servers) failed with "no matching manifest".
+    Dropping a platform again would be invisible until someone on the wrong
+    architecture tried to install -- and scanning only one of them would let a
+    finding hide behind the other.
+    """
+
+    text = _RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    assert "platforms: linux/amd64,linux/arm64" in text, (
+        "the pushed image is no longer multi-arch"
+    )
+    for platform in ("linux/amd64", "linux/arm64"):
+        assert f"platforms: {platform}\n" in text, f"no separate build for {platform}"
+    assert text.count("aquasecurity/trivy-action") >= 2, (
+        "each architecture needs its own Trivy scan -- one scan cannot cover both"
+    )
+
+
+def test_release_can_be_rehearsed_without_a_version_tag() -> None:
+    """A Dockerfile change must be provable without burning a version tag.
+
+    A tag cannot be withdrawn, and a failing scan leaves it without an artifact
+    (v1.9.0/v1.9.1). The manual trigger builds and scans without publishing, so
+    the push step has to be conditional.
+    """
+
+    text = _RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in text, "release.yml cannot be triggered manually"
+    assert "if: github.event_name != 'workflow_dispatch' || inputs.push" in text, (
+        "the push step is not guarded -- a rehearsal run would publish images"
     )

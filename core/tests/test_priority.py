@@ -73,14 +73,14 @@ def test_set_priority_rejects_gateway() -> None:
     schema = create_empty_schema("PrioGw", schema_id="p2")
     schema = serial_insert(schema, "A", after_node_id="start")
     start_id = schema.start_node().id
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         set_node_priority(schema, start_id, WorkItemPriority())
 
 
 def test_set_value_class_rejects_non_activity() -> None:
     schema = create_empty_schema("Val", schema_id="p3")
     start_id = schema.start_node().id
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         set_value_class(schema, start_id, ValueClass.VALUE_ADDING)
 
 

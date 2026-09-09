@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
+from staffing import staffed
 
 from procworks import (
     AccessMode,
@@ -31,7 +32,6 @@ from procworks import (
     DataAccessLayer,
     DataType,
     ExternalTaskState,
-    NodeType,
     ProcessInstance,
     ProcessSchema,
     SqlAlchemyConnector,
@@ -39,6 +39,7 @@ from procworks import (
     assign_service,
     bind_external_data,
     build_connection_registry,
+    complete_activity,
     connect_data,
     create_empty_schema,
     instantiate,
@@ -200,14 +201,22 @@ def test_build_connection_registry_empty_without_env(
 
 def _external_schema(connector_id: str = "erp") -> tuple[ProcessSchema, str]:
     schema = create_empty_schema("Conn", schema_id="c1")
-    schema = serial_insert(schema, "Bearbeiten", after_node_id="start")
+    # The lookup key must be written by an *earlier* step: the DAL pre-fetches
+    # the external element when the task is created, i.e. before this node runs,
+    # so a write on the reading node itself would come too late (C2 coupling).
+    schema = serial_insert(schema, "Schluessel setzen", after_node_id="start")
+    key_node_id = next(
+        nid for nid, node in schema.nodes.items() if node.label == "Schluessel setzen"
+    )
+    schema = serial_insert(schema, "Bearbeiten", after_node_id=key_node_id)
     node_id = next(
-        nid for nid, node in schema.nodes.items() if node.type is NodeType.ACTIVITY
+        nid for nid, node in schema.nodes.items() if node.label == "Bearbeiten"
     )
     schema = register_connector(
         schema, "ERP", ConnectorKind.MS_SQL, connector_id=connector_id
     )
     schema = add_data_element(schema, "Kundennr", DataType.STRING, element_id="kunden_nr")
+    schema = connect_data(schema, key_node_id, "kunden_nr", AccessMode.WRITE)
     schema = add_data_element(schema, "Kunde", DataType.STRING, element_id="kunde")
     schema = add_data_element(schema, "Ergebnis", DataType.STRING, element_id="ergebnis")
     schema = bind_external_data(
@@ -221,7 +230,7 @@ def _external_schema(connector_id: str = "erp") -> tuple[ProcessSchema, str]:
     schema = set_automation(schema, node_id, AutomationKind.EXTERNAL_TASK, topic="erp")
     schema = connect_data(schema, node_id, "kunde", AccessMode.READ, mandatory=False)
     schema = connect_data(schema, node_id, "ergebnis", AccessMode.WRITE, mandatory=False)
-    schema = release(schema)
+    schema = release(staffed(schema))
     return schema, node_id
 
 
@@ -234,8 +243,16 @@ def _runtime_with_dal(
     schemas.put(schema)
     context = ExecutionContext(make_resolver(schemas), instances)
     instance = instantiate(schema, context=context)
-    if set_key:
-        instance.data_values["kunden_nr"] = "K1"
+    # Drive past the key-setting step so the external task materialises. Its
+    # data carries the lookup key -- or deliberately does not, which is how the
+    # missing-key case is produced at *runtime* (the model itself is valid: C2
+    # only guarantees a step writes the key, not that a value ever arrives).
+    key_node_id = next(
+        nid for nid, node in schema.nodes.items() if node.label == "Schluessel setzen"
+    )
+    instance = complete_activity(
+        instance, schema, key_node_id, {"kunden_nr": "K1"} if set_key else {}
+    )
     instances.put(instance)
 
     dal = DataAccessLayer()

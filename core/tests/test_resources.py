@@ -134,7 +134,7 @@ def test_org_unit_recursive_includes_sub_units():
     schema = add_agent(schema, "Teammitglied", org_unit_id="team", agent_id="a1")
 
     # Non-recursive on the parent unit finds no direct member -> Z2.
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[Z2\]"):
         assign_staff_rule(
             schema, act, StaffRule(kind=StaffRuleKind.ORG_UNIT, ref="bereich")
         )
@@ -150,7 +150,7 @@ def test_org_unit_recursive_includes_sub_units():
 
 def test_add_agent_rejects_unknown_role():
     schema = create_empty_schema("Agents", schema_id="agbad")
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         add_agent(schema, "Niemand", role_ids=["ghost"], agent_id="a1")
 
 

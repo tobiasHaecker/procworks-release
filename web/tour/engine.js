@@ -412,7 +412,17 @@ const Tour = (() => {
     }
     if (sim.reject) {
       t.rejected = true;
-      return Promise.reject({ status: 422, detail: TOUR_FIXTURES.rejection });
+      // Form der echten API-Antwort nachbilden: Der Kern antwortet mit
+      // ``{"detail": {"findings": [...]}}``, und genau darauf sieht
+      // ``describeError`` in app.js nach. Die Konserve haelt (wie in
+      // tour_fixture_build.py dokumentiert) nur die Befundliste -- wird die
+      // direkt als ``detail`` durchgereicht, findet describeError weder
+      // ``findings`` noch ``message`` und zeigt ein nacktes "Fehler". Damit
+      // bliebe ausgerechnet der Kernmoment der Tour ohne Begruendung.
+      return Promise.reject({
+        status: 422,
+        detail: { findings: TOUR_FIXTURES.rejection },
+      });
     }
     t.stage = sim.stage;
     applyStage();

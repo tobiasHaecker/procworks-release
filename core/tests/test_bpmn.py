@@ -156,8 +156,14 @@ def test_import_rejects_unsupported_element() -> None:
         import_bpmn(xml)
 
 
-def test_import_rejects_unstructured_graph_via_validator() -> None:
-    # A parallel split closed by an exclusive join is not block-structured (K1).
+def test_import_rejects_gateway_without_its_join() -> None:
+    """A split with no join at all -- caught by K1's *counting* stage.
+
+    Named for what it actually proves. It used to be called
+    ``..._rejects_unstructured_graph_...``, which overstated it: the graph below
+    also has unbalanced gateway *counts*, so it never exercised the nesting
+    check at all. The genuine unstructured cases are the two tests below.
+    """
     xml = f"""<?xml version="1.0"?>
     <definitions xmlns="{BPMN_NS}">
       <process id="p">
@@ -178,6 +184,79 @@ def test_import_rejects_unstructured_graph_via_validator() -> None:
     with pytest.raises(CorrectnessError) as exc:
         import_bpmn(xml)
     assert any(f.rule == "K1" for f in exc.value.findings)
+
+
+def test_import_rejects_crossed_blocks_with_balanced_counts() -> None:
+    """Two overlapping AND blocks -- the case gateway counting cannot see.
+
+    This is the shape that reaches ProcWorks in practice: foreign BPMN is not
+    block-structured (Section 2.1), so an import from another tool routinely
+    looks like this. Before K1 checked nesting, this document imported with
+    HTTP 201, could be released, and yielded instances that never completed.
+    """
+
+    xml = f"""<?xml version="1.0"?>
+    <definitions xmlns="{BPMN_NS}">
+      <process id="p">
+        <startEvent id="start"/>
+        <parallelGateway id="s1"/>
+        <parallelGateway id="s2"/>
+        <task id="p2"/><task id="q1"/><task id="q2"/>
+        <parallelGateway id="j1"/>
+        <parallelGateway id="j2"/>
+        <endEvent id="end"/>
+        <sequenceFlow id="f1" sourceRef="start" targetRef="s1"/>
+        <sequenceFlow id="f2" sourceRef="s1" targetRef="s2"/>
+        <sequenceFlow id="f3" sourceRef="s1" targetRef="p2"/>
+        <sequenceFlow id="f4" sourceRef="s2" targetRef="q1"/>
+        <sequenceFlow id="f5" sourceRef="s2" targetRef="q2"/>
+        <sequenceFlow id="f6" sourceRef="q1" targetRef="j1"/>
+        <sequenceFlow id="f7" sourceRef="p2" targetRef="j1"/>
+        <sequenceFlow id="f8" sourceRef="q2" targetRef="j2"/>
+        <sequenceFlow id="f9" sourceRef="j1" targetRef="j2"/>
+        <sequenceFlow id="f10" sourceRef="j2" targetRef="end"/>
+      </process>
+    </definitions>"""
+    with pytest.raises(CorrectnessError) as exc:
+        import_bpmn(xml)
+    assert any(
+        f.rule == "K1" and "not properly nested" in f.message
+        for f in exc.value.findings
+    ), exc.value.findings
+
+
+def test_import_rejects_split_closed_by_wrong_gateway_kind() -> None:
+    """AND split closed by an exclusive join and vice versa; counts balance."""
+
+    xml = f"""<?xml version="1.0"?>
+    <definitions xmlns="{BPMN_NS}">
+      <process id="p">
+        <startEvent id="start"/>
+        <parallelGateway id="as"/>
+        <task id="a"/><task id="b"/>
+        <exclusiveGateway id="xj"/>
+        <exclusiveGateway id="xs"/>
+        <task id="c"/><task id="d"/>
+        <parallelGateway id="aj"/>
+        <endEvent id="end"/>
+        <sequenceFlow id="f1" sourceRef="start" targetRef="as"/>
+        <sequenceFlow id="f2" sourceRef="as" targetRef="a"/>
+        <sequenceFlow id="f3" sourceRef="as" targetRef="b"/>
+        <sequenceFlow id="f4" sourceRef="a" targetRef="xj"/>
+        <sequenceFlow id="f5" sourceRef="b" targetRef="xj"/>
+        <sequenceFlow id="f6" sourceRef="xj" targetRef="xs"/>
+        <sequenceFlow id="f7" sourceRef="xs" targetRef="c"/>
+        <sequenceFlow id="f8" sourceRef="xs" targetRef="d"/>
+        <sequenceFlow id="f9" sourceRef="c" targetRef="aj"/>
+        <sequenceFlow id="f10" sourceRef="d" targetRef="aj"/>
+        <sequenceFlow id="f11" sourceRef="aj" targetRef="end"/>
+      </process>
+    </definitions>"""
+    with pytest.raises(CorrectnessError) as exc:
+        import_bpmn(xml)
+    assert any(
+        f.rule == "K1" and "is closed by" in f.message for f in exc.value.findings
+    ), exc.value.findings
 
 
 def test_import_rejects_mixed_gateway() -> None:

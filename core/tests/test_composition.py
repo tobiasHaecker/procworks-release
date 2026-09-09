@@ -104,10 +104,15 @@ def test_subprocess_type_conformant_mapping_ok() -> None:
     target = _released_target()  # betrag: FLOAT
     parent = create_empty_schema("Haupt", schema_id="parent")
     parent = add_data_element(parent, "summe", DataType.FLOAT, element_id="summe")
+    # A mapped input must already hold a value when the child starts, so a step
+    # ahead of the sub-process supplies it (H2, parent side).
+    parent = serial_insert(parent, "Vorbereiten", after_node_id="start")
+    pre = next(n.id for n in parent.nodes.values() if n.label == "Vorbereiten")
+    parent = connect_data(parent, pre, "summe", AccessMode.WRITE)
     resolver = _resolver_for(target, parent)
     parent = insert_subprocess(
         parent,
-        "start",
+        pre,
         "sub_target",
         1,
         input_mapping={"betrag": "summe"},  # FLOAT <- FLOAT
@@ -194,6 +199,11 @@ def test_conditional_follow_up_with_valid_condition_ok() -> None:
     target = _released_target()
     parent = create_empty_schema("Haupt", schema_id="parent")
     parent = add_data_element(parent, "anzahl", DataType.INTEGER, element_id="anzahl")
+    # The predicate runs at instance completion, so the element it reads must be
+    # written on every path to END (F4).
+    parent = serial_insert(parent, "Erfassen", after_node_id="start")
+    erfassen = next(n.id for n in parent.nodes.values() if n.label == "Erfassen")
+    parent = connect_data(parent, erfassen, "anzahl", AccessMode.WRITE)
     resolver = _resolver_for(target, parent)
     parent = link_follow_up(
         parent,
@@ -353,3 +363,121 @@ def test_subprocess_output_satisfies_downstream_read_d1() -> None:
     assert validate(parent, resolver) == []
 
 
+
+
+def test_subprocess_input_must_be_written_before_the_call() -> None:
+    """H2 (parent side): a mapped input must hold a value when the child starts.
+
+    Type conformance alone is not enough. Without this the child begins with a
+    missing input and the failure surfaces at runtime inside a *different*
+    schema -- the mirror image of the output guarantee, which was checked all
+    along. The Code-Wegweiser recorded this as a known silent gap ("H2 prueft
+    Eingaenge nur auf Existenz und Typ, der Fehler bliebe still").
+    """
+
+    target = _released_target()  # betrag: FLOAT
+    parent = create_empty_schema("Haupt", schema_id="parent")
+    parent = add_data_element(parent, "summe", DataType.FLOAT, element_id="summe")
+    resolver = _resolver_for(target, parent)
+    with pytest.raises(CorrectnessError, match=r"\[H2\]") as exc:
+        insert_subprocess(
+            parent,
+            "start",
+            "sub_target",
+            1,
+            input_mapping={"betrag": "summe"},  # never written by the parent
+            resolver=resolver,
+        )
+    assert any(
+        "not guaranteed to be written" in f.message for f in exc.value.findings
+    ), exc.value.findings
+
+
+def test_conditional_follow_up_needs_its_element_written_on_every_path() -> None:
+    """F4 (evaluability): an unwritten element makes the instance uncompletable.
+
+    The predicate is evaluated while the *final* activity is completed. If it
+    reads an element that no path guarantees, the evaluator raises there -- so
+    the instance can never be completed at all, the same dead end K1 produced,
+    reached by a different route. Verified end-to-end before this check existed.
+    """
+
+    target = _released_target()
+    parent = create_empty_schema("Haupt", schema_id="parent")
+    parent = add_data_element(parent, "flag", DataType.BOOLEAN, element_id="flag")
+    parent = serial_insert(parent, "A1", after_node_id="start")
+    resolver = _resolver_for(target, parent)
+    with pytest.raises(CorrectnessError, match=r"\[F4\]") as exc:
+        link_follow_up(
+            parent,
+            "sub_target",
+            target_version=1,
+            trigger=FollowUpTrigger.CONDITIONAL,
+            condition="flag",  # never written
+            resolver=resolver,
+        )
+    assert any(
+        "not written on every path" in f.message for f in exc.value.findings
+    ), exc.value.findings
+
+
+def test_conditional_follow_up_rejects_element_written_in_only_one_branch() -> None:
+    """The XOR case: written on *a* path is not written on *every* path."""
+
+    from procworks import BranchSpec, conditional_insert
+
+    target = _released_target()
+    parent = create_empty_schema("Haupt", schema_id="parent")
+    parent = add_data_element(parent, "betrag", DataType.INTEGER, element_id="betrag")
+    parent = add_data_element(parent, "notiz", DataType.STRING, element_id="notiz")
+    parent = serial_insert(parent, "Erfassen", after_node_id="start")
+    erfassen = next(n.id for n in parent.nodes.values() if n.label == "Erfassen")
+    parent = connect_data(parent, erfassen, "betrag", AccessMode.WRITE)
+    parent = conditional_insert(
+        parent,
+        erfassen,
+        discriminator="betrag",
+        branches=[BranchSpec(label="Klein", upper=100), BranchSpec(label="Gross")],
+    )
+    klein = next(n.id for n in parent.nodes.values() if n.label == "Klein")
+    parent = connect_data(parent, klein, "notiz", AccessMode.WRITE)  # one branch only
+    resolver = _resolver_for(target, parent)
+    with pytest.raises(CorrectnessError, match=r"\[F4\]"):
+        link_follow_up(
+            parent,
+            "sub_target",
+            target_version=1,
+            trigger=FollowUpTrigger.CONDITIONAL,
+            condition='notiz == "x"',
+            resolver=resolver,
+        )
+
+
+def test_deleting_the_writer_of_a_mapped_input_is_rejected() -> None:
+    """The H2 input rule must hold for resolver-free operations too.
+
+    ``delete_node`` validates without a resolver, so a composition rule placed
+    behind the resolver gate would not see it: removing the step that writes a
+    mapped input left a model that failed validation afterwards. Found by
+    fuzzing the sub-process operations, which is why the check lives in the
+    resolver-free part of the composition rules.
+    """
+
+    target = _released_target()  # betrag: FLOAT
+    parent = create_empty_schema("Haupt", schema_id="parent")
+    parent = add_data_element(parent, "summe", DataType.FLOAT, element_id="summe")
+    parent = serial_insert(parent, "Vorbereiten", after_node_id="start")
+    pre = next(n.id for n in parent.nodes.values() if n.label == "Vorbereiten")
+    parent = connect_data(parent, pre, "summe", AccessMode.WRITE)
+    resolver = _resolver_for(target, parent)
+    parent = insert_subprocess(
+        parent, pre, "sub_target", 1, input_mapping={"betrag": "summe"}, resolver=resolver
+    )
+    assert validate(parent, resolver) == []
+
+    # Removing the only writer would strand the sub-process input -- and the
+    # operation must catch that itself, without being handed a resolver.
+    from procworks import delete_node
+
+    with pytest.raises(CorrectnessError, match=r"\[H2\]"):
+        delete_node(parent, pre)

@@ -230,13 +230,13 @@ def test_move_rejects_start_end_gateways_and_self() -> None:
     team = _nid(schema, "Team")
     split = _split_id(schema)
 
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         move_node(schema, "start", after_node_id=team)
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         move_node(schema, split, after_node_id=team)
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         move_node(schema, team, after_node_id=team)
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         move_node(schema, team, after_node_id=schema.end_node().id)
 
 
@@ -252,7 +252,7 @@ def test_move_rejects_released_schema() -> None:
     schema = _abc_schema()
     schema = release(staffed(schema))
 
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[R0\]"):
         move_node(schema, _nid(schema, "B"), after_node_id=_nid(schema, "C"))
 
 
@@ -260,7 +260,7 @@ def test_rejected_move_leaves_the_schema_unchanged() -> None:
     schema = _abc_schema()
     before = schema.model_dump()
 
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[D1\]"):
         move_node(schema, _nid(schema, "A"), after_node_id=_nid(schema, "C"))
     assert schema.model_dump() == before
 

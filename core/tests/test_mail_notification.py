@@ -228,7 +228,7 @@ def test_n3_group_with_unit_mailbox():
         StaffRule(kind=StaffRuleKind.ORG_UNIT, ref="einkauf"),
     )
     # Without a unit mailbox N3 fails ...
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[N3\]"):
         set_mail_binding(
             schema,
             _activity(schema, "Prüfen"),

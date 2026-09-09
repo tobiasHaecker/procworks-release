@@ -69,6 +69,7 @@ from procworks.model import (
     WorkItemPriority,
     XorBranch,
     XorDecision,
+    block_join,
     discriminator_kind,
     loop_block,
     xor_condition_text,
@@ -962,41 +963,25 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
 def _matching_block(schema: ProcessSchema, split_id: str) -> tuple[str, set[str]]:
     """Return ``(matching_join_id, inner_node_ids)`` for a split gateway.
 
-    Walks forward from the split while balancing nested splits/joins; because
-    the graph is block-structured (K1), exactly one join closes the block. The
-    inner ids are the branch bodies strictly between split and join (both
-    gateways excluded).
+    Thin wrapper around :func:`procworks.model.block_join` -- the single source
+    of truth for "which join closes this block", shared with the validator's K1
+    nesting check so operations and validation can never disagree. The inner ids
+    are the branch bodies strictly between split and join (both gateways
+    excluded).
+
+    On a K1-valid schema the block is unambiguous, so this never raises in
+    normal operation; the guard remains because a caller that reached here with
+    a crossed block must fail loudly rather than silently delete an arbitrary
+    region.
     """
 
-    inner: set[str] = set()
-    matching_join: str | None = None
-    stack: list[tuple[str, int]] = [(e.target, 0) for e in schema.outgoing(split_id)]
-    while stack:
-        node_id, depth = stack.pop()
-        node = schema.nodes[node_id]
-        if node.type in JOIN_TYPES and depth == 0:
-            matching_join = node_id
-            continue
-        if node_id in inner:
-            continue
-        inner.add(node_id)
-        next_depth = depth
-        if node.type in SPLIT_TYPES:
-            next_depth += 1
-        elif node.type in JOIN_TYPES:
-            next_depth -= 1
-        for edge in schema.outgoing(node_id):
-            stack.append((edge.target, next_depth))
-    if matching_join is None:
+    try:
+        matching_join, branches = block_join(schema, split_id)
+    except ValueError as exc:
         raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    node_id=split_id,
-                    message=f"no matching join found for split '{split_id}'",
-                )
-            ]
-        )
+            [ValidationFinding(rule="OP", node_id=split_id, message=str(exc))]
+        ) from exc
+    inner: set[str] = set().union(*branches) if branches else set()
     return matching_join, inner
 
 

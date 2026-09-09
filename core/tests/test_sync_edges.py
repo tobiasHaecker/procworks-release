@@ -72,7 +72,7 @@ def test_sync_edge_between_and_branches_is_valid_and_removable() -> None:
 
     cleared = remove_sync_edge(schema, _nid(schema, "Links"), _nid(schema, "Rechts"))
     assert not any(e.type is EdgeType.SYNC for e in cleared.edges)
-    with pytest.raises(CorrectnessError):  # removing again: no such edge
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):  # removing again: no such edge
         remove_sync_edge(cleared, _nid(schema, "Links"), _nid(schema, "Rechts"))
 
 

@@ -46,7 +46,7 @@ def test_org_operations_build_consistent_model() -> None:
 
 def test_org_add_agent_unknown_role_rejected() -> None:
     org = create_org_model("Org", org_id="org1")
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         org_add_agent(org, "Erika", role_ids=["ghost"], agent_id="a1")
 
 
@@ -54,7 +54,7 @@ def test_org_set_parent_cycle_rejected() -> None:
     org = create_org_model("Org", org_id="org1")
     org = org_add_unit(org, "A", org_unit_id="a")
     org = org_add_unit(org, "B", parent_id="a", org_unit_id="b")
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         org_set_parent(org, "a", "b")
 
 
@@ -89,7 +89,7 @@ def test_link_requires_entwurf() -> None:
     org = _shared_org()
     schema, _ = _linked_schema(org)
     schema = release(schema)
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[R0\]"):
         link_org_model(schema, org.id, org)
 
 
@@ -98,7 +98,7 @@ def test_editing_linked_schema_org_in_place_rejected() -> None:
 
     org = _shared_org()
     schema, _ = _linked_schema(org)
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         add_role(schema, "Neu")
 
 

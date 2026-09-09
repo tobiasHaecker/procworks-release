@@ -137,7 +137,7 @@ def test_second_empty_branch_is_rejected_by_operation() -> None:
     schema = _enum_schema()
     schema = delete_node(schema, _nid(schema, "Gold"))  # first empty branch: ok
     assert validate(schema) == []
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         delete_node(schema, _nid(schema, "Silber"))  # would be the second empty
 
 
@@ -201,13 +201,13 @@ def test_remove_empty_enum_branch_keeps_gateway_values_fall_to_catch_all() -> No
 
 def test_remove_empty_branch_without_empty_branch_is_rejected() -> None:
     schema = _threshold_schema()
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         remove_empty_branch(schema, _split(schema))
 
 
 def test_remove_empty_branch_on_non_split_is_rejected() -> None:
     schema = _threshold_schema()
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         remove_empty_branch(schema, _nid(schema, "Erfassen"))
 
 
@@ -228,7 +228,7 @@ def test_mandatory_read_after_join_rejects_write_only_in_non_empty_branch() -> N
     # on the empty path "notiz" is never written.
     join = _join(schema)
     successor = schema.outgoing(join)[0].target
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         connect_data(schema, successor, "notiz", AccessMode.READ)
 
 

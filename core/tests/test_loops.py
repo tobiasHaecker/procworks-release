@@ -114,11 +114,11 @@ def test_insert_loop_rejects_bad_discriminators() -> None:
     schema = serial_insert(schema, "A", after_node_id="start")
     schema = add_data_element(schema, "zahl", DataType.INTEGER, element_id="zahl")
 
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         insert_loop(schema, _nid(schema, "A"), "B", discriminator="zahl")
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         insert_loop(schema, _nid(schema, "A"), "B", discriminator="gibtsnicht")
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         insert_loop(
             schema, schema.end_node().id, "B", discriminator="zahl"
         )
@@ -570,7 +570,7 @@ def test_delete_loop_end_is_rejected_delete_start_removes_the_block() -> None:
     ls = _typed(schema, NodeType.LOOP_START)
     le = _typed(schema, NodeType.LOOP_END)
 
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         delete_node(schema, le)
 
     gone = delete_node(schema, ls)

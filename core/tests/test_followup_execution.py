@@ -16,6 +16,7 @@ from procworks import (
     ExecutionContext,
     add_data_element,
     complete_activity,
+    connect_data,
     create_empty_schema,
     instantiate,
     link_follow_up,
@@ -24,6 +25,7 @@ from procworks import (
     worklist,
 )
 from procworks.model import (
+    AccessMode,
     DataType,
     FollowUpMode,
     FollowUpTrigger,
@@ -130,6 +132,10 @@ def test_conditional_follow_up_starts_when_predicate_holds() -> None:
     source = serial_insert(source, "S", after_node_id="start")
     source = add_data_element(source, "betrag", DataType.INTEGER, element_id="betrag")
     src_act = _activity_id(source)
+    # The predicate is evaluated when the instance finishes, so the element it
+    # reads must be *modelled* as written -- passing the value at runtime alone
+    # would leave the evaluator undefined on some path (F4).
+    source = connect_data(source, src_act, "betrag", AccessMode.WRITE)
     build_resolver = _resolver_for(target)
     source = link_follow_up(
         source,
@@ -162,6 +168,7 @@ def test_conditional_follow_up_skipped_when_predicate_fails() -> None:
     source = serial_insert(source, "S", after_node_id="start")
     source = add_data_element(source, "betrag", DataType.INTEGER, element_id="betrag")
     src_act = _activity_id(source)
+    source = connect_data(source, src_act, "betrag", AccessMode.WRITE)  # F4
     build_resolver = _resolver_for(target)
     source = link_follow_up(
         source,

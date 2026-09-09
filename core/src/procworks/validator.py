@@ -29,6 +29,7 @@ from procworks.model import (
     AggregateKind,
     AutomationKind,
     Cardinality,
+    DataElement,
     DataSourceKind,
     DataType,
     EdgeType,
@@ -50,6 +51,7 @@ from procworks.model import (
     WidgetKind,
     XorDecisionKind,
     aggregate_result_type,
+    block_join,
     discriminator_kind,
     is_valid_email,
     loop_block,
@@ -248,6 +250,33 @@ def _deg(node_id: str, msg: str, ind: int, outd: int) -> ValidationFinding:
 
 
 def _check_k1_gateways(schema: ProcessSchema) -> list[ValidationFinding]:
+    """K1: gateways are balanced **and** form properly nested, same-type blocks.
+
+    Two stages, because they fail differently:
+
+    1. **Counting.** Per gateway kind the number of splits must equal the number
+       of joins. Catches the coarse cases (a split with no join at all).
+    2. **Pairing/nesting.** Every split must be closed by *one* join, reached at
+       nesting depth 0 on **all** of its branches, of the matching type, and no
+       join may close two splits. This is what makes the graph block-structured
+       in the ADEPT sense -- counting alone does not: two crossed blocks
+       (``s1 -> s2 -> ... -> j1 -> j2``) have perfectly balanced counts.
+
+    Stage 2 is the guarantee the rest of the system *relies* on and therefore may
+    not merely assume: the engine's join semantics (a join is skipped when an
+    incoming branch was deselected) are sound only on properly nested blocks. A
+    crossed block lets an XOR-deselected branch skip an AND join, which cascades
+    ``SKIPPED`` to the END node -- the instance can then never complete and never
+    appears in a worklist again (K5 "option to complete" and "proper completion"
+    both lost). The same holds for the must-write analysis behind D1, which
+    unions at an AND join and intersects elsewhere, and for the K4 branch
+    relation. Stage 2 is why those assumptions hold.
+
+    Stage 2 is skipped while stage 1 or the K2 degree rules already report
+    findings -- on a graph whose degrees are broken the walk would only add
+    noise on top of a diagnosis the user already has.
+    """
+
     findings: list[ValidationFinding] = []
     for split_type, join_type in SPLIT_JOIN_PAIR.items():
         n_splits = sum(1 for n in schema.nodes.values() if n.type is split_type)
@@ -262,6 +291,49 @@ def _check_k1_gateways(schema: ProcessSchema) -> list[ValidationFinding]:
                     ),
                 )
             )
+    if findings or _check_k2_endpoints_and_degrees(schema):
+        return findings
+
+    claimed_by: dict[str, str] = {}
+    for node in schema.nodes.values():
+        if node.type not in SPLIT_TYPES:
+            continue
+        try:
+            join_id, _ = block_join(schema, node.id)
+        except ValueError as exc:
+            findings.append(
+                ValidationFinding(rule="K1", node_id=node.id, message=str(exc))
+            )
+            continue
+        expected = SPLIT_JOIN_PAIR[node.type]
+        actual = schema.nodes[join_id].type
+        if actual is not expected:
+            findings.append(
+                ValidationFinding(
+                    rule="K1",
+                    node_id=node.id,
+                    message=(
+                        f"{node.type.value} '{node.id}' is closed by "
+                        f"{actual.value} '{join_id}', expected {expected.value}"
+                    ),
+                )
+            )
+        if join_id in claimed_by:
+            findings.append(
+                ValidationFinding(
+                    rule="K1",
+                    node_id=join_id,
+                    message=(
+                        f"join '{join_id}' closes two splits "
+                        f"('{claimed_by[join_id]}' and '{node.id}')"
+                    ),
+                )
+            )
+            continue
+        claimed_by[join_id] = node.id
+    # No "join closes no split" check needed: the counts balance per kind and
+    # every split claims a distinct join, so an unclaimed join is impossible
+    # unless one of the findings above already fired.
     return findings
 
 
@@ -860,6 +932,29 @@ def _check_d3_types(schema: ProcessSchema) -> list[ValidationFinding]:
     return findings
 
 
+def _connector_supplied(element: DataElement) -> bool:
+    """Is this element's value produced by a connector rather than by the process?
+
+    An EXTERNAL element bound for **reading** -- record-bound (``external``,
+    C1-C3) or scalar-select-bound (``select``, C4-C6) -- is resolved by the DAL
+    when the reading node runs (:meth:`procworks.dal.DataAccessLayer.read`).
+    There is no process step that writes it, so demanding a prior mandatory
+    write (D1) would make such an element **impossible** to read as a mandatory
+    input. Its supply guarantee is carried instead by the connector rules: the
+    lookup key / filter sources must be must-written before every reader
+    (C2 and C5, concept §9.2 -- "das Schlüssel-Datenelement muss vorher gesetzt
+    sein").
+
+    A ``write``-bound element (C7-C9) is the opposite case: the *process*
+    produces the value and it is flushed outward, so a mandatory read of it does
+    require a prior write and is deliberately **not** exempted here.
+    """
+
+    return element.source is DataSourceKind.EXTERNAL and (
+        element.external is not None or element.select is not None
+    )
+
+
 def _check_d1_supply(schema: ProcessSchema) -> list[ValidationFinding]:
     """D1: every mandatory read is supplied by a mandatory write on all paths."""
 
@@ -871,6 +966,8 @@ def _check_d1_supply(schema: ProcessSchema) -> list[ValidationFinding]:
         element = schema.data_elements.get(access.element_id)
         if element is None:
             continue
+        if _connector_supplied(element):
+            continue  # supplied by the connector; key coverage is C2/C5
         if access.element_id not in written_before.get(access.node_id, set()):
             findings.append(
                 ValidationFinding(
@@ -1303,6 +1400,53 @@ def _check_connectors(schema: ProcessSchema) -> list[ValidationFinding]:
                     message=(
                         f"key element '{binding.key_element_id}' of '{element.id}' must be "
                         f"an INSTANCE element"
+                    ),
+                )
+            )
+        else:
+            findings += _check_key_supplied_before_readers(
+                schema, element.id, binding.key_element_id
+            )
+    return findings
+
+
+def _check_key_supplied_before_readers(
+    schema: ProcessSchema, element_id: str, key_element_id: str
+) -> list[ValidationFinding]:
+    """C2 (D1 coupling): the lookup key is set before anything reads the element.
+
+    The record-bound counterpart of the coupling C5 already performs for
+    scalar-select filters. Because a connector-supplied element is exempt from
+    the D1 write requirement (:func:`_connector_supplied`), *this* is what keeps
+    the supply guarantee intact: when the DAL resolves the element it reads the
+    key from the instance values, so the key must be must-written on every path
+    to every reading node -- otherwise the lookup would run with a missing key
+    and fail at runtime instead of at modelling time (concept §9.2).
+
+    Skipped on a structurally broken schema, where the must-analysis is not
+    meaningful (same guard as D1/D2).
+    """
+
+    findings: list[ValidationFinding] = []
+    readers = [
+        a.node_id
+        for a in schema.data_accesses
+        if a.element_id == element_id and a.mode in READ_MODES
+    ]
+    if not readers or _structure_broken(schema):
+        return findings
+    written_before = _must_written_before(schema)
+    for node_id in sorted(set(readers)):
+        if key_element_id not in written_before.get(node_id, set()):
+            key = schema.data_elements.get(key_element_id)
+            findings.append(
+                ValidationFinding(
+                    rule="C2",
+                    node_id=node_id,
+                    message=(
+                        f"lookup key '{key.name if key else key_element_id}' of external "
+                        f"element '{element_id}' is not guaranteed to be set on every "
+                        f"path to this reader"
                     ),
                 )
             )
@@ -2603,6 +2747,13 @@ def _check_subprocesses(
     schema: ProcessSchema, resolver: SchemaResolver | None
 ) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
+    # Computed once for all bindings; ``None`` on a structurally broken schema,
+    # where the must-analysis carries no meaning (same guard as D1/D2).
+    written_before = (
+        None
+        if not schema.sub_process_bindings or _structure_broken(schema)
+        else _must_written_before(schema)
+    )
 
     # Every SUBPROCESS node must carry a binding, and every binding must point
     # at an existing SUBPROCESS node.
@@ -2636,6 +2787,13 @@ def _check_subprocesses(
                         message=f"mapping references unknown parent data element '{parent_eid}'",
                     )
                 )
+        # H2 (local part): a mapped INPUT is copied into the child when it
+        # starts, so the parent element must already hold a value there. This
+        # lives in the *resolver-free* part on purpose: it needs only parent-side
+        # information, and an operation that runs without a resolver (delete_node
+        # removing the writer, for instance) must not be able to break it behind
+        # the composition rules' back.
+        findings += _check_subprocess_inputs_supplied(schema, node_id, binding, written_before)
         if resolver is None:
             continue
         findings += _check_subprocess_target(schema, node_id, binding, resolver)
@@ -2732,6 +2890,50 @@ def _check_subprocess_target(
     return findings
 
 
+def _check_subprocess_inputs_supplied(
+    schema: ProcessSchema,
+    node_id: str,
+    binding: SubProcessBinding,
+    written_before: dict[str, set[str]] | None,
+) -> list[ValidationFinding]:
+    """H2 (parent side): every mapped input holds a value when the child starts.
+
+    The mirror image of the output guarantee: the child must produce each mapped
+    output on every path, and the parent must supply each mapped input before
+    the call. Without this the child begins with a missing input and the failure
+    surfaces at runtime inside a *different* schema than the one carrying the
+    modelling mistake (concept §3.6 H2 -- "Jeder Pflicht-Input des Sub-Prozesses
+    ist aus einem geschriebenen Datenelement des Hauptprozesses versorgt").
+
+    Needs only parent-side information, so it deliberately runs **without** a
+    resolver: an operation that validates resolver-free (``delete_node``
+    removing the writing step, say) must not be able to break it unnoticed.
+    """
+
+    if written_before is None or not binding.input_mapping:
+        return []
+    findings: list[ValidationFinding] = []
+    supplied = written_before.get(node_id, set())
+    for target_eid, parent_eid in sorted(binding.input_mapping.items()):
+        parent_el = schema.data_elements.get(parent_eid)
+        if parent_el is None or parent_eid in supplied:
+            continue  # unknown element is reported by the local existence check
+        if _connector_supplied(parent_el):
+            continue  # resolved by the connector, not by a process write
+        findings.append(
+            ValidationFinding(
+                rule="H2",
+                node_id=node_id,
+                message=(
+                    f"input '{target_eid}' is mapped from parent element "
+                    f"'{parent_el.name}', which is not guaranteed to be written "
+                    f"on every path to this sub-process"
+                ),
+            )
+        )
+    return findings
+
+
 def _has_subprocess_cycle(schema: ProcessSchema, resolver: SchemaResolver) -> bool:
     """True if the transitive sub-process call graph leads back to ``schema``."""
 
@@ -2792,6 +2994,30 @@ def _check_follow_up_condition(
                     ),
                 )
             )
+    if findings or _structure_broken(schema):
+        return findings
+
+    # F4 (evaluability): the predicate runs when the instance *finishes*, so
+    # every element it reads must be written on **every** path to END. An
+    # unwritten one makes the evaluator raise -- and because that happens while
+    # completing the final activity, the instance can then never be completed at
+    # all (the same dead end K1 produced, reached by a different route). This is
+    # the coupling that makes "die Auswertung beim Instanzabschluss ist
+    # garantiert definiert" (concept §3.6 F4) actually true.
+    supplied = _must_written_before(schema).get(schema.end_node().id, set())
+    for name in sorted(names):
+        element = schema.data_elements[name]
+        if name in supplied or _connector_supplied(element):
+            continue
+        findings.append(
+            ValidationFinding(
+                rule="F4",
+                message=(
+                    f"follow-up '{link_id}' condition reads '{element.name}', which "
+                    f"is not written on every path to the end of the process"
+                ),
+            )
+        )
     return findings
 
 

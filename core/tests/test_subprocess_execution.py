@@ -71,6 +71,10 @@ def test_subprocess_spawns_and_joins_child() -> None:
     parent = add_data_element(parent, "betrag", DataType.FLOAT, element_id="betrag")
     parent = add_data_element(parent, "summe", DataType.FLOAT, element_id="summe")
     pre_act = _activity_id(parent)
+    # The preceding step supplies the mapped input: a sub-process input is
+    # copied into the child when it starts, so the parent element must already
+    # hold a value at that point (H2, parent side).
+    parent = connect_data(parent, pre_act, "betrag", AccessMode.WRITE)
     build_resolver = _resolver_for(sub)
     parent = insert_subprocess(
         parent,

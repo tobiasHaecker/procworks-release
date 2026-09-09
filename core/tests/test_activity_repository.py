@@ -74,7 +74,7 @@ def test_assign_service_template_is_automatic() -> None:
 
 def test_assign_unknown_template_rejected_by_operation() -> None:
     schema, act = _schema_with_activity()
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         assign_service(schema, act, "X", template_id="ghost")
 
 

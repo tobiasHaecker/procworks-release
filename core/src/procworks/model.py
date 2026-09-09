@@ -1464,6 +1464,66 @@ def loop_block(schema: ProcessSchema, loop_start_id: str) -> tuple[str, set[str]
     return matching_end, body
 
 
+def block_join(schema: ProcessSchema, split_id: str) -> tuple[str, list[set[str]]]:
+    """Return ``(matching_join_id, branch_bodies)`` for a split gateway.
+
+    The block-structure counterpart of :func:`loop_block`: walks forward along
+    **each** outgoing branch of the split, balancing nested split/join pairs, and
+    determines the join that closes the block at depth 0. The branch bodies are
+    the nodes strictly between split and join (both gateways excluded); an empty
+    XOR branch (a direct ``split -> join`` edge) yields an empty body.
+
+    Unlike a plain forward scan this insists that **every** branch converges on
+    the *same* join -- that is precisely what distinguishes a properly nested
+    block from a crossed one. Raises ``ValueError`` when the branches do not
+    agree on exactly one closing join; the caller decides how to report it (the
+    validator turns it into a K1 finding, the operations into a
+    ``CorrectnessError``). The node type of the returned join is *not* checked
+    here -- that pairing rule belongs to K1 in the validator.
+
+    Shared by the validator (K1 nesting check) and the change operations (block
+    delete/move guards) so both agree on what "the block" is.
+    """
+
+    branches: list[set[str]] = []
+    closing_joins: set[str] = set()
+    for edge in schema.outgoing(split_id):
+        members: set[str] = set()
+        closing: set[str] = set()
+        stack: list[tuple[str, int]] = [(edge.target, 0)]
+        while stack:
+            node_id, depth = stack.pop()
+            node = schema.nodes.get(node_id)
+            if node is None:
+                continue
+            if node.type in JOIN_TYPES and depth == 0:
+                closing.add(node_id)
+                continue
+            if node_id in members:
+                continue
+            members.add(node_id)
+            next_depth = depth
+            if node.type in SPLIT_TYPES:
+                next_depth += 1
+            elif node.type in JOIN_TYPES:
+                next_depth -= 1
+            for out in schema.outgoing(node_id):
+                stack.append((out.target, next_depth))
+        if len(closing) != 1:
+            raise ValueError(
+                f"branch of split '{split_id}' does not close on exactly one join "
+                f"(found {sorted(closing) or 'none'})"
+            )
+        closing_joins |= closing
+        branches.append(members)
+    if len(closing_joins) != 1:
+        raise ValueError(
+            f"branches of split '{split_id}' close on different joins "
+            f"({sorted(closing_joins)}) -- the block is not properly nested"
+        )
+    return closing_joins.pop(), branches
+
+
 class TemplateOrigin(StrEnum):
     """Where a process template came from.
 

@@ -104,7 +104,7 @@ def test_new_revision_preserves_element_ids_and_bumps_version() -> None:
 
 def test_new_revision_requires_released_source() -> None:
     draft = create_empty_schema("Entwurf")
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[LC\]"):
         new_revision(draft)
 
 

@@ -319,7 +319,7 @@ def test_a_refused_release_leaves_the_schema_untouched() -> None:
     schema = serial_insert(create_empty_schema("Unveraendert"), "Prüfen", "start")
     before = schema.model_copy(deep=True)
 
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[B2\]"):
         release(schema)
 
     assert schema == before

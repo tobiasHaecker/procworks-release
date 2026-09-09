@@ -157,14 +157,14 @@ def test_connect_data_requires_existing_element():
     schema = create_empty_schema("D4", schema_id="d4missing")
     schema = serial_insert(schema, "A", after_node_id="start")
     act = _activity_ids(schema, "A")[0]
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         connect_data(schema, act, "does_not_exist", AccessMode.READ)
 
 
 def test_add_data_element_rejects_duplicate_id():
     schema = create_empty_schema("Dup", schema_id="dup")
     schema = add_data_element(schema, "x", DataType.INTEGER, element_id="x")
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         add_data_element(schema, "x2", DataType.INTEGER, element_id="x")
 
 

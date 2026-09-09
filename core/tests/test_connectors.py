@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from procworks import (
+    AccessMode,
     ConnectorKind,
     DataAccessError,
     DataAccessLayer,
@@ -22,8 +23,10 @@ from procworks import (
     ProcessSchema,
     add_data_element,
     bind_external_data,
+    connect_data,
     create_empty_schema,
     register_connector,
+    serial_insert,
     validate,
 )
 from procworks.validator import CorrectnessError
@@ -49,7 +52,7 @@ def test_register_connector_stores_descriptor() -> None:
 def test_register_connector_rejects_duplicate() -> None:
     schema = create_empty_schema("Conn", schema_id="conn")
     schema = register_connector(schema, "ERP", ConnectorKind.SAP, connector_id="erp")
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         register_connector(schema, "ERP2", ConnectorKind.MYSQL, connector_id="erp")
 
 
@@ -68,7 +71,7 @@ def test_bind_external_data_sets_source() -> None:
 
 def test_bind_external_data_unknown_element() -> None:
     schema = _schema_with_key()
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         bind_external_data(
             schema, "ghost", connector_id="erp", entity="Kunde", key_element_id="key"
         )
@@ -207,3 +210,52 @@ def test_dal_non_external_element_raises() -> None:
     dal.register("erp", InMemoryConnector())
     with pytest.raises(DataAccessError):
         dal.read(schema, {"key": "K-1"}, "kunde")
+
+
+# --- D1 / C2: connector-supplied elements are readable as mandatory inputs ---
+#
+# An EXTERNAL element bound for reading has no process step that writes it --
+# the DAL resolves it from the connector. Demanding a prior mandatory write (D1)
+# made such an element impossible to read as a mandatory input, so the whole
+# connector-read feature could only be modelled with optional reads. Its supply
+# guarantee is carried by the lookup key instead (concept 9.2).
+
+
+def _readable_external(*, write_key: bool) -> tuple[ProcessSchema, str]:
+    """Key writer, then a reader of the record-bound external element."""
+
+    schema = _schema_with_key()
+    schema = serial_insert(schema, "Erfassen", after_node_id="start")
+    writer = next(n.id for n in schema.nodes.values() if n.label == "Erfassen")
+    if write_key:
+        schema = connect_data(schema, writer, "key", AccessMode.WRITE)
+    schema = bind_external_data(
+        schema, "kunde", connector_id="erp", entity="Kunde", key_element_id="key"
+    )
+    schema = serial_insert(schema, "Anzeigen", after_node_id=writer)
+    reader = next(n.id for n in schema.nodes.values() if n.label == "Anzeigen")
+    return schema, reader
+
+
+def test_mandatory_read_of_connector_supplied_element_is_allowed() -> None:
+    schema, reader = _readable_external(write_key=True)
+    schema = connect_data(schema, reader, "kunde", AccessMode.READ, mandatory=True)
+    assert validate(schema) == []
+
+
+def test_external_read_requires_the_lookup_key_before_every_reader() -> None:
+    """C2 coupling -- the counterpart C5 already enforces for scalar selects."""
+
+    schema, reader = _readable_external(write_key=False)
+    with pytest.raises(CorrectnessError, match=r"\[C2\]") as exc:
+        connect_data(schema, reader, "kunde", AccessMode.READ, mandatory=True)
+    assert any("lookup key" in f.message for f in exc.value.findings), exc.value.findings
+
+
+def test_optional_external_read_also_requires_the_lookup_key() -> None:
+    """A missing key is a runtime *error*, not an absent value -- so an optional
+    read does not excuse it (same scope as C5)."""
+
+    schema, reader = _readable_external(write_key=False)
+    with pytest.raises(CorrectnessError, match=r"\[C2\]"):
+        connect_data(schema, reader, "kunde", AccessMode.READ, mandatory=False)

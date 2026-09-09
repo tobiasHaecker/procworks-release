@@ -185,7 +185,7 @@ def test_unknown_discriminator_is_rejected_at_build_time() -> None:
     schema = create_empty_schema("Ohne")
     schema = serial_insert(schema, "A", after_node_id="start")
     a = _nid(schema, "A")
-    with pytest.raises(CorrectnessError):
+    with pytest.raises(CorrectnessError, match=r"\[OP\]"):
         conditional_insert(
             schema,
             after_node_id=a,

@@ -488,3 +488,38 @@ def _iter_tours(tours_js: str) -> list[tuple[str, str, str]]:
         out.append((head.group(1), head.group(2), tours_js[head.end():end]))
     assert out, "In tours.js wurde keine Tour gefunden -- Waechter angleichen"
     return out
+
+
+def test_tour_rejection_matches_the_shape_the_client_renders() -> None:
+    """The canned rejection must look like a real API rejection.
+
+    The tour's whole point is one moment: the core refuses a binding **and says
+    why**. That message is rendered by ``describeError`` in ``web/app.js``,
+    which looks for ``detail.findings`` -- the shape the API really answers with
+    (``{"detail": {"findings": [...]}}``). The fixture builder deliberately
+    stores only the finding *list* (see ``tour_fixture_build.build_rejection``),
+    so the engine has to wrap it.
+
+    Handing the bare list through as ``detail`` type-checks, runs, and looks
+    fine in every static guard -- but ``describeError`` then finds neither
+    ``findings`` nor ``message`` and falls through to a naked "Fehler". The
+    tutorial's central step would explain nothing. Found on 2026-08-31 by
+    clicking the tour in a real browser; no existing guard could see it.
+    """
+
+    engine = _read(TOUR / "engine.js")
+    app = _read(WEB / "app.js")
+
+    assert "detail.findings" in app or "d.findings" in app, (
+        "describeError no longer reads the findings list -- check what shape "
+        "the client expects before changing the fixture wrapper"
+    )
+    wrapper = re.search(
+        r"sim\.reject.*?Promise\.reject\(\s*\{(.*?)\}\s*\)", engine, re.S
+    )
+    assert wrapper, "the simulated rejection is gone from engine.js"
+    payload = wrapper.group(1)
+    assert "findings" in payload, (
+        "the tour's rejection is not wrapped as {findings: ...}; the client "
+        "would render a bare 'Fehler' instead of the rule and its message"
+    )

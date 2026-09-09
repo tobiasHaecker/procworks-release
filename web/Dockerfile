@@ -76,8 +76,12 @@ WORKDIR /build
 # (2-builder-alpine / 2-alpine) -- sonst laege ein anderes Caddy im Image als
 # das Laufzeit-Image erwartet.
 #
-# Die drei ``go get``-Zeilen setzen **Untergrenzen** fuer Abhaengigkeiten, deren
-# von Caddy gepinnte Version eine gemeldete Luecke hat (x/net, x/text, grpc).
+# Die ``go get``-Zeilen setzen **Untergrenzen** fuer Abhaengigkeiten, deren von
+# Caddy gepinnte Version eine gemeldete Luecke hat (x/net, x/text, x/crypto,
+# grpc). Sie altern mit: Am 2026-09-09 liess der Release-Scan v1.16.2 auffliegen
+# (CVE-2026-56854 CRITICAL in x/crypto, CVE-2026-84304 und CVE-2026-84445 HIGH
+# in grpc) -- die Untergrenzen von damals waren eingeholt worden. Genau dafuer
+# sind sie da: anheben statt in die Ausnahmeliste eintragen.
 # Das ist gefahrlos und pflegeleicht: Gos Versionsauswahl nimmt stets das
 # **Maximum** aller Anforderungen, eine Untergrenze kann also nie herabstufen.
 # Verlangt ein kuenftiges Caddy eine neuere Version, gewinnt dessen Angabe und
@@ -102,9 +106,10 @@ RUN printf '%s\n' \
     && go mod init procworks/caddy \
     && go get "github.com/caddyserver/caddy/v2@${CADDY_VERSION}" \
     && go mod tidy \
-    && go get golang.org/x/net@v0.56.0 \
-              golang.org/x/text@v0.39.0 \
-              google.golang.org/grpc@v1.82.1 \
+    && go get golang.org/x/net@v0.58.0 \
+              golang.org/x/text@v0.41.0 \
+              golang.org/x/crypto@v0.55.0 \
+              google.golang.org/grpc@v1.83.2 \
     && GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -trimpath -o /usr/bin/caddy . \
     && go version -m /usr/bin/caddy \
          | grep -q "github.com/caddyserver/caddy/v2[[:space:]]\+${CADDY_VERSION}\b" 

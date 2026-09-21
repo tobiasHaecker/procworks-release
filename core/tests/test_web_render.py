@@ -1431,3 +1431,59 @@ def test_process_map_is_drawn_over_the_model_with_deviations() -> None:
     assert "const obs = opts.observed && opts.observed[id];" in graph
     monitor = _function_body(src, "async function viewMonitor(")
     assert "await conformancePanel(instances, pmap)" in monitor
+
+
+# ---------------------------------------------------------------------------
+# Ausbau: Zustaendigkeit, Mehrfachzuordnung, Vorlagen, Einpassen (1.20.0)
+# ---------------------------------------------------------------------------
+
+
+def test_run_view_names_the_responsible_and_offers_completion_accordingly() -> None:
+    """Die Instanz-Sicht bot jedem „Abschliessen“ an, egal wer zustaendig war."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    detail = _function_body(src, "async function renderInstanceDetail(")
+    assert "/tasks`" in detail and "completionActionFor(inst, nid, node, eligibleOf[nid])" in detail
+    action = _function_body(src, "function completionActionFor(")
+    assert '"nicht deine Aufgabe"' in action
+    assert "Als Aufsicht abschlie" in action and "!inst.is_test" in action
+
+
+def test_staff_rule_can_be_applied_to_several_steps_in_both_surfaces() -> None:
+    """Zuordnung ging nur einzeln je Schritt. ``bindStaffDialog`` ist beiden
+    Oberflaechen gemeinsam; jede Zuordnung bleibt eine eigene Kern-Operation."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    dialog = _function_body(src, "function bindStaffDialog(")
+    assert "otherStepsBox(schema, nodeId)" in dialog and "others.selected()" in dialog
+    assert "for (const other of extra)" in dialog  # one request per step, no bulk shortcut
+    box = _function_body(src, "function otherStepsBox(")
+    assert "Alle ohne Bearbeiter" in box and "automatic" in box
+
+
+def test_template_gallery_shows_who_does_what() -> None:
+    body = _function_body(APP_JS.read_text(encoding="utf-8"), "async function newFromTemplate(")
+    assert "t.roles" in body and '"tpl-roles"' in body and "t.step_count" in body
+
+
+def test_fit_to_view_keeps_a_readable_scale_first() -> None:
+    """Einpassen machte grosse Modelle unleserlich klein."""
+
+    body = _function_body(APP_JS.read_text(encoding="utf-8"), "function attachPanZoom(")
+    assert "const FIT_READABLE = 0.6;" in body
+    assert "fit < FIT_READABLE && !overview" in body
+    # the fit button must not reset the two-step state it relies on
+    assert 'closest(".canvas-fit")' in body
+
+
+def test_mask_layout_is_shared_and_the_designer_keeps_help_texts() -> None:
+    """Gruppen/Spalten ueber EINE Funktion fuer Vorschau und Aufgabenmaske --
+    und der Designer verlor beim Speichern bisher die Hilfetexte."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "maskLayout(" in _function_body(src, "async function promptComplete(")
+    designer = _function_body(src, "function openFormDesigner(")
+    assert "maskLayout(" in designer and "columns," in designer
+    assert designer.count("help_text: f.help_text || null") == 2  # load + save
+    css = _css_without_comments()
+    assert re.search(r"@media \(max-width: 720px\)\s*\{\s*\.mask-cols", css)

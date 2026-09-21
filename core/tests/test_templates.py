@@ -9,12 +9,14 @@ cannot be deleted.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 import procworks
+from procworks import complete_activity, instantiate, release, worklist
 from procworks import operations as ops
 from procworks.api import app
-from procworks.model import LifecycleState, TemplateOrigin
+from procworks.model import AccessMode, DataType, InstanceState, LifecycleState, TemplateOrigin
 from procworks.templates import builtin_templates
 
 client = TestClient(app)
@@ -158,3 +160,54 @@ def test_instantiate_builtin_via_http() -> None:
     # Instantiated schema validates.
     vid = body["id"]
     assert client.get(f"/schemas/{vid}/validation").json()["correct"] is True
+
+
+# --- every built-in template is playable end to end -----------------------
+
+
+#: Value each discriminator type gets while playing a template through. The
+#: loop discriminator ("repeat while true") gets False, so every loop ends.
+_PLAY_VALUES: dict[DataType, object] = {
+    DataType.BOOLEAN: False,
+    DataType.FLOAT: 500.0,
+    DataType.INTEGER: 5,
+    DataType.STRING: "ersatz",
+}
+
+
+@pytest.mark.parametrize("template", builtin_templates(), ids=lambda t: t.id)
+def test_every_builtin_template_releases_and_runs_to_completion(template: object) -> None:
+    """A template is only useful if the draft it creates can actually run.
+
+    Instantiates the blueprint, releases it (B2: every interactive step staffed)
+    and plays it through: each ready step writes a value for every element it
+    must write, and the instance must reach COMPLETED -- no dead end, no step
+    that waits for data nobody provides.
+    """
+
+    schema = release(ops.instantiate_template(template))  # type: ignore[arg-type]
+    instance = instantiate(schema)
+    for _ in range(50):
+        ready = worklist(instance, schema)
+        if not ready:
+            break
+        node_id = ready[0]
+        writes = {
+            a.element_id
+            for a in schema.data_accesses
+            if a.node_id == node_id and a.mode in (AccessMode.WRITE, AccessMode.READ_WRITE)
+        }
+        data = {e: _PLAY_VALUES[schema.data_elements[e].data_type] for e in writes}
+        instance = complete_activity(instance, schema, node_id, data)
+    assert instance.state is InstanceState.COMPLETED, (
+        f"{template.id} stuck at {worklist(instance, schema)}"  # type: ignore[attr-defined]
+    )
+
+
+def test_gallery_lists_roles_derived_from_the_staff_rules() -> None:
+    summaries = {t["id"]: t for t in TestClient(app).get("/templates").json()}
+    assert len([t for t in summaries.values() if t["origin"] == "BUILTIN"]) >= 10
+    four_eyes = summaries["tpl-vier-augen"]
+    assert four_eyes["step_count"] == 3
+    assert {"name": "Vorgesetzte:r von „Vorgang erfassen“",
+            "steps": ["Freigabe durch Vorgesetzte"]} in four_eyes["roles"]

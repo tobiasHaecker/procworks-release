@@ -840,6 +840,13 @@ class InstantiateTemplateRequest(BaseModel):
     name: str | None = Field(default=None, examples=["Urlaubsantrag 2026"])
 
 
+class TemplateRoleInfo(BaseModel):
+    """A performer of a template and the steps it carries (gallery text)."""
+
+    name: str
+    steps: list[str]
+
+
 class TemplateSummary(BaseModel):
     """Lightweight catalogue entry for the template gallery (no blueprint).
 
@@ -852,6 +859,11 @@ class TemplateSummary(BaseModel):
     description: str
     category: str
     origin: TemplateOrigin
+    #: Number of steps (activities/sub-processes) in the blueprint.
+    step_count: int = 0
+    #: Who does what, derived from the staff rules (``templates.template_roles``):
+    #: one entry per performer with the steps it carries.
+    roles: list[TemplateRoleInfo] = Field(default_factory=list)
 
 
 class SerialInsertRequest(BaseModel):
@@ -947,11 +959,13 @@ class FormFieldRequest(BaseModel):
     required: bool = True
     options: list[str] = Field(default_factory=list)
     help_text: str | None = None
+    group: str = ""
 
 
 class SetFormRequest(BaseModel):
     title: str = ""
     fields: list[FormFieldRequest]
+    columns: int = Field(default=1, ge=1, le=3)
 
 
 class RegisterConnectorRequest(BaseModel):
@@ -2213,6 +2227,15 @@ def list_templates() -> list[TemplateSummary]:
             description=t.description,
             category=t.category,
             origin=t.origin,
+            step_count=sum(
+                1
+                for n in t.blueprint.nodes.values()
+                if n.type in (NodeType.ACTIVITY, NodeType.SUBPROCESS)
+            ),
+            roles=[
+                TemplateRoleInfo(name=name, steps=steps)
+                for name, steps in builtin_templates_mod.template_roles(t.blueprint)
+            ],
         )
         for t in templates
     ]
@@ -2599,11 +2622,14 @@ def post_set_form(
             required=f.required,
             options=tuple(f.options),
             help_text=f.help_text,
+            group=f.group,
         )
         for f in req.fields
     ]
     return _commit_or_422(
-        lambda: ops.set_form(schema, node_id, title=req.title, fields=specs)
+        lambda: ops.set_form(
+            schema, node_id, title=req.title, fields=specs, columns=req.columns
+        )
     )
 
 

@@ -1278,7 +1278,7 @@ function renderGraph(schema, opts) {
   const fitBtn = el("button", {
     class: "canvas-fit",
     type: "button",
-    title: "Modell einpassen (auch: Doppelklick mit der mittleren Maustaste)",
+    title: "Modell einpassen – erster Klick: lesbar ab Start, zweiter Klick: ganze Übersicht (auch: Doppelklick mit der mittleren Maustaste)",
     "aria-label": "Modell in die Ansicht einpassen",
     onClick: (e) => {
       e.preventDefault();
@@ -1568,11 +1568,18 @@ function focusOrgAgent(agentId, unitId) {
 function attachPanZoom(wrap, svgEl) {
   const MIN = 0.2, MAX = 4;
   let scale = 1, tx = 0, ty = 0;
+  // Zweistufiges Einpassen (siehe fitToView): true, solange die lesbare Stufe
+  // gezeigt wird und der naechste Klick die volle Uebersicht bringen soll. Jede
+  // eigene Bewegung (Rad, Ziehen) setzt zurueck.
+  const fitState = { readableShown: false };
   // Breite eines am rechten Rand liegenden Overlays (Modellieren-Sicht: die
   // Schritt-Karte), die beim Einpassen und Zentrieren frei bleiben muss.
   // Ohne diese Reserve zentriert die Canvas den gewaehlten Knoten exakt unter
   // die Karte -- man bearbeitet dann einen Schritt, den man nicht sieht.
   let reserveRight = 0;
+
+  /** Mindestmassstab, den der erste Einpassen-Klick nicht unterschreitet. */
+  const FIT_READABLE = 0.6;
 
   function apply() {
     svgEl.style.transformOrigin = "0 0";
@@ -1588,6 +1595,7 @@ function attachPanZoom(wrap, svgEl) {
   //    both directions, so sideways scrolling works. Shift+wheel maps a
   //    vertical mouse wheel to horizontal panning.
   wrap.addEventListener("wheel", (e) => {
+    fitState.readableShown = false;  // eigene Bewegung: Einpassen beginnt wieder lesbar
     e.preventDefault();
     if (e.ctrlKey) {
       const rect = wrap.getBoundingClientRect();
@@ -1612,6 +1620,10 @@ function attachPanZoom(wrap, svgEl) {
   // threshold so a plain click still selects a node / hits a "+" handle.
   let down = false, dragging = false, sx = 0, sy = 0, lastX = 0, lastY = 0;
   wrap.addEventListener("pointerdown", (e) => {
+    // Eigene Bewegung: Einpassen beginnt wieder lesbar -- ausser beim Klick auf
+    // den Einpassen-Knopf selbst, der im Canvas liegt (sonst kaeme die zweite
+    // Stufe nie).
+    if (!(e.target && e.target.closest && e.target.closest(".canvas-fit"))) fitState.readableShown = false;
     if (e.button !== 0) return;
     down = true; dragging = false;
     sx = lastX = e.clientX; sy = lastY = e.clientY;
@@ -1691,9 +1703,24 @@ function attachPanZoom(wrap, svgEl) {
     const MARGIN = 16;
     const vwFree = Math.max(120, vw - reserveRight);
     const fit = Math.min((vwFree - MARGIN * 2) / bw, (vh - MARGIN * 2) / bh);
-    scale = Math.min(MAX, Math.max(MIN, Math.min(1, fit)));
-    tx = (vwFree - bw * scale) / 2 - bx * scale;
-    ty = (vh - bh * scale) / 2 - by * scale;
+    // Lesbar statt winzig: Passt das Modell nur unterhalb von FIT_READABLE ins
+    // Bild, haelt der erste Klick diese Mindestgroesse und zeigt den Ablauf ab
+    // dem Start (links); erst ein zweiter Klick direkt danach zeigt die volle
+    // Uebersicht. Vorher war ein Modell mit elf Schritten nach dem Einpassen
+    // kaum lesbar. Kleine Modelle verhalten sich unveraendert.
+    const overview = fitState.readableShown;
+    if (fit < FIT_READABLE && !overview) {
+      scale = FIT_READABLE;
+      tx = MARGIN - bx * scale;
+      const h = bh * scale;
+      ty = h <= vh - MARGIN * 2 ? (vh - h) / 2 - by * scale : MARGIN - by * scale;
+      fitState.readableShown = true;
+    } else {
+      scale = Math.min(MAX, Math.max(MIN, Math.min(1, fit)));
+      tx = (vwFree - bw * scale) / 2 - bx * scale;
+      ty = (vh - bh * scale) / 2 - by * scale;
+      fitState.readableShown = false;
+    }
     apply();
   }
 
@@ -1958,8 +1985,14 @@ async function newFromTemplate() {
       el("div", { class: "tpl-card-h" },
         el("strong", null, t.name),
         badge),
-      t.category ? el("div", { class: "tpl-cat" }, t.category) : null,
-      el("div", { class: "tpl-desc" }, t.description || "—"));
+      t.category ? el("div", { class: "tpl-cat" }, t.category + (t.step_count ? ` · ${t.step_count} Schritte` : "")) : null,
+      el("div", { class: "tpl-desc" }, t.description || "—"),
+      // Wer macht was: aus den Bearbeiterregeln des Bauplans abgeleitet (Kern:
+      // templates.template_roles) -- passt damit immer zum Inhalt der Vorlage.
+      (t.roles || []).length
+        ? el("ul", { class: "tpl-roles" }, ...t.roles.map((r) =>
+            el("li", null, el("strong", null, r.name), ": " + r.steps.join(", "))))
+        : null);
     return card;
   });
   const gallery = el("div", { class: "tpl-gallery" }, ...cards);
@@ -3352,12 +3385,14 @@ function bindStaffDialog(nodeId) {
   };
   const picker = pickList(items, syncRec);
   syncRec();
+  const others = otherStepsBox(schema, nodeId);
   openModal(`Bearbeiter für „${nodeCaption(node)}"`,
     el("div", null,
       current ? el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
         `Ersetzt die bestehende Zuordnung: ${describeRule(current)}.`) : null,
       picker.node,
       el("div", { style: "margin-top:10px" }, recField),
+      others.node,
       el("div", { style: "margin-top:10px" },
         el("button", { class: "btn small ghost", type: "button", onClick: () => addStaffRule(nodeId) },
           "Erweiterte Regel (Bearbeiter/Vorgesetzte:r eines früheren Schritts) …"))),
@@ -3369,9 +3404,57 @@ function bindStaffDialog(nodeId) {
       if (kind === "ORG_UNIT") rule.recursive = recBox.checked;
       try {
         await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId, rule });
-        await refreshSchema(); render(); toast("ok", "Bearbeiter zugeordnet", [describeRule(rule)]);
       } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      // Weitere Schritte: jede Zuordnung ist eine eigene Operation mit eigener
+      // Pruefung im Kern -- keine Sammel-Abkuerzung. Scheitert eine, bleiben die
+      // anderen bestehen, und die Meldung nennt, welche nicht ging.
+      const extra = others.selected();
+      const failed = [];
+      for (const other of extra) {
+        try { await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: other, rule }); }
+        catch (err) { const d = describeError(err); failed.push(`${nodeLabelOf(other)}: ${d.lines.join(" ") || d.title}`); }
+      }
+      await refreshSchema(); render();
+      const done = 1 + extra.length - failed.length;
+      if (failed.length) toast("err", `${done} Schritt(e) zugeordnet, ${failed.length} nicht`, failed);
+      else toast("ok", done > 1 ? `${done} Schritten zugeordnet` : "Bearbeiter zugeordnet", [describeRule(rule)]);
     }, "Zuordnen");
+}
+
+/**
+ * Auswahl „Auch diesen Schritten zuordnen“ im Bearbeiter-Dialog.
+ *
+ * Bietet die uebrigen interaktiven Schritte an (automatische tragen keine
+ * Bearbeiterregel, Z4). Schritte ohne Bearbeiter stehen oben und lassen sich mit
+ * einem Klick alle waehlen -- der haeufigste Fall vor einer Freigabe (B2).
+ * Wird von ``bindStaffDialog`` genutzt, das beide Oberflaechen aufrufen.
+ *
+ * @param {object} schema das Schema
+ * @param {string} nodeId der Schritt, fuer den der Dialog offen ist
+ * @returns {{node: HTMLElement|null, selected: () => string[]}}
+ */
+function otherStepsBox(schema, nodeId) {
+  const rules = schema.staff_rules || {};
+  const bindings = schema.service_bindings || {};
+  const candidates = activitiesOf(schema)
+    .filter((n) => n.id !== nodeId && !(bindings[n.id] && bindings[n.id].automatic))
+    .sort((a, b) => Number(Boolean(rules[a.id])) - Number(Boolean(rules[b.id])));
+  if (!candidates.length) return { node: null, selected: () => [] };
+  const boxes = candidates.map((n) => {
+    const box = el("input", { type: "checkbox", value: n.id });
+    return { box, row: el("label", { class: "check-row" }, box, " " + nodeCaption(n),
+      rules[n.id] ? el("span", { class: "muted", style: "font-size:11px" }, ` (ersetzt: ${describeRule(rules[n.id])})`) : null) };
+  });
+  const unstaffed = boxes.filter((b) => !rules[b.box.value]);
+  const node = el("details", { class: "multi-steps", style: "margin-top:10px" },
+    el("summary", null, "Auch weiteren Schritten zuordnen …"),
+    unstaffed.length
+      ? el("button", { class: "btn small ghost", type: "button", style: "margin:6px 0",
+          onClick: () => unstaffed.forEach((b) => { b.box.checked = true; }) },
+          `Alle ohne Bearbeiter wählen (${unstaffed.length})`)
+      : null,
+    el("div", { class: "check-list" }, ...boxes.map((b) => b.row)));
+  return { node, selected: () => boxes.filter((b) => b.box.checked).map((b) => b.box.value) };
 }
 
 // Bindet ein Datenelement an den gewaehlten Schritt (⊕ in der Palette): fragt
@@ -4534,10 +4617,14 @@ function openFormDesigner(nodeId) {
   }
   const existing = (schema.forms || {})[nodeId];
   let title = existing ? existing.title : "";
+  let columns = existing ? existing.columns || 1 : 1;
+  // help_text und group werden mitgefuehrt: Frueher fehlte help_text hier, und
+  // ein blosses Oeffnen + Speichern loeschte die Hilfetexte einer Maske.
   const fields = existing
     ? existing.fields.map((f) => ({
         element_id: f.element_id, widget: f.widget, label: f.label,
         mode: f.mode, required: f.required, options: (f.options || []).slice(),
+        help_text: f.help_text || null, group: f.group || "",
       }))
     : [];
   const container = el("div", { class: "form-designer" });
@@ -4546,21 +4633,19 @@ function openFormDesigner(nodeId) {
     const elem = elements[0];
     return {
       element_id: elem.id, widget: WIDGETS_FOR_TYPE[elem.data_type][0],
-      label: elem.name, mode: "WRITE", required: true, options: [],
+      label: elem.name, mode: "WRITE", required: true, options: [], help_text: null, group: "",
     };
   };
 
   function previewMask() {
     if (!fields.length) return el("div", { class: "muted", style: "font-size:12px" }, "Noch keine Felder.");
-    const grid = el("div", { class: "form-grid" });
-    fields.forEach((f) => {
+    return maskLayout(fields.map((f) => {
       const elem = schema.data_elements[f.element_id];
       const { control } = maskControl(elem, f.widget, f.options, null);
       control.setAttribute("disabled", "disabled");
-      grid.appendChild(el("label", { class: "field" },
-        (f.label || (elem ? elem.name : f.element_id)) + (f.required ? " *" : ""), control));
-    });
-    return grid;
+      return { group: f.group, node: el("label", { class: "field" },
+        (f.label || (elem ? elem.name : f.element_id)) + (f.required ? " *" : ""), control) };
+    }), columns);
   }
 
   function fieldRow(f, idx) {
@@ -4597,12 +4682,15 @@ function openFormDesigner(nodeId) {
     const reqBox = el("input", { type: "checkbox" });
     reqBox.checked = f.required;
     reqBox.addEventListener("change", () => { f.required = reqBox.checked; });
+    const groupInput = el("input", { type: "text", value: f.group || "", placeholder: "optional" });
+    groupInput.addEventListener("change", () => { f.group = groupInput.value.trim(); renderDesigner(); });
 
     const cells = [
       el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Datenelement"), elemSel),
       el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Darstellung"), widgetSel),
       el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Beschriftung"), labelInput),
       el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Richtung"), modeSel),
+      el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Gruppe"), groupInput),
       el("div", { class: "fd-cell fd-req" },
         el("label", { class: "row", style: "gap:6px;align-items:center" }, reqBox, "Pflicht")),
     ];
@@ -4625,6 +4713,11 @@ function openFormDesigner(nodeId) {
     const titleInput = el("input", { type: "text", value: title, placeholder: "Titel der Maske (optional)" });
     titleInput.addEventListener("input", () => { title = titleInput.value; });
     container.appendChild(el("label", { class: "field" }, "Maskentitel", titleInput));
+    const colSel = el("select", null,
+      ...[1, 2, 3].map((n) => el("option", { value: String(n) }, n === 1 ? "1 Spalte" : `${n} Spalten`)));
+    colSel.value = String(columns);
+    colSel.addEventListener("change", () => { columns = Number(colSel.value); renderDesigner(); });
+    container.appendChild(el("label", { class: "field" }, "Anordnung (am Smartphone immer einspaltig)", colSel));
 
     const list = el("div", { class: "fd-list" });
     fields.forEach((f, idx) => list.appendChild(fieldRow(f, idx)));
@@ -4635,7 +4728,7 @@ function openFormDesigner(nodeId) {
     }, "+ Feld hinzuf\u00FCgen"));
 
     container.appendChild(el("div", { class: "fd-preview" },
-      el("div", { class: "fd-preview-h" }, "Vorschau \u2013 automatische Anordnung"),
+      el("div", { class: "fd-preview-h" }, "Vorschau"),
       previewMask()));
   }
 
@@ -4644,10 +4737,12 @@ function openFormDesigner(nodeId) {
     if (!fields.length) { toast("err", "Mindestens ein Feld ist erforderlich."); return false; }
     const payload = {
       title,
+      columns,
       fields: fields.map((f) => ({
         element_id: f.element_id, widget: f.widget, label: f.label,
         mode: f.mode, required: f.required,
         options: f.widget === "DROPDOWN" ? f.options : [],
+        help_text: f.help_text || null, group: f.group || "",
       })),
     };
     try {
@@ -6118,6 +6213,16 @@ async function renderInstanceDetail(container, withActions) {
 
   // Worklist
   const wlBody = el("div", { class: "panel-b" });
+  // Zustaendigkeit je bereitem Schritt (aus der Bearbeiterregel, inkl.
+  // Vertretung). Die Instanz-Sicht zeigt weiter ALLE bereiten Schritte (E1:
+  // Transparenz), aber sie sagt, wer zustaendig ist, und bietet das Abschliessen
+  // nur passend an -- vorher stand bei jedem Schritt „Abschliessen“, egal fuer wen.
+  const eligibleOf = {};
+  if (inst.state !== "COMPLETED") {
+    try {
+      (await api.get(`/instances/${inst.id}/tasks`)).forEach((t) => { eligibleOf[t.node_id] = t.eligible_agents || []; });
+    } catch (e) { /* best effort: ohne Liste bleibt die bisherige Anzeige */ }
+  }
   if (inst.state === "COMPLETED") {
     wlBody.appendChild(el("div", { class: "ok-banner" }, "\u2713 Instanz abgeschlossen \u2013 jeder Knoten COMPLETED oder SKIPPED."));
   } else {
@@ -6133,13 +6238,17 @@ async function renderInstanceDetail(container, withActions) {
         : nodeDetail === "FAILED"
           ? el("span", { class: "tag" }, "gescheitert: " + ((inst.node_detail_reason || {})[nid] || "ohne Begr\u00FCndung"))
           : null;
+      const action = withActions ? completionActionFor(inst, nid, node, eligibleOf[nid]) : null;
       wlBody.appendChild(el("div", { class: "worklist-item" },
         el("span", { class: "name" }, node ? nodeCaption(node) : nid),
         owner
           ? el("span", { class: "tag" }, "\u00FCbernommen von " + agentNameOf(owner))
           : el("span", { class: "tag" }, "bereit"),
+        eligibleOf[nid] && eligibleOf[nid].length
+          ? el("span", { class: "tag muted", title: eligibleOf[nid].map(agentNameOf).join(", ") }, "zust\u00E4ndig: " + responsibleSummary(eligibleOf[nid]))
+          : null,
         detailTag,
-        withActions ? el("button", { class: "btn small green", onClick: () => completeActivity(nid, node) }, "Abschlie\u00DFen") : null));
+        action));
     });
     if (!(wl.ready_activities || []).length) {
       wlBody.appendChild(el("div", { class: "muted", style: "font-size:13px" }, "Keine bereiten Schritte (l\u00E4uft automatisch weiter oder wartet auf Teilprozess)."));
@@ -6329,6 +6438,50 @@ function openAdhocDelete(schema, inst, targets) {
   }, "Entfernen");
 }
 
+/**
+ * Kurzform der Zustaendigen: bis zu zwei Namen, sonst „Name, Name +N“.
+ * @param {string[]} agentIds zustaendige Agenten
+ * @returns {string}
+ */
+function responsibleSummary(agentIds) {
+  const names = agentIds.map(agentNameOf);
+  return names.length <= 2 ? names.join(", ") : `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
+}
+
+/**
+ * Abschliessen-Knopf eines bereiten Schritts in der Instanz-Sicht, passend zur Rolle.
+ *
+ * * An eine Person gebunden und zustaendig (oder Schritt ohne Bearbeiterregel):
+ *   „Abschliessen“.
+ * * Gebunden, aber nicht zustaendig: kein Knopf, sondern ein Hinweis -- der Kern
+ *   lehnte den Abschluss ohnehin ab (409).
+ * * Nicht gebunden (Modellierer/Administrator) bei einem Schritt mit
+ *   Bearbeiterregel: „Als Aufsicht abschliessen“. Der Kern verlangt dann eine
+ *   Begruendung und protokolliert den Eingriff; bei aktiver Lizenzierung lehnt er
+ *   ihn ab. Test-Instanzen sind davon ausgenommen (normales „Abschliessen“).
+ *
+ * Der Client entscheidet nichts endgueltig -- er waehlt nur die passende Form.
+ *
+ * @param {object} inst die Instanz
+ * @param {string} nid Knoten-ID
+ * @param {object} node der Knoten
+ * @param {string[]|undefined} eligible zustaendige Agenten (undefined = unbekannt)
+ * @returns {HTMLElement}
+ */
+function completionActionFor(inst, nid, node, eligible) {
+  const me = state.principal && state.principal.agent_id;
+  const staffed = eligible && eligible.length > 0;
+  if (me && staffed && !eligible.includes(me)) {
+    return el("span", { class: "tag muted" }, "nicht deine Aufgabe");
+  }
+  if (!me && staffed && !inst.is_test) {
+    return el("button", { class: "btn small",
+      title: "Du bist keinem Bearbeiter zugeordnet – der Abschluss wird als Aufsichtseingriff mit Begründung protokolliert",
+      onClick: () => completeActivity(nid, node) }, "Als Aufsicht abschlie\u00DFen");
+  }
+  return el("button", { class: "btn small green", onClick: () => completeActivity(nid, node) }, "Abschlie\u00DFen");
+}
+
 async function completeActivity(nodeId, node) {
   const schema = state.instance.ad_hoc_schema || state.schema;
   await promptComplete(schema, state.instanceId, nodeId, node ? nodeCaption(node) : nodeId, null,
@@ -6414,6 +6567,36 @@ function askSupervisionReason(label, onConfirm) {
   }, "Trotzdem abschlie\u00DFen");
 }
 
+/**
+ * Anordnung einer Eingabemaske: Gruppen mit Ueberschrift, 1-3 Spalten.
+ *
+ * EINE Funktion fuer die Vorschau im Designer und die echte Aufgabenmaske,
+ * damit beide gleich aussehen. Gruppen erscheinen in der Reihenfolge ihres
+ * ersten Felds; Felder ohne Gruppe stehen ohne Ueberschrift an ihrer Stelle.
+ * Am Smartphone ist die Maske immer einspaltig (CSS ``.mask-cols``).
+ *
+ * @param {{group?: string, node: HTMLElement}[]} items Felder in Maskenreihenfolge
+ * @param {number} columns Spaltenzahl (1-3)
+ * @returns {HTMLElement}
+ */
+function maskLayout(items, columns) {
+  const wrap = el("div", { class: "mask-layout" });
+  const cols = Math.min(3, Math.max(1, Number(columns) || 1));
+  const sections = [];
+  const byGroup = {};
+  items.forEach((it) => {
+    const key = (it.group || "").trim();
+    if (!(key in byGroup)) { byGroup[key] = []; sections.push(key); }
+    byGroup[key].push(it.node);
+  });
+  sections.forEach((key) => {
+    if (key) wrap.appendChild(el("div", { class: "mask-group" }, key));
+    wrap.appendChild(el("div", { class: "mask-cols", style: `grid-template-columns: repeat(${cols}, minmax(0, 1fr))` },
+      ...byGroup[key]));
+  });
+  return wrap;
+}
+
 async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone, dataValues) {
   // Bevorzugt die gestaltete Eingabemaske dieses Schritts; sonst generische
   // Felder fuer die Pflicht-Schreibvariablen.
@@ -6423,16 +6606,16 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
   const body = el("div", { class: "form-grid" });
   if (form) {
     if (form.title) body.appendChild(el("div", { class: "mask-title" }, form.title));
-    form.fields.forEach((f) => {
+    body.appendChild(maskLayout(form.fields.map((f) => {
       const elem = schema.data_elements[f.element_id];
       const writable = f.mode === "WRITE" || f.mode === "READ_WRITE";
       const { control, read } = maskControl(elem, f.widget, f.options, values[f.element_id]);
       if (!writable) control.setAttribute("disabled", "disabled");
       else inputs[f.element_id] = { read, elem, label: f.label, required: f.required !== false };
-      body.appendChild(el("label", { class: "field" },
+      return { group: f.group, node: el("label", { class: "field" },
         f.label + (f.required && writable ? " *" : ""), control,
-        f.help_text ? el("span", { class: "field-help" }, f.help_text) : null));
-    });
+        f.help_text ? el("span", { class: "field-help" }, f.help_text) : null) };
+    }), form.columns || 1));
   } else {
     const writes = (schema.data_accesses || []).filter((a) => a.node_id === nodeId && (a.mode === "WRITE" || a.mode === "READ_WRITE"));
     writes.forEach((a) => {

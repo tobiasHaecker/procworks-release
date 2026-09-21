@@ -1581,6 +1581,8 @@ class FormFieldSpec:
     required: bool = True
     options: tuple[str, ...] = ()
     help_text: str | None = None
+    #: Optional heading the field is grouped under (presentation only).
+    group: str = ""
 
 
 def set_form(
@@ -1589,6 +1591,7 @@ def set_form(
     *,
     title: str = "",
     fields: list[FormFieldSpec],
+    columns: int = 1,
 ) -> ProcessSchema:
     """Design (or replace) the input mask of an ACTIVITY (form designer).
 
@@ -1666,6 +1669,7 @@ def set_form(
                 required=spec.required,
                 options=list(spec.options),
                 help_text=spec.help_text,
+                group=spec.group.strip(),
             )
         )
 
@@ -1685,7 +1689,19 @@ def set_form(
                 mandatory=spec.required,
             )
         )
-    candidate.forms[node_id] = Form(node_id=node_id, title=title, fields=form_fields)
+    if not 1 <= columns <= 3:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=node_id,
+                    message=f"a mask can have 1 to 3 columns, not {columns}",
+                )
+            ]
+        )
+    candidate.forms[node_id] = Form(
+        node_id=node_id, title=title, fields=form_fields, columns=columns
+    )
     return raise_if_invalid(candidate)
 
 

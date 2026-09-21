@@ -268,3 +268,40 @@ def test_disconnect_data_removes_backing_mask_field():
     # The only field vanished, so the whole mask is gone.
     assert node not in schema.forms
     assert validate(schema) == []
+
+
+def test_groups_and_columns_are_kept_and_survive_revision_and_bpmn():
+    """Layout hints (group heading, 1-3 columns) are pure presentation: stored,
+    carried through a revision and a BPMN round trip, never judged by a rule."""
+
+    schema, node = _linear_with_element(schema_id="layout")
+    schema = add_data_element(schema, "Ort", DataType.STRING, element_id="ort")
+    schema = set_form(
+        schema,
+        node,
+        title="Antrag",
+        columns=2,
+        fields=[
+            FormFieldSpec(element_id="name", widget=WidgetKind.TEXT, group=" Person "),
+            FormFieldSpec(element_id="ort", widget=WidgetKind.TEXT, group="Adresse"),
+        ],
+    )
+    form = schema.forms[node]
+    assert form.columns == 2
+    assert [f.group for f in form.fields] == ["Person", "Adresse"]  # trimmed
+    assert validate(schema) == []
+    assert new_revision(release(staffed(schema))).forms[node].columns == 2
+    restored = import_bpmn(export_bpmn(schema)).forms[node]
+    assert restored.columns == 2 and restored.fields[1].group == "Adresse"
+
+
+@pytest.mark.parametrize("columns", [0, 4])
+def test_column_count_outside_one_to_three_is_rejected(columns):
+    schema, node = _linear_with_element(schema_id=f"cols-{columns}")
+    with pytest.raises(CorrectnessError, match=r"\[OP\].*1 to 3 columns"):
+        set_form(
+            schema,
+            node,
+            columns=columns,
+            fields=[FormFieldSpec(element_id="name", widget=WidgetKind.TEXT)],
+        )

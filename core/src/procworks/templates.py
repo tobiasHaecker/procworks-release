@@ -24,6 +24,7 @@ from procworks import operations as ops
 from procworks.model import (
     AccessMode,
     DataType,
+    Node,
     ProcessSchema,
     ProcessTemplate,
     StaffRule,
@@ -194,12 +195,380 @@ def _build_onboarding() -> ProcessTemplate:
     )
 
 
+def _join_before_end(schema: ProcessSchema) -> str:
+    """The node right before END (e.g. the join closing the last block)."""
+
+    return next(e.source for e in schema.incoming(schema.end_node().id))
+
+
+def _build_purchase_approval() -> ProcessTemplate:
+    """Bestellfreigabe: request -> approval level by amount (THRESHOLD) -> order.
+
+    The amount does not *decide* anything -- it only routes to the right
+    approval level (below 1 000 the team lead, from 1 000 the management), which
+    is what a threshold partition is for.
+    """
+
+    s = ops.create_empty_schema("Bestellfreigabe")
+    s = _with_role(s, "anforderer", "Anforderer")
+    s = _with_role(s, "teamleitung", "Teamleitung")
+    s = _with_role(s, "geschaeftsfuehrung", "Geschäftsführung")
+    s = _with_role(s, "einkauf", "Einkauf")
+
+    s = ops.serial_insert(s, "Bestellung anfordern", s.start_node().id)
+    anfordern = _nid(s, "Bestellung anfordern")
+    s = ops.add_data_element(s, "Bestellwert", DataType.FLOAT, element_id="bestellwert")
+    s = ops.connect_data(s, anfordern, "bestellwert", AccessMode.WRITE)
+    s = ops.conditional_insert(
+        s,
+        anfordern,
+        discriminator="bestellwert",
+        branches=[
+            ops.BranchSpec(label="Freigabe Teamleitung", upper=1000.0),
+            ops.BranchSpec(label="Freigabe Geschäftsführung"),
+        ],
+    )
+    s = ops.serial_insert(s, "Bestellung auslösen", _join_before_end(s))
+
+    s = ops.assign_staff_rule(s, anfordern, _role_rule("anforderer"))
+    s = ops.assign_staff_rule(s, _nid(s, "Freigabe Teamleitung"), _role_rule("teamleitung"))
+    s = ops.assign_staff_rule(
+        s, _nid(s, "Freigabe Geschäftsführung"), _role_rule("geschaeftsfuehrung")
+    )
+    s = ops.assign_staff_rule(s, _nid(s, "Bestellung auslösen"), _role_rule("einkauf"))
+
+    return ops.save_as_template(
+        s,
+        template_id="tpl-bestellfreigabe",
+        name="Bestellfreigabe",
+        description=(
+            "Bestellung anfordern; unter 1 000 € gibt die Teamleitung frei, darüber "
+            "die Geschäftsführung. Danach löst der Einkauf die Bestellung aus."
+        ),
+        category="Einkauf",
+        origin=TemplateOrigin.BUILTIN,
+    )
+
+
+def _build_travel_expenses() -> ProcessTemplate:
+    """Reisekostenabrechnung: capture -> review (decision) -> pay out / correct."""
+
+    s = ops.create_empty_schema("Reisekostenabrechnung")
+    s = _with_role(s, "mitarbeiter", "Mitarbeiter")
+    s = _with_role(s, "vorgesetzte", "Vorgesetzte")
+    s = _with_role(s, "buchhaltung", "Buchhaltung")
+
+    s = ops.serial_insert(s, "Reisekosten erfassen", s.start_node().id)
+    erfassen = _nid(s, "Reisekosten erfassen")
+    s = ops.serial_insert(s, "Abrechnung prüfen", erfassen)
+    pruefen = _nid(s, "Abrechnung prüfen")
+    s = ops.add_data_element(s, "Abrechnung genehmigt", DataType.BOOLEAN, element_id="genehmigt")
+    s = ops.connect_data(s, pruefen, "genehmigt", AccessMode.WRITE)
+    s = ops.conditional_insert(
+        s,
+        pruefen,
+        discriminator="genehmigt",
+        branches=[
+            ops.BranchSpec(label="Erstattung anweisen", bool_value=True),
+            ops.BranchSpec(label="Korrektur anfordern", bool_value=False),
+        ],
+    )
+
+    s = ops.assign_staff_rule(s, erfassen, _role_rule("mitarbeiter"))
+    s = ops.assign_staff_rule(s, pruefen, _role_rule("vorgesetzte"))
+    s = ops.assign_staff_rule(s, _nid(s, "Erstattung anweisen"), _role_rule("buchhaltung"))
+    s = ops.assign_staff_rule(s, _nid(s, "Korrektur anfordern"), _role_rule("vorgesetzte"))
+
+    return ops.save_as_template(
+        s,
+        template_id="tpl-reisekosten",
+        name="Reisekostenabrechnung",
+        description=(
+            "Reisekosten erfassen, von der vorgesetzten Person prüfen lassen und "
+            "erstatten oder zur Korrektur zurückgeben."
+        ),
+        category="Finanzen",
+        origin=TemplateOrigin.BUILTIN,
+    )
+
+
+def _build_complaint() -> ProcessTemplate:
+    """Reklamation: capture -> assess (three-way ENUM decision) -> inform customer."""
+
+    s = ops.create_empty_schema("Reklamation")
+    s = _with_role(s, "kundenservice", "Kundenservice")
+    s = _with_role(s, "qualitaet", "Qualitätssicherung")
+    s = _with_role(s, "buchhaltung", "Buchhaltung")
+
+    s = ops.serial_insert(s, "Reklamation erfassen", s.start_node().id)
+    erfassen = _nid(s, "Reklamation erfassen")
+    s = ops.serial_insert(s, "Reklamation bewerten", erfassen)
+    bewerten = _nid(s, "Reklamation bewerten")
+    s = ops.add_data_element(s, "Maßnahme", DataType.STRING, element_id="massnahme")
+    s = ops.connect_data(s, bewerten, "massnahme", AccessMode.WRITE)
+    s = ops.conditional_insert(
+        s,
+        bewerten,
+        discriminator="massnahme",
+        branches=[
+            ops.BranchSpec(label="Ersatz liefern", values=("ersatz",)),
+            ops.BranchSpec(label="Gutschrift erstellen", values=("gutschrift",)),
+            ops.BranchSpec(label="Ablehnung begründen", is_else=True),
+        ],
+    )
+    s = ops.serial_insert(s, "Kunde informieren", _join_before_end(s))
+
+    s = ops.assign_staff_rule(s, erfassen, _role_rule("kundenservice"))
+    s = ops.assign_staff_rule(s, bewerten, _role_rule("qualitaet"))
+    s = ops.assign_staff_rule(s, _nid(s, "Ersatz liefern"), _role_rule("kundenservice"))
+    s = ops.assign_staff_rule(s, _nid(s, "Gutschrift erstellen"), _role_rule("buchhaltung"))
+    s = ops.assign_staff_rule(s, _nid(s, "Ablehnung begründen"), _role_rule("qualitaet"))
+    s = ops.assign_staff_rule(s, _nid(s, "Kunde informieren"), _role_rule("kundenservice"))
+
+    return ops.save_as_template(
+        s,
+        template_id="tpl-reklamation",
+        name="Reklamation",
+        description=(
+            "Reklamation erfassen und bewerten; je nach Maßnahme Ersatz liefern, "
+            "Gutschrift erstellen oder die Ablehnung begründen, dann den Kunden informieren."
+        ),
+        category="Vertrieb",
+        origin=TemplateOrigin.BUILTIN,
+    )
+
+
+def _build_four_eyes() -> ProcessTemplate:
+    """Vier-Augen-Freigabe: the approver is the supervisor of whoever captured it.
+
+    Uses the relative staff rule ``NODE_PERFORMING_AGENT_SUPERVISOR``: the
+    manager of the org unit in which "Vorgang erfassen" was performed approves.
+    The sample org therefore places the capturing role in a unit with a manager
+    (Z2 needs at least one possible supervisor at design time).
+    """
+
+    s = ops.create_empty_schema("Vier-Augen-Freigabe")
+    s = ops.add_role(s, "Sachbearbeitung", role_id="sachbearbeitung")
+    s = ops.add_org_unit(s, "Fachbereich", org_unit_id="fachbereich")
+    s = ops.add_agent(s, "Leitung Fachbereich (Beispiel)", org_unit_id="fachbereich",
+                      agent_id="a-leitung")
+    s = ops.set_org_unit_manager(s, "fachbereich", "a-leitung")
+    s = ops.add_agent(s, "Sachbearbeitung (Beispiel)", role_ids=["sachbearbeitung"],
+                      org_unit_id="fachbereich", agent_id="a-sachbearbeitung")
+
+    s = ops.serial_insert(s, "Vorgang erfassen", s.start_node().id)
+    erfassen = _nid(s, "Vorgang erfassen")
+    s = ops.serial_insert(s, "Freigabe durch Vorgesetzte", erfassen)
+    freigabe = _nid(s, "Freigabe durch Vorgesetzte")
+    s = ops.serial_insert(s, "Vorgang abschließen", freigabe)
+
+    s = ops.assign_staff_rule(s, erfassen, _role_rule("sachbearbeitung"))
+    s = ops.assign_staff_rule(
+        s,
+        freigabe,
+        StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR, ref=erfassen),
+    )
+    s = ops.assign_staff_rule(s, _nid(s, "Vorgang abschließen"), _role_rule("sachbearbeitung"))
+
+    return ops.save_as_template(
+        s,
+        template_id="tpl-vier-augen",
+        name="Vier-Augen-Freigabe",
+        description=(
+            "Ein Vorgang wird erfasst und von der vorgesetzten Person der erfassenden "
+            "Person freigegeben – nie von ihr selbst."
+        ),
+        category="Allgemein",
+        origin=TemplateOrigin.BUILTIN,
+    )
+
+
+def _build_incident() -> ProcessTemplate:
+    """Störungsmeldung: report -> analyse -> fix-and-test loop (bounded) -> inform."""
+
+    s = ops.create_empty_schema("Störungsmeldung")
+    s = _with_role(s, "mitarbeiter", "Mitarbeiter")
+    s = _with_role(s, "it_support", "IT-Support")
+
+    s = ops.serial_insert(s, "Störung melden", s.start_node().id)
+    melden = _nid(s, "Störung melden")
+    s = ops.serial_insert(s, "Störung analysieren", melden)
+    analysieren = _nid(s, "Störung analysieren")
+    s = ops.add_data_element(s, "Nacharbeit nötig", DataType.BOOLEAN, element_id="nacharbeit")
+    # Repeat "fix and test" while the test says rework is needed -- at most five
+    # rounds (K6 hard brake), after which the loop is left and escalated manually.
+    s = ops.insert_loop(
+        s,
+        analysieren,
+        "Lösung umsetzen und testen",
+        discriminator="nacharbeit",
+        repeat_value=True,
+        max_iterations=5,
+    )
+    s = ops.serial_insert(s, "Meldende Person informieren", _join_before_end(s))
+
+    s = ops.assign_staff_rule(s, melden, _role_rule("mitarbeiter"))
+    s = ops.assign_staff_rule(s, analysieren, _role_rule("it_support"))
+    s = ops.assign_staff_rule(s, _nid(s, "Lösung umsetzen und testen"), _role_rule("it_support"))
+    s = ops.assign_staff_rule(s, _nid(s, "Meldende Person informieren"), _role_rule("it_support"))
+
+    return ops.save_as_template(
+        s,
+        template_id="tpl-stoerung",
+        name="Störungsmeldung",
+        description=(
+            "Störung melden und analysieren; die Lösung wird umgesetzt und getestet, "
+            "bis keine Nacharbeit mehr nötig ist (höchstens fünf Runden)."
+        ),
+        category="IT",
+        origin=TemplateOrigin.BUILTIN,
+    )
+
+
+def _build_supplier_approval() -> ProcessTemplate:
+    """Lieferantenfreigabe: capture -> (credit + compliance in parallel) -> approve."""
+
+    s = ops.create_empty_schema("Lieferantenfreigabe")
+    s = _with_role(s, "einkauf", "Einkauf")
+    s = _with_role(s, "finanzen", "Finanzen")
+    s = _with_role(s, "compliance", "Compliance")
+
+    s = ops.serial_insert(s, "Lieferant erfassen", s.start_node().id)
+    erfassen = _nid(s, "Lieferant erfassen")
+    s = ops.parallel_insert(s, ["Bonität prüfen", "Compliance prüfen"], erfassen)
+    s = ops.serial_insert(s, "Lieferant freigeben", _join_before_end(s))
+
+    s = ops.assign_staff_rule(s, erfassen, _role_rule("einkauf"))
+    s = ops.assign_staff_rule(s, _nid(s, "Bonität prüfen"), _role_rule("finanzen"))
+    s = ops.assign_staff_rule(s, _nid(s, "Compliance prüfen"), _role_rule("compliance"))
+    s = ops.assign_staff_rule(s, _nid(s, "Lieferant freigeben"), _role_rule("einkauf"))
+
+    return ops.save_as_template(
+        s,
+        template_id="tpl-lieferantenfreigabe",
+        name="Lieferantenfreigabe",
+        description=(
+            "Neuen Lieferanten erfassen, Bonität und Compliance parallel prüfen "
+            "und anschließend freigeben."
+        ),
+        category="Einkauf",
+        origin=TemplateOrigin.BUILTIN,
+    )
+
+
+def _build_access_request() -> ProcessTemplate:
+    """Zugriffsantrag: request -> supervisor decision -> set up / reject."""
+
+    s = ops.create_empty_schema("Zugriffsantrag")
+    s = _with_role(s, "mitarbeiter", "Mitarbeiter")
+    s = _with_role(s, "vorgesetzte", "Vorgesetzte")
+    s = _with_role(s, "it", "IT-Administration")
+
+    s = ops.serial_insert(s, "Zugriff beantragen", s.start_node().id)
+    beantragen = _nid(s, "Zugriff beantragen")
+    s = ops.serial_insert(s, "Antrag genehmigen", beantragen)
+    genehmigen = _nid(s, "Antrag genehmigen")
+    s = ops.add_data_element(s, "Zugriff genehmigt", DataType.BOOLEAN, element_id="genehmigt")
+    s = ops.connect_data(s, genehmigen, "genehmigt", AccessMode.WRITE)
+    s = ops.conditional_insert(
+        s,
+        genehmigen,
+        discriminator="genehmigt",
+        branches=[
+            ops.BranchSpec(label="Berechtigung einrichten", bool_value=True),
+            ops.BranchSpec(label="Ablehnung mitteilen", bool_value=False),
+        ],
+    )
+
+    s = ops.assign_staff_rule(s, beantragen, _role_rule("mitarbeiter"))
+    s = ops.assign_staff_rule(s, genehmigen, _role_rule("vorgesetzte"))
+    s = ops.assign_staff_rule(s, _nid(s, "Berechtigung einrichten"), _role_rule("it"))
+    s = ops.assign_staff_rule(s, _nid(s, "Ablehnung mitteilen"), _role_rule("vorgesetzte"))
+
+    return ops.save_as_template(
+        s,
+        template_id="tpl-zugriffsantrag",
+        name="Zugriffsantrag",
+        description=(
+            "Zugriff auf ein System beantragen; die vorgesetzte Person entscheidet, "
+            "die IT richtet die Berechtigung ein."
+        ),
+        category="IT",
+        origin=TemplateOrigin.BUILTIN,
+    )
+
+
+def template_roles(schema: ProcessSchema) -> list[tuple[str, list[str]]]:
+    """Who does what in a blueprint: ``(role description, step labels)`` pairs.
+
+    Derived from the staff rules, so it always matches the template's content
+    (no separately maintained text that could drift). A ROLE rule names the
+    role, an ORG_UNIT rule the unit, an AGENT rule the person, and the relative
+    rules the reference step ("Vorgesetzte:r von „Vorgang erfassen“"). Ordered
+    by the first step each performer appears in.
+    """
+
+    org = schema.org_model
+    order = {n.id: i for i, n in enumerate(_step_order(schema))}
+    grouped: dict[str, list[str]] = {}
+    for node_id in sorted(schema.staff_rules, key=lambda n: order.get(n, 10**6)):
+        rule = schema.staff_rules[node_id]
+        node = schema.nodes.get(node_id)
+        if node is None:
+            continue
+        grouped.setdefault(_rule_text(rule, schema, org), []).append(node.label or node_id)
+    return list(grouped.items())
+
+
+def _step_order(schema: ProcessSchema) -> list[Node]:
+    """Nodes in a stable breadth-first order from START (for readable grouping)."""
+
+    seen: list[str] = []
+    queue = [schema.start_node().id]
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.append(current)
+        queue.extend(e.target for e in schema.outgoing(current))
+    return [schema.nodes[n] for n in seen if n in schema.nodes]
+
+
+def _rule_text(rule: StaffRule, schema: ProcessSchema, org: object) -> str:
+    """German one-liner for a staff rule (gallery text, not a correctness rule)."""
+
+    roles = getattr(org, "roles", {}) or {}
+    units = getattr(org, "org_units", {}) or {}
+    agents = getattr(org, "agents", {}) or {}
+    ref = rule.ref or ""
+    if rule.kind is StaffRuleKind.ROLE:
+        return roles[ref].name if ref in roles else ref
+    if rule.kind is StaffRuleKind.ORG_UNIT:
+        return f"Abteilung {units[ref].name}" if ref in units else ref
+    if rule.kind is StaffRuleKind.AGENT:
+        return agents[ref].name if ref in agents else ref
+    step = schema.nodes.get(ref)
+    step_name = step.label if step is not None and step.label else ref
+    if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR:
+        return f"Vorgesetzte:r von „{step_name}“"
+    if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT:
+        return f"wer „{step_name}“ bearbeitet hat"
+    return rule.kind.value
+
+
 #: Builder functions for the built-in library, invoked lazily by
 #: :func:`builtin_templates` so a broken builder is caught by the test suite.
 _BUILDERS = (
     _build_vacation_request,
     _build_invoice_approval,
     _build_onboarding,
+    _build_purchase_approval,
+    _build_travel_expenses,
+    _build_complaint,
+    _build_four_eyes,
+    _build_incident,
+    _build_supplier_approval,
+    _build_access_request,
 )
 
 

@@ -433,7 +433,10 @@ class FormField(BaseModel):
     ``mode`` ties the field to the data flow: a ``WRITE`` field is an input that
     *sets* the element, a ``READ`` field displays a value that must have been
     *set before* on every path (D1). ``options`` carries the choices of a
-    ``DROPDOWN``. There is no position -- the mask is laid out automatically.
+    ``DROPDOWN``. There is no free position -- the mask is laid out
+    automatically. ``group`` (optional) puts the field under a heading; fields
+    with the same group are shown together, groups in the order of their first
+    field. Purely presentational: no correctness rule reads it.
     """
 
     id: str
@@ -444,6 +447,7 @@ class FormField(BaseModel):
     required: bool = True
     options: list[str] = Field(default_factory=list)
     help_text: str | None = None
+    group: str = ""
 
 
 class Form(BaseModel):
@@ -458,6 +462,9 @@ class Form(BaseModel):
     node_id: str
     title: str = ""
     fields: list[FormField] = Field(default_factory=list)
+    #: Number of columns the automatic layout uses (1-3). Presentational only;
+    #: narrow screens always fall back to one column.
+    columns: int = Field(default=1, ge=1, le=3)
 
 
 class ConnectorDescriptor(BaseModel):

@@ -108,6 +108,10 @@ body {
 .app {
   display: grid; grid-template-columns: 244px 1fr; grid-template-rows: minmax(0, 1fr);
   height: 100vh; height: 100dvh;
+  /* Platz fuer den Demo-Banner (app.js: reserveDemoBannerSpace). Ausserhalb der
+     Demo ist die Variable 0 -- dann exakt die bisherige Hoehe. */
+  height: calc(100vh - var(--demo-banner-h, 0px));
+  height: calc(100dvh - var(--demo-banner-h, 0px));
 }
 .sidebar {
   background: var(--bg-elev); border-right: 1px solid var(--line);
@@ -506,13 +510,20 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .modal-h h3 { margin: 0; font-size: 16px; }
 .modal-b { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; max-height: 70vh; overflow: auto; }
 .modal-f { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 10px; }
+/* Segment-Filter (z. B. Instanzliste im Monitoring). */
+.seg-filter { display: inline-flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+.seg-btn {
+  cursor: pointer; font-size: 12px; font-weight: 600; padding: 4px 10px;
+  border-radius: 8px; border: 1px solid var(--line); background: var(--bg-elev); color: var(--txt-dim);
+}
+.seg-btn.active { color: var(--txt); border-color: var(--accent); background: var(--accent-soft); }
 .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
 .tabs button { background: transparent; border: 0; color: var(--txt-dim); padding: 8px 12px; cursor: pointer; font-size: 13px; font-weight: 600; border-bottom: 2px solid transparent; }
 .tabs button.active { color: var(--txt); border-bottom-color: var(--accent); }
 .branch-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
 
 /* ---- Toast ---- */
-.toast-root { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 10px; z-index: 60; }
+.toast-root { position: fixed; right: 18px; bottom: calc(18px + var(--demo-banner-h, 0px)); display: flex; flex-direction: column; gap: 10px; z-index: 60; }
 .toast {
   background: var(--bg-elev2); border: 1px solid var(--line); border-left-width: 4px;
   border-radius: 10px; padding: 12px 16px; font-size: 13px; box-shadow: var(--shadow);
@@ -522,6 +533,13 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .toast.err { border-left-color: var(--red); }
 .toast.info { border-left-color: var(--accent); }
 .toast .t-title { font-weight: 700; margin-bottom: 3px; }
+/* Schliessen-Knopf der stehenbleibenden Fehlermeldungen (toast() in app.js). */
+.toast .t-close {
+  float: right; margin: -4px -6px 0 8px; padding: 0 4px;
+  border: 0; background: transparent; color: var(--txt-dim);
+  font-size: 18px; line-height: 1; cursor: pointer;
+}
+.toast .t-close:hover { color: var(--txt); }
 .toast .t-list { margin: 4px 0 0; padding-left: 16px; color: var(--txt-dim); }
 @keyframes slidein { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
 
@@ -814,7 +832,10 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 
 /* ---- Demo-Banner (nur im öffentlichen Demo-Modus, PROCWORKS_DEMO_MODE) ---- */
 .demo-banner {
-  position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 900;
+  /* Unter Dialogen (50) und Toasts (60): der Banner darf nie eine Rueckfrage
+     verdecken. Die App macht ihm Platz (--demo-banner-h), er liegt also nicht
+     ueber Bedienelementen. */
+  position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 45;
   display: flex; align-items: center; gap: 12px;
   padding: 10px 14px; border-radius: 12px;
   background: var(--bg-elev2); border: 1px solid var(--line);
@@ -842,6 +863,12 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   font-size: 20px; line-height: 1; padding: 0 4px; flex: none;
 }
 .demo-banner-close:hover { color: var(--txt); }
+/* Eingeklappt: kleiner Knopf unten links statt der vollen Leiste. */
+.demo-banner.demo-banner-collapsed {
+  right: auto; padding: 6px 12px; gap: 8px; cursor: pointer; font: inherit;
+  font-size: 12px; font-weight: 600;
+}
+.demo-banner.demo-banner-collapsed:hover { border-color: var(--accent); }
 .demo-banner-actions { display: inline-flex; align-items: center; gap: 8px; flex: none; }
 .demo-end {
   cursor: pointer; font-size: 12px; font-weight: 700;

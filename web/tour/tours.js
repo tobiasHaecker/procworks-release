@@ -64,7 +64,7 @@ const TOURS = [
     // v3: Info-Schritt "patterns" ergänzt (Verzweigungen + Schleifen als
     // vollständige Blöcke, Schleifen-Konzept S3) -- reine Erwähnung ohne
     // Simulation, die Konserve bleibt unverändert.
-    version: 3,
+    version: 4,
     sandbox: true,
     // Modellieren ist auf dem Smartphone bewusst zweitrangig (keine
     // Bindungs-Palette), deshalb wird diese Tour dort nicht angeboten.
@@ -121,8 +121,11 @@ const TOURS = [
         // gewaehlter Modellier-Oberflaeche im Abschnitt „Daten" der Schritt-Karte
         // oder im Tab „Datenelemente" der klassischen Palette. Der Handgriff
         // (Schritt waehlen, ⊕) ist in beiden derselbe.
-        hint: "Wähle links den neuen Schritt aus und binde „Urlaubstage“ mit ⊕ lesend an ihn.",
+        hint: "Klicke im Ablauf auf den neuen Schritt „" + TOUR_NEW_STEP_LABEL + "“ und binde dann „Urlaubstage“ mit ⊕ lesend an ihn (Abschnitt „Daten“ der Schritt-Karte bzw. Tab „Datenelemente“).",
         action: "simulate",
+        // Neben das Ziel, nie darüber: in diesem Schritt wird im Kontrollfluss
+        // UND in der Karte geklickt.
+        placement: "side",
         // Der Schritt braucht zwei Stellen: erst den Knoten im Kontrollfluss
         // wählen, dann binden. Ohne den Zusatzbereich läge der Graph unter dem
         // blockenden Scrim und der neue Schritt liesse sich nicht auswählen.
@@ -151,8 +154,9 @@ const TOURS = [
         anchor: '[data-tour="model.tab.res"]',
         title: "Wer macht die Arbeit?",
         body: "„" + TOUR_NEW_STEP_LABEL + "“ ist Arbeit für eine Sachbearbeiterin — die muss jemandem zugeordnet werden, sonst landet sie in keiner Aufgabenliste. Eingetragen wird dabei nicht unbedingt ein Name: Du kannst genauso eine Rolle oder eine Abteilung angeben. Läuft der Prozess später, landet die Aufgabe automatisch bei den passenden Personen — und bei ihrer Vertretung, wenn jemand im Urlaub ist.",
-        hint: "Wähle links den neuen Schritt aus und binde ihm mit ⊕ die Rolle „Sachbearbeiter“ zu.",
+        hint: "Klicke im Ablauf auf den neuen Schritt „" + TOUR_NEW_STEP_LABEL + "“ und binde ihm mit ⊕ die Rolle „Sachbearbeiter“ zu (Abschnitt „Bearbeiter“ der Schritt-Karte bzw. Tab „Ressourcen“).",
         action: "simulate",
+        placement: "side",
         // Wie beim Ablehnungs-Schritt: das Bindungsziel ist der im Graph
         // gewählte Knoten, die Auswahl muss also erreichbar bleiben -- und der
         // Bindungsbereich ganz, weil das ⊕ der Rolle unter dem Anker sitzt.
@@ -165,7 +169,7 @@ const TOURS = [
         view: "model",
         anchor: '[data-tour="model.graph"]',
         title: "Mehr als einzelne Schritte",
-        body: "Über dasselbe „+“ entstehen auch parallele und bedingte Verzweigungen — und Schleifen für echte Wiederholung („nacharbeiten, bis die Prüfung passt“). Alles entsteht als vollständiger Block: Ein Split bringt seinen Join mit, eine Schleife Anfang, Ende und Wiederhol-Bedingung; den Rücksprung-Bogen zeichnet das Werkzeug selbst. Eine Schleife, die nie enden könnte, lässt sich gar nicht erst speichern.",
+        body: "Über dasselbe „+“ entstehen auch parallele und bedingte Verzweigungen — und Schleifen für echte Wiederholung („nacharbeiten, bis die Prüfung passt“). Alles entsteht als vollständiger Block: Ein Split bringt seinen Join mit, eine Schleife Anfang, Ende und Wiederhol-Bedingung; den Rücksprung-Bogen zeichnet das Werkzeug selbst. Eine Schleife, deren Wiederhol-Bedingung nie neu gesetzt wird, lässt sich gar nicht erst speichern — und eine Höchstzahl an Durchläufen bremst zusätzlich.",
         hint: "Nur gut zu wissen — ausprobieren kannst du es nach der Tour.",
         action: "none",
         doc: "Modellierer-Anleitung.md",
@@ -339,7 +343,7 @@ const TOURS = [
         view: "monitor",
         anchor: '[data-tour="monitor.instances"]',
         title: "Wo steht gerade was?",
-        body: "Jede Zeile ist ein laufender Vorgang — zum Beispiel ein einzelner Urlaubsantrag — und zeigt, bei welchem Schritt er gerade hängt. Schließt irgendwo jemand eine Aufgabe ab, aktualisiert sich die Liste von selbst. Neu laden musst du nie.",
+        body: "Jede Zeile ist ein Vorgang — zum Beispiel ein einzelner Urlaubsantrag — und zeigt, wie weit er ist; mit „Laufend“ blendest du Abgeschlossenes aus. Schließt irgendwo jemand eine Aufgabe ab, aktualisiert sich die Liste von selbst. Neu laden musst du nie.",
         hint: "Das war’s — mehr gibt es für den Anfang nicht zu wissen.",
         action: "none",
       },

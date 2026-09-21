@@ -3,9 +3,8 @@
 
 The core checks BZR eligibility only when an ``agent_id`` is present. A login
 *without* an agent binding (modeler/admin with no person behind it) therefore
-completes a step outside the staff rule. Found in the acceptance test 2026-09
-(``docs/Ueberarbeitungskonzept-Abnahmetest-2026-09.md`` §4.1): the audit then
-showed "System" and the four-eyes rule was silently bypassable.
+completes a step outside the staff rule. Before 1.17.0 that happened silently
+and the audit showed "System" instead of the login.
 
 The boundary now makes this an explicit, reasoned **supervision** action and
 refuses it entirely while licensing is enforced -- otherwise an unbound login

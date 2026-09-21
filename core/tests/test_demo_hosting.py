@@ -401,9 +401,12 @@ def test_demo_image_seeds_both_cosmoses() -> None:
     place prospects click (loading it needs the admin role, which the demo has no
     login for).
     """
-    dockerfile = (
-        Path(__file__).resolve().parents[2] / "deploy" / "demo" / "Dockerfile"
-    ).read_text(encoding="utf-8")
+    path = Path(__file__).resolve().parents[2] / "deploy" / "demo" / "Dockerfile"
+    if not path.exists():
+        # deploy/demo/ is internal demo operations and not mirrored to the
+        # public release repo; there this guard has nothing to check.
+        pytest.skip("deploy/demo/ is not part of this checkout")
+    dockerfile = path.read_text(encoding="utf-8")
     assert "PROCWORKS_LOAD_DEMO=1" in dockerfile
     assert "PROCWORKS_LOAD_O2C=1" in dockerfile
 

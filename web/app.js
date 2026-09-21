@@ -324,15 +324,38 @@ function byId(id) { return document.getElementById(id); }
 // Toast + Fehlerbehandlung
 // --------------------------------------------------------------------------
 
+/**
+ * Kurzmeldung unten rechts.
+ *
+ * Erfolg und Info verschwinden nach 3,5 s. Fehler bleiben stehen, bis sie
+ * geschlossen werden (×-Knopf): Eine Ablehnung des Kerns traegt oft eine
+ * Begruendung mit mehreren Zeilen, die nach sieben Sekunden noch nicht gelesen
+ * ist. Damit sich Fehler nicht endlos stapeln,
+ * bleiben hoechstens drei offen; die aeltesten werden verdraengt.
+ *
+ * @param {"ok"|"err"|"info"} kind Art der Meldung (Farbe, Verweildauer)
+ * @param {string} title Ueberschrift
+ * @param {string[]} [lines] optionale Detailzeilen
+ */
 function toast(kind, title, lines) {
   const root = byId("toast-root");
   const list = (lines && lines.length)
     ? el("ul", { class: "t-list" }, ...lines.map((l) => el("li", null, l)))
     : null;
-  const t = el("div", { class: "toast " + kind },
+  const sticky = kind === "err";
+  const t = el("div", { class: "toast " + kind, role: sticky ? "alert" : "status" },
+    sticky
+      ? el("button", { class: "t-close", "aria-label": "Meldung schließen", title: "Schließen",
+          onClick: () => t.remove() }, "\u00D7")
+      : null,
     el("div", { class: "t-title" }, title), list);
   root.appendChild(t);
-  setTimeout(() => t.remove(), kind === "err" ? 7000 : 3500);
+  if (sticky) {
+    const open = [...root.querySelectorAll(".toast.err")];
+    open.slice(0, Math.max(0, open.length - 3)).forEach((o) => o.remove());
+  } else {
+    setTimeout(() => t.remove(), 3500);
+  }
 }
 
 function describeError(err) {
@@ -448,9 +471,26 @@ function openModal(title, bodyNode, onConfirm, confirmLabel) {
       el("div", { class: "modal-f" },
         el("button", { class: "btn ghost", onClick: close }, "Abbrechen"),
         confirmBtn)));
+  // Enter bestaetigt den Dialog -- einmal hier fuer alle Aufrufer statt je
+  // Dialog.
+  // Ausnahmen: mehrzeilige Felder (Enter = Zeilenumbruch), fokussierte Knoepfe
+  // und Links (Enter loest deren eigene Aktion aus), Auswahllisten, jede
+  // Zusatztaste und laufende IME-Eingaben.
+  modal.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
+    const t = e.target;
+    const tag = t && t.tagName;
+    if (tag === "TEXTAREA" || tag === "BUTTON" || tag === "A" || tag === "SELECT") return;
+    e.preventDefault();
+    confirmBtn.click();
+  });
   root.appendChild(modal);
   const firstInput = modal.querySelector("input, select, textarea");
   if (firstInput) firstInput.focus();
+  // Rueckgabe fuer Dialoge, die ihren Bestaetigen-Knopf je nach Eingabe
+  // sperren (z. B. der Einfuege-Dialog ohne Diskriminator). Bisherige Aufrufer
+  // ignorieren sie.
+  return { modal, confirmBtn, close };
 }
 
 // --------------------------------------------------------------------------
@@ -1644,6 +1684,21 @@ async function selectSchema(id) {
   render();
 }
 
+/**
+ * Ein soeben erzeugtes Schema oeffnen -- in der Modellieren-Sicht.
+ *
+ * Anlegen, BPMN-Import und "Aus Vorlage" sind von jeder Sicht aus erreichbar
+ * (Schema-Umschalter in der Kopfzeile). Nur zu waehlen liess die Ansicht dort
+ * stehen, wo man gerade war (z. B. "Meine Aufgaben"), und das neue Modell blieb
+ * unsichtbar.
+ * @param {string} id Schema-ID
+ */
+async function openCreatedSchema(id) {
+  state.view = "model";
+  setActiveNav();
+  await selectSchema(id);
+}
+
 function activitiesOf(schema) {
   return Object.values(schema.nodes).filter((n) => n.type === NODE_TYPE.ACTIVITY);
 }
@@ -1699,24 +1754,45 @@ async function newSchema() {
     try {
       const schema = await api.post("/schemas", { name });
       await loadSchemas();
-      await selectSchema(schema.id);
+      await openCreatedSchema(schema.id);
       toast("ok", "Schema angelegt", [schema.name]);
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Anlegen");
 }
 
+/**
+ * BPMN-2.0-Import: Datei waehlen oder XML einfuegen.
+ *
+ * Die Datei wird nur im Browser gelesen (FileReader) und landet im selben
+ * Textfeld -- derselbe Endpunkt, dieselbe Pruefung im Kern, keine neue
+ * Serverflaeche. Der Name wird aus dem Dateinamen
+ * vorbelegt, solange er noch leer ist.
+ */
 async function importBpmn() {
   const ta = el("textarea", { placeholder: "<bpmn:definitions ...>" });
   const nameInput = el("input", { type: "text", placeholder: "optionaler Name" });
+  const fileInput = el("input", { type: "file", class: "bpmn-file", accept: ".bpmn,.xml,application/xml,text/xml" });
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      ta.value = String(reader.result || "");
+      if (!nameInput.value.trim()) nameInput.value = file.name.replace(/\.(bpmn|xml)$/i, "");
+    };
+    reader.onerror = () => toast("err", "Datei konnte nicht gelesen werden", [file.name]);
+    reader.readAsText(file);
+  });
   openModal("BPMN 2.0 importieren", el("div", { class: "row", style: "flex-direction:column;align-items:stretch" },
+    el("label", { class: "field" }, "BPMN-Datei (.bpmn, .xml)", fileInput),
     el("label", { class: "field" }, "Name (optional)", nameInput),
-    el("label", { class: "field" }, "BPMN-XML", ta)), async () => {
+    el("label", { class: "field" }, "BPMN-XML (aus der Datei oder eingefügt)", ta)), async () => {
     const xml = ta.value.trim();
     if (!xml) return false;
     try {
       const schema = await api.post("/bpmn-import", { xml, name: nameInput.value.trim() || null });
       await loadSchemas();
-      await selectSchema(schema.id);
+      await openCreatedSchema(schema.id);
       toast("ok", "BPMN importiert", [schema.name]);
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Importieren");
@@ -1764,7 +1840,7 @@ async function newFromTemplate() {
       const schema = await api.post(`/templates/${encodeURIComponent(selection.id)}/instantiate`,
         { name: selection.name });
       await loadSchemas();
-      await selectSchema(schema.id);
+      await openCreatedSchema(schema.id);
       toast("ok", "Aus Vorlage erstellt", [schema.name]);
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Erstellen");
@@ -2805,6 +2881,17 @@ function cardStaffSection(body, schema, node, draft) {
 }
 
 /** Abschnitt „Dienst" (A1–A3): was der Schritt ausfuehrt. */
+/**
+ * Hinweis fuer Schritte ohne Dienst -- geteilt von Schritt-Karte und klassischem
+ * Inspektor, damit beide Oberflaechen dasselbe sagen. Ein Dienst ist optional:
+ * die Freigabe (Stufe B) verlangt bei interaktiven Schritten nur eine
+ * Bearbeiterzuordnung (B2); B1 wird bewusst NICHT erzwungen (siehe
+ * validator.check_executable). Frueherer Text behauptete das Gegenteil
+ * (bis 1.17.0).
+ */
+const SERVICE_OPTIONAL_HINT =
+  "Kein Dienst – optional. Für die Freigabe braucht ein interaktiver Schritt nur eine Bearbeiterzuordnung (B2); einen Dienst braucht nur ein automatischer Schritt.";
+
 function cardServiceSection(body, schema, node, draft) {
   const sb = (schema.service_bindings || {})[node.id];
   if (sb) {
@@ -2818,7 +2905,7 @@ function cardServiceSection(body, schema, node, draft) {
     }
   } else {
     body.appendChild(el("div", { class: "card-hint" },
-      "Kein Dienst – für die Freigabe braucht jeder Schritt einen ausführbaren Dienst (B1)."));
+      SERVICE_OPTIONAL_HINT));
   }
   if (!draft) return;
   const row = el("div", { class: "row", style: "gap:8px;margin-top:8px" },
@@ -3296,7 +3383,7 @@ function nodePerformSections(body, schema, node) {
       }
     } else {
       body.appendChild(el("div", { class: "muted", style: "font-size:12px" },
-        "Kein Dienst – für die Freigabe braucht jeder Schritt einen ausführbaren Dienst (B1)."));
+        SERVICE_OPTIONAL_HINT));
     }
     const row = el("div", { class: "row", style: "gap:8px;margin-top:6px" },
       el("button", { class: "btn small", onClick: () => assignServiceFor(node.id) }, sb ? "Dienst ändern" : "Dienst zuweisen"));
@@ -4482,6 +4569,9 @@ function revisionPanel() {
       el("button", { class: "btn small", onClick: newRevision }, "Neue Revision")));
 }
 
+/** Vorbelegte Hoechstzahl der Schleifen-Durchlaeufe im Einfuege-Dialog. */
+const LOOP_MAX_DEFAULT = 10;
+
 function openInsertModal(afterNodeId) {
   const node = state.schema.nodes[afterNodeId];
   let active = "serial";
@@ -4552,7 +4642,7 @@ function openInsertModal(afterNodeId) {
         el("label", { class: "field" }, "Diskriminator (Datenelement)", condDisc),
         el("div", { class: "muted", style: "font-size:12px;margin:4px 0" }, "Die Engine w\u00E4hlt den Zweig automatisch anhand des Werts \u2013 vollst\u00E4ndig und \u00FCberschneidungsfrei (K7)."),
         condRows, el("button", { class: "btn small ghost", onClick: () => addCondRow() }, "+ Zweig"))
-    : el("div", { class: "muted", style: "font-size:13px" }, "Legen Sie zuerst ein Datenelement (INTEGER/FLOAT/BOOLEAN/STRING) an und lassen Sie es vor dieser Stelle schreiben.");
+    : el("div", { class: "warn-banner insert-blocked" }, "Für eine Verzweigung fehlt ein Datenelement, nach dem entschieden wird (Zahl, Ja/Nein oder Text). Legen Sie es in der Datensicht an und lassen Sie es vor dieser Stelle schreiben – dann lässt sich hier einfügen.");
   // --- Schleife (K6): Rumpf-Bezeichnung + entscheidbares Wiederholen-Merkmal.
   // BOOLEAN nutzt die Kurzform (repeat_value); Zahlen (Schwelle) und Text
   // (Wertemenge) bauen eine Wiederhol/Verlassen-Partition (Stufe S3, K6b).
@@ -4596,19 +4686,23 @@ function openInsertModal(afterNodeId) {
   // Optionale Notbremse (S3): Höchstzahl der Durchläufe. Deterministisch –
   // am Limit wird verlassen, auch wenn die Daten „wiederholen“ sagen; die
   // Zeitprüfung (T2) rechnet den Rumpf dann entsprechend oft.
+  // Vorbelegt mit LOOP_MAX_DEFAULT: eine Schleife
+  // ohne Obergrenze ist moeglich, soll aber eine bewusste Entscheidung sein
+  // und keine Voreinstellung. Pflicht ist sie nicht -- das waere eine
+  // Verschaerfung von K6b fuer den gesamten Bestand.
   const loopMax = el("input", { type: "number", class: "loop-max", min: "2",
-    placeholder: "leer = unbegrenzt" });
+    value: String(LOOP_MAX_DEFAULT), placeholder: "leer = unbegrenzt" });
   const loopPanel = loopable.length
     ? el("div", null,
         el("label", { class: "field" }, "Bezeichnung des Wiederhol-Schritts",
           el("input", { type: "text", id: "loop-label", placeholder: "z. B. Nacharbeit erledigen" })),
         el("label", { class: "field" }, "Wiederholen-Merkmal (Datenelement)", loopDisc),
         loopRows,
-        el("label", { class: "field" }, "Höchstzahl Durchläufe (Notbremse, mind. 2)", loopMax),
+        el("label", { class: "field" }, "Höchstzahl Durchläufe (Notbremse, mind. 2 – leeren nur, wenn die Schleife wirklich unbegrenzt laufen darf)", loopMax),
         el("div", { class: "muted", style: "font-size:12px;margin:4px 0" },
           "Der Schritt läuft mindestens einmal; am Ende jeder Runde entscheidet das Merkmal automatisch, ob wiederholt wird (K6). Der Schritt schreibt das Merkmal verbindlich – jede Runde entscheidet auf frischen Daten."))
-    : el("div", { class: "muted", style: "font-size:13px" },
-        "Legen Sie zuerst ein Datenelement an (BOOLEAN, Zahl oder Text) – es entscheidet am Rundenende, ob wiederholt wird.");
+    : el("div", { class: "warn-banner insert-blocked" },
+        "Für eine Schleife fehlt ein Datenelement (Ja/Nein, Zahl oder Text), das am Rundenende entscheidet, ob wiederholt wird. Legen Sie es in der Datensicht an – dann lässt sich hier einfügen.");
   const panels = {
     serial: serialBody,
     parallel: el("div", null, parBox, el("button", { class: "btn small ghost", onClick: () => addParRow() }, "+ Zweig")),
@@ -4624,13 +4718,26 @@ function openInsertModal(afterNodeId) {
       [...tabs.children].forEach((c) => c.classList.remove("active"));
       e.target.classList.add("active");
       clear(slot); slot.appendChild(panels[key]);
+      syncInsertEnabled();
     } }, label);
+  }
+  // "Einfügen" nur, wenn die gewaehlte Variante ueberhaupt moeglich ist. Frueher
+  // blieb der Knopf aktiv und meldete per kurzlebigem Toast "Kein gültiger
+  // Diskriminator gewählt" -- Fachjargon, und der Dialog wirkte unveraendert
+  // Der Grund steht jetzt als Hinweis im Panel.
+  let dialog = null;
+  function syncInsertEnabled() {
+    if (!dialog) return;
+    const blocked = (active === "conditional" && !partitionable.length)
+      || (active === "loop" && !loopable.length);
+    dialog.confirmBtn.disabled = blocked;
+    dialog.confirmBtn.title = blocked ? "Voraussetzung fehlt – siehe Hinweis im Dialog" : "";
   }
   const body = el("div", null,
     el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" }, `Einf\u00FCgen nach: ${nodeCaption(node)}`),
     tabs, slot);
 
-  openModal("Schritt einf\u00FCgen", body, async () => {
+  dialog = openModal("Schritt einf\u00FCgen", body, async () => {
     try {
       if (active === "serial") {
         const label = byId("ins-label").value.trim();
@@ -4671,7 +4778,7 @@ function openInsertModal(afterNodeId) {
         await api.post(`/schemas/${state.schemaId}/loop-insert`, payload);
       } else {
         const kind = discKind();
-        if (!kind) { toast("err", "Kein g\u00FCltiger Diskriminator gew\u00E4hlt"); return false; }
+        if (!kind) { toast("err", "Kein Entscheidungs-Datenelement gew\u00E4hlt", ["Bitte oben ein Datenelement ausw\u00E4hlen, nach dem verzweigt wird."]); return false; }
         let branches = [];
         if (kind === "THRESHOLD") {
           const rows = [...condRows.querySelectorAll(".threshold-row")].map((r) => ({
@@ -4709,6 +4816,7 @@ function openInsertModal(afterNodeId) {
       toast("ok", "Schritt eingef\u00FCgt");
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Einf\u00FCgen");
+  syncInsertEnabled();
 }
 
 /**
@@ -4768,7 +4876,7 @@ async function newRevision() {
     const rev = await api.post(`/schemas/${state.schemaId}/revision`, {});
     await loadSchemas();
     await selectSchema(rev.id);
-    toast("ok", "Revision erstellt", [`${rev.id} (v${rev.version})`]);
+    toast("ok", "Revision erstellt", [`${rev.name} (v${rev.version})`]);
   } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 }
 
@@ -6062,6 +6170,13 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
 // View: Monitoring
 // --------------------------------------------------------------------------
 
+/** Filterstufen der Instanzliste im Monitoring (Wert = InstanceState bzw. "all"). */
+const INSTANCE_FILTERS = [
+  { key: "all", label: "Alle" },
+  { key: "RUNNING", label: "Laufend" },
+  { key: "COMPLETED", label: "Abgeschlossen" },
+];
+
 async function viewMonitor() {
   const content = byId("content");
   clear(content);
@@ -6124,7 +6239,21 @@ async function viewMonitor() {
           el("tbody", null, ...escRows)))));
   }
 
-  const rows = instances.map((i) => {
+  // Filter der Instanzliste: die Liste hiess
+  // „Aktive Instanzen“, zeigte aber auch abgeschlossene. Rein clientseitig,
+  // transient (state.monitorFilter), Standard "alle".
+  const filter = INSTANCE_FILTERS.some((f) => f.key === state.monitorFilter) ? state.monitorFilter : "all";
+  const shown = filter === "all" ? instances : instances.filter((i) => i.state === filter);
+  const filterBar = el("div", { class: "seg-filter", role: "group", "aria-label": "Instanzen filtern" },
+    ...INSTANCE_FILTERS.map((f) => {
+      const n = f.key === "all" ? instances.length : instances.filter((i) => i.state === f.key).length;
+      return el("button", {
+        class: "seg-btn" + (f.key === filter ? " active" : ""),
+        "aria-pressed": f.key === filter ? "true" : "false",
+        onClick: () => { state.monitorFilter = f.key; render(); },
+      }, `${f.label} (${n})`);
+    }));
+  const rows = shown.map((i) => {
     const total = Object.keys(i.node_states || {}).length || 1;
     const completed = Object.values(i.node_states || {}).filter((s) => s === "COMPLETED" || s === "SKIPPED").length;
     const pct = Math.round((completed / total) * 100);
@@ -6135,10 +6264,12 @@ async function viewMonitor() {
     el("thead", null, el("tr", null, ...["Instanz", "Schema", "Status", "Fortschritt"].map((h) => el("th", null, h)))),
     el("tbody", null, ...(rows.length ? rows.map((r) =>
       el("tr", { class: r.i.id === state.instanceId ? "clickable selected" : "clickable", onClick: () => openInstanceFromMonitor(r.i.id) }, ...r.cells.map((c) => el("td", null, c))))
-      : [el("tr", null, el("td", { colspan: 4 }, emptyState("Keine Instanzen. Starte eine in der Ausf\u00FChrungs-Sicht.")))])));
+      : [el("tr", null, el("td", { colspan: 4 }, emptyState(instances.length
+          ? "Keine Instanzen in diesem Filter."
+          : "Keine Instanzen. Starte eine in der Ausf\u00FChrungs-Sicht.")))])));
 
   content.appendChild(el("div", { class: "panel", "data-tour": "monitor.instances" },
-    el("div", { class: "panel-h" }, el("h2", null, "Aktive Instanzen"), el("span", { class: "sub" }, "Klick \u00F6ffnet Detail")),
+    el("div", { class: "panel-h" }, el("h2", null, "Instanzen"), el("span", { class: "sub" }, "Klick \u00F6ffnet Detail"), filterBar),
     el("div", { class: "panel-b" }, tbl)));
 
   // Detail der ausgewaehlten Instanz inkl. Live-Prozesslandkarte -- direkt unter
@@ -8726,7 +8857,7 @@ const SURVEY_MIN_DWELL_MS = 60000;
 // modal is opened while the tab is hidden and is simply *waiting* when the
 // visitor comes back. Someone who never returns is unreachable either way --
 // that case is a mail, which we deliberately do not send (contact data lives
-// only for the duration of the lead request; see deploy/demo/broker).
+// only for the duration of the lead request, never stored).
 //
 // Guarded so it fires at most once, only in the public demo (a feedback URL is
 // configured), only after a real dwell time, and never on top of an open modal
@@ -8745,10 +8876,58 @@ function installExitIntentSurvey() {
   });
 }
 
+/** localStorage-Schluessel: Demo-Banner eingeklappt (ueberlebt Neuladen). */
+const DEMO_BANNER_COLLAPSED_KEY = "demoBannerCollapsed";
+
+/** Liest einen Speicherwert fehlertolerant (privater Modus -> null). */
+function storageGet(store, key) {
+  try { return store.getItem(key); } catch (e) { return null; }
+}
+/** Schreibt einen Speicherwert fehlertolerant (privater Modus -> ignoriert). */
+function storageSet(store, key, value) {
+  try { store.setItem(key, value); } catch (e) { /* nur Komfort */ }
+}
+
+/**
+ * Reserviert unten Platz fuer den Demo-Banner, statt ihn ueber die App zu legen.
+ *
+ * Der Banner ist fest positioniert. Frueher lag er ueber allem -- auch ueber dem
+ * unteren Teil der Schritt-Karte, ueber Dialogen und Toasts. Jetzt meldet er seine Hoehe als CSS-Variable `--demo-banner-h`;
+ * `.app` wird um genau diese Hoehe kuerzer und die Toasts sitzen darueber.
+ * Ein ResizeObserver haelt den Wert beim Umbrechen (schmales Fenster) aktuell.
+ * @param {HTMLElement|null} banner der Banner oder null (entfernt)
+ */
+function reserveDemoBannerSpace(banner) {
+  const root = document.documentElement;
+  if (reserveDemoBannerSpace._obs) { reserveDemoBannerSpace._obs.disconnect(); reserveDemoBannerSpace._obs = null; }
+  const apply = () => {
+    const h = banner && banner.isConnected ? Math.ceil(banner.getBoundingClientRect().height) + 20 : 0;
+    root.style.setProperty("--demo-banner-h", h + "px");
+  };
+  apply();
+  if (banner && typeof ResizeObserver !== "undefined") {
+    reserveDemoBannerSpace._obs = new ResizeObserver(apply);
+    reserveDemoBannerSpace._obs.observe(banner);
+  }
+}
+
 function mountDemoBanner() {
   const old = byId("demo-banner");
   if (old) old.remove();
-  if (sessionStorage.getItem("demoBannerDismissed") === "1") return;
+  if (sessionStorage.getItem("demoBannerDismissed") === "1") { reserveDemoBannerSpace(null); return; }
+
+  // Eingeklappt: nur ein kleiner Knopf, der den Banner wieder oeffnet.
+  if (storageGet(localStorage, DEMO_BANNER_COLLAPSED_KEY) === "1") {
+    const pill = el("button", {
+      id: "demo-banner", class: "demo-banner demo-banner-collapsed",
+      title: "Demo-Hinweis mit Rollenwechsel und Passwort öffnen",
+      "aria-label": "Demo-Hinweis öffnen",
+      onClick: () => { storageSet(localStorage, DEMO_BANNER_COLLAPSED_KEY, "0"); mountDemoBanner(); },
+    }, el("span", { class: "demo-badge" }, "DEMO"), " Rollen & Passwort \u25B4");
+    document.body.appendChild(pill);
+    reserveDemoBannerSpace(pill);
+    return;
+  }
 
   const meLogin = state.principal && state.principal.subject;
   const meName = (state.principal && state.principal.display_name) || meLogin || "–";
@@ -8782,11 +8961,16 @@ function mountDemoBanner() {
           }, "Demo beenden")
         : null,
       el("button", {
-        class: "demo-banner-close", "aria-label": "Hinweis schließen", title: "Schließen",
-        onClick: () => { sessionStorage.setItem("demoBannerDismissed", "1"); banner.remove(); },
+        class: "demo-banner-close", "aria-label": "Hinweis einklappen", title: "Einklappen",
+        onClick: () => { storageSet(localStorage, DEMO_BANNER_COLLAPSED_KEY, "1"); mountDemoBanner(); },
+      }, "\u25BE"),
+      el("button", {
+        class: "demo-banner-close", "aria-label": "Hinweis schließen", title: "Für diese Sitzung schließen",
+        onClick: () => { sessionStorage.setItem("demoBannerDismissed", "1"); banner.remove(); reserveDemoBannerSpace(null); },
       }, "×")));
 
   document.body.appendChild(banner);
+  reserveDemoBannerSpace(banner);
 }
 
 

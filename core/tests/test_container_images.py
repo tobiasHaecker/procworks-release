@@ -31,11 +31,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WEB_DOCKERFILE = _REPO_ROOT / "web" / "Dockerfile"
 _API_DOCKERFILE = _REPO_ROOT / "core" / "Dockerfile"
 _TRIVYIGNORE = _REPO_ROOT / ".trivyignore"
 _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
+
+#: The release pipeline (workflow + scan exceptions) lives only in the internal
+#: repository; the public release repo carries the Dockerfiles but not the CI.
+#: Guards about the pipeline skip there instead of failing a customer's run.
+_needs_release_pipeline = pytest.mark.skipif(
+    not (_TRIVYIGNORE.exists() and _RELEASE_WORKFLOW.exists()),
+    reason="release pipeline (.trivyignore, release.yml) is not part of this checkout",
+)
 
 
 def test_web_image_compiles_caddy_from_source() -> None:
@@ -84,6 +94,7 @@ def test_api_image_applies_base_image_security_updates() -> None:
     )
 
 
+@_needs_release_pipeline
 def test_every_trivy_exception_states_when_it_may_be_removed() -> None:
     """An exception without a resolution condition never gets cleaned up.
 
@@ -110,6 +121,7 @@ def test_every_trivy_exception_states_when_it_may_be_removed() -> None:
     )
 
 
+@_needs_release_pipeline
 def test_release_builds_and_scans_both_architectures() -> None:
     """Images must ship for amd64 *and* arm64, and every architecture is scanned.
 
@@ -131,6 +143,7 @@ def test_release_builds_and_scans_both_architectures() -> None:
     )
 
 
+@_needs_release_pipeline
 def test_release_can_be_rehearsed_without_a_version_tag() -> None:
     """A Dockerfile change must be provable without burning a version tag.
 

@@ -1202,3 +1202,144 @@ def test_audit_names_the_login_and_supervision_asks_for_a_reason() -> None:
     # promptComplete reacts to the core's 422 by asking, and resends with reason.
     assert "if (isSupervisionRequired(err)) { askSupervisionReason(" in src
     assert "payload.supervision_reason = supervisionReason" in src
+
+
+# ---------------------------------------------------------------------------
+# Bedienbarkeit (1.17.1): Dialoge, Meldungen, Demo-Leiste, Tour. Quelltext-
+# Waechter wie oben; das Verhalten (Platzierung, Enter, Filter) ist zusaetzlich
+# ad hoc im Node-vm belegt worden.
+# ---------------------------------------------------------------------------
+
+TOURS_JS = Path(__file__).resolve().parents[2] / "web" / "tour" / "tours.js"
+TOUR_ENGINE_JS = Path(__file__).resolve().parents[2] / "web" / "tour" / "engine.js"
+
+
+def _function_body(src: str, signature: str) -> str:
+    """Quelltext einer Top-Level-Funktion bis zur naechsten Top-Level-Definition."""
+
+    start = src.index(signature)
+    rest = src[start + len(signature):]
+    nxt = re.search(r"\n(?:async )?function |\n(?:const|let) [A-Z_]+ =", rest)
+    return src[start: start + len(signature) + (nxt.start() if nxt else len(src))]
+
+
+def test_service_hint_matches_release_rule_in_both_surfaces() -> None:
+    """Die Karte behauptete, jeder Schritt brauche fuer die Freigabe
+    einen Dienst (B1). Der Kern erzwingt B1 bewusst nicht. Beide Oberflaechen
+    beziehen den Text aus EINER Konstante, damit sie nicht auseinanderlaufen."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "braucht jeder Schritt einen ausführbaren Dienst (B1)" not in src
+    assert src.count("SERVICE_OPTIONAL_HINT") == 3  # Definition + Karte + Inspektor
+    hint = re.search(r'const SERVICE_OPTIONAL_HINT =\s*"([^"]+)"', src)
+    assert hint and "(B2)" in hint.group(1) and "optional" in hint.group(1)
+
+
+def test_enter_confirms_the_shared_dialog_but_not_textareas_or_buttons() -> None:
+    """Enter sendet den Dialog ab -- einmal in ``openModal``, nicht je
+    Aufrufer; mehrzeilige Felder und fokussierte Knoepfe behalten Enter."""
+
+    body = _function_body(APP_JS.read_text(encoding="utf-8"), "function openModal(")
+    assert 'e.key !== "Enter"' in body and "confirmBtn.click()" in body
+    for tag in ('"TEXTAREA"', '"BUTTON"', '"SELECT"'):
+        assert tag in body, f"Enter darf in {tag} nicht den Dialog absenden"
+    assert "e.isComposing" in body
+    assert "return { modal, confirmBtn, close }" in body
+
+
+def test_error_toasts_stay_until_closed() -> None:
+    """Fehler verschwanden nach 7 s. Sie bleiben jetzt bis zum Schliessen;
+    nur Erfolg/Info laufen noch per Timer ab."""
+
+    body = _function_body(APP_JS.read_text(encoding="utf-8"), "function toast(")
+    assert "7000" not in body
+    assert 'const sticky = kind === "err"' in body
+    assert '"t-close"' in body
+    assert "setTimeout(() => t.remove(), 3500)" in body
+
+
+def test_monitoring_instance_list_is_filterable_and_not_called_active() -> None:
+    """Die Liste "Aktive Instanzen" zeigte auch abgeschlossene."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert '"Aktive Instanzen"' not in src
+    assert 'el("h2", null, "Instanzen")' in src
+    assert "state.monitorFilter" in src
+    for key in ('key: "all"', 'key: "RUNNING"', 'key: "COMPLETED"'):
+        assert key in src
+
+
+def test_insert_dialog_blocks_variants_without_their_data_element() -> None:
+    """M4: Ohne Datenelement blieb "Einfügen" aktiv und meldete Fachjargon."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = _function_body(src, "function openInsertModal(")
+    assert "Kein g\\u00FCltiger Diskriminator" not in body
+    assert "function syncInsertEnabled()" in body
+    assert 'dialog = openModal("Schritt einf' in body
+    assert "dialog.confirmBtn.disabled = blocked" in body
+    assert body.count("insert-blocked") == 2  # Verzweigung + Schleife
+
+
+def test_created_schemas_open_in_the_modelling_view() -> None:
+    """Nach "Aus Vorlage" blieb die Ansicht auf der vorigen Seite. Anlegen,
+    Import und Vorlage oeffnen das neue Schema jetzt in der Modellieren-Sicht."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    helper = _function_body(src, "async function openCreatedSchema(")
+    assert 'state.view = "model"' in helper
+    for fn in (
+        "async function newSchema(",
+        "async function importBpmn(",
+        "async function newFromTemplate(",
+    ):
+        assert "openCreatedSchema(schema.id)" in _function_body(src, fn), fn
+
+
+def test_bpmn_import_accepts_a_file() -> None:
+    """Import ging nur ueber ein Textfeld. Die Datei wird im Browser gelesen und
+    geht ueber denselben Endpunkt (keine neue Serverflaeche)."""
+
+    body = _function_body(APP_JS.read_text(encoding="utf-8"), "async function importBpmn(")
+    assert 'type: "file"' in body and "new FileReader()" in body
+    assert 'api.post("/bpmn-import"' in body
+
+
+def test_loop_max_iterations_is_prefilled() -> None:
+    """Hoechstzahl vorbelegt, aber nicht erzwungen (keine Verschaerfung von K6b)."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "const LOOP_MAX_DEFAULT = 10;" in src
+    assert "value: String(LOOP_MAX_DEFAULT)" in src
+    # Leeren bleibt erlaubt: der Payload wird nur bei gesetztem Wert befuellt.
+    assert 'if (loopMax.value.trim() !== "")' in src
+
+
+def test_demo_banner_reserves_space_instead_of_covering_the_app() -> None:
+    """Der Demo-Banner lag ueber Schritt-Karte, Dialogen und Toasts."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "reserveDemoBannerSpace(banner)" in src
+    assert "DEMO_BANNER_COLLAPSED_KEY" in src
+    css = _css_without_comments()
+    banner = re.search(r"\.demo-banner\s*\{([^}]*)\}", css)
+    assert banner
+    z = int(re.search(r"z-index:\s*(\d+)", banner.group(1)).group(1))
+    modal_z = int(re.search(r"\.modal-backdrop\s*\{[^}]*z-index:\s*(\d+)", css).group(1))
+    assert z < modal_z, "Der Banner darf nie ueber einem Dialog liegen"
+    app_rule = re.search(r"\.app\s*\{([^}]*)\}", css).group(1)
+    assert "var(--demo-banner-h, 0px)" in app_rule
+    assert "var(--demo-banner-h, 0px)" in re.search(r"\.toast-root\s*\{([^}]*)\}", css).group(1)
+
+
+def test_tour_uses_a_fallback_anchor_and_side_placement() -> None:
+    """Tutorial Schritt 5/7: Anker erst nach der verlangten Auswahl vorhanden ->
+    "nicht sichtbar" und mittiges Popup ueber dem Knoten. Jetzt: Ersatzanker aus
+    ``also`` und Platzierung neben dem Ziel; kein "links" mehr im Hinweis."""
+
+    engine = TOUR_ENGINE_JS.read_text(encoding="utf-8")
+    assert "anchor = extra; fallback = true" in engine
+    assert 'placement === "side"' in engine and "function sidePosition(" in engine
+    tours = TOURS_JS.read_text(encoding="utf-8")
+    assert "Wähle links" not in tours
+    assert tours.count('placement: "side"') == 2

@@ -280,13 +280,17 @@ def test_simulate_steps_reach_every_element_they_ask_for(tours_js: str) -> None:
     for step in steps:
         if 'action: "simulate"' not in step:
             continue
-        hint = re.search(r"hint: \"([^\"]*)\"", step)
+        # Der Hinweis darf aus Teilstuecken bestehen ("…" + LABEL + "…"),
+        # deshalb die ganze Zeile bis zum abschliessenden Komma.
+        hint = re.search(r"hint: (.*?),\s*\n", step)
         if not hint:
             continue
         # Formulierungen, die eine Auswahl im Kontrollfluss verlangen.
         wants_graph = any(
             phrase in hint.group(1).lower()
-            for phrase in ("links den", "im graph", "waehle den schritt", "wähle den schritt")
+            for phrase in (
+                "links den", "im graph", "im ablauf", "waehle den schritt", "wähle den schritt",
+            )
         )
         # ... oder ein Bindungsziel, das ohne gewaehlten Knoten gar nicht existiert.
         wants_graph = wants_graph or "an den neuen schritt" in hint.group(1).lower()
@@ -322,7 +326,9 @@ def test_simulate_binding_steps_free_the_whole_palette(tours_js: str, app_js: st
     for step in steps:
         if 'action: "simulate"' not in step:
             continue
-        hint = re.search(r"hint: \"([^\"]*)\"", step)
+        # Der Hinweis darf aus Teilstuecken bestehen ("…" + LABEL + "…"),
+        # deshalb die ganze Zeile bis zum abschliessenden Komma.
+        hint = re.search(r"hint: (.*?),\s*\n", step)
         if not hint or "⊕" not in hint.group(1):
             continue
         checked += 1

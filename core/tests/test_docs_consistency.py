@@ -28,10 +28,20 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DOCS = _REPO_ROOT / "docs"
 _INDEX = _DOCS / "README.md"
 _SYNC_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "sync-customer-repo.yml"
+
+#: The documentation index and the sync workflow exist only in the internal
+#: repository; the public release repo mirrors a handful of guides without
+#: them. The index guards skip there (the encoding guard still runs).
+_needs_index = pytest.mark.skipif(
+    not (_INDEX.exists() and _SYNC_WORKFLOW.exists()),
+    reason="docs/README.md and the sync workflow are not part of this checkout",
+)
 
 # Markdown files that are checked for encoding damage. Deliberately explicit
 # instead of a repository-wide walk: the working tree also holds ignored
@@ -62,6 +72,7 @@ def _index_text() -> str:
     return _INDEX.read_text(encoding="utf-8")
 
 
+@_needs_index
 def test_every_documentation_file_is_listed_in_the_index() -> None:
     """No document may hide from ``docs/README.md``.
 
@@ -82,6 +93,7 @@ def test_every_documentation_file_is_listed_in_the_index() -> None:
     )
 
 
+@_needs_index
 def test_index_links_to_documents_resolve() -> None:
     """Every relative Markdown link in the index must point at a real file."""
 
@@ -95,6 +107,7 @@ def test_index_links_to_documents_resolve() -> None:
     assert not broken, "dead links in docs/README.md: " + ", ".join(sorted(set(broken)))
 
 
+@_needs_index
 def test_index_repeats_the_sync_whitelist_completely() -> None:
     """The whitelist quoted in the index must match the workflow that runs it.
 

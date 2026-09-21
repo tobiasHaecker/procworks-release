@@ -575,7 +575,20 @@ const Tour = (() => {
     if (!step || !root) return;
     if (byId("modal-root").children.length) { clear(root); t.painted = null; return; }
 
-    const anchor = step.anchor ? document.querySelector(step.anchor) : null;
+    let anchor = step.anchor ? document.querySelector(step.anchor) : null;
+    // Ersatzanker: Manche Anker entstehen erst durch die verlangte Handlung --
+    // in der Karten-Sicht gibt es den Abschnitt „Daten“/„Bearbeiter“ erst, wenn
+    // ein Schritt gewählt ist. Solange zeigt die Tour auf den ersten vorhandenen
+    // Zusatzbereich (``also``, hier der Kontrollfluss), statt nach Ablauf der
+    // Frist „nicht sichtbar“ zu melden und das Popup mittig über genau den
+    // Knoten zu legen, den man anklicken soll.
+    let fallback = false;
+    if (step.anchor && !anchor && step.action === "simulate") {
+      for (const sel of step.also || []) {
+        const extra = document.querySelector(sel);
+        if (extra) { anchor = extra; fallback = true; break; }
+      }
+    }
     let missing = false;
     if (step.anchor && !anchor) {
       if (!t.anchorSince) t.anchorSince = Date.now();
@@ -589,7 +602,7 @@ const Tour = (() => {
       t.anchorSince = 0;
     }
 
-    const key = paintKey(step, anchor, missing);
+    const key = paintKey(step, anchor, missing, fallback);
     const reuse = !!(t.painted && t.painted.key === key && t.painted.pop.isConnected);
     if (!reuse) clear(root);
     document.documentElement.setAttribute("data-tour-active", "1");
@@ -706,12 +719,13 @@ const Tour = (() => {
    * @param {boolean} missing Anker dauerhaft nicht auffindbar.
    * @returns {string} Vergleichbare Kennung.
    */
-  function paintKey(step, anchor, missing) {
+  function paintKey(step, anchor, missing, fallback) {
     return [
       t.tour ? t.tour.id : "",
       t.index,
       missing ? "1" : "0",
-      anchor ? "a" : "-",
+      // Wechsel Ersatzanker -> echter Anker zeichnet neu (Popup rückt an die Karte).
+      anchor ? (fallback ? "f" : "a") : "-",
       step.action === "simulate" ? "b" : "-",
     ].join("|");
   }
@@ -896,6 +910,13 @@ const Tour = (() => {
       document.documentElement.style.setProperty("--tour-bottom-inset", `${inset}px`);
       const usableBottom = window.innerHeight - inset;
       const w = box.offsetWidth, h = box.offsetHeight;
+      if (placement === "side") {
+        const s = sidePosition(r, w, h, window.innerWidth, usableBottom, pad);
+        box.style.left = `${s.left}px`;
+        box.style.top = `${s.top}px`;
+        box.style.visibility = "visible";
+        return;
+      }
       const below = usableBottom - r.bottom;
       const wantTop = placement === "top" || (below < h + pad && r.top > h + pad);
       let top = wantTop ? r.top - h - pad : r.bottom + pad;
@@ -906,6 +927,37 @@ const Tour = (() => {
       box.style.top = `${top}px`;
       box.style.visibility = "visible";
     });
+  }
+
+  /**
+   * Platzierung ``"side"``: neben das Ziel statt darüber oder darunter.
+   *
+   * Für Schritte, in denen im Zielbereich selbst geklickt werden muss (Knoten im
+   * Kontrollfluss wählen, dann ⊕ in der Schritt-Karte). Ober- oder unterhalb
+   * eines großen Bereichs ist selten Platz; das Popup wurde dann in den Bereich
+   * geschoben und verdeckte den Knoten. Reihenfolge: links vom Ziel, sonst
+   * rechts davon, sonst an den rechten Fensterrand -- der Ablauf beginnt links
+   * (Start), der neue Schritt steht direkt dahinter, rechts ist er frei.
+   * Senkrecht bündig mit der Oberkante des Ziels, immer im Fenster.
+   *
+   * Reine Rechnung (kein DOM), damit sie sich ohne Browser prüfen lässt.
+   *
+   * @param {{left:number,right:number,top:number}} r Zielrechteck.
+   * @param {number} w Popup-Breite.
+   * @param {number} h Popup-Höhe.
+   * @param {number} viewW Fensterbreite.
+   * @param {number} usableBottom Unterkante des nutzbaren Bereichs (über dem Demo-Banner).
+   * @param {number} pad Randabstand.
+   * @returns {{left:number, top:number}}
+   */
+  function sidePosition(r, w, h, viewW, usableBottom, pad) {
+    let left;
+    if (r.left - pad >= w + pad) left = r.left - w - pad;
+    else if (viewW - r.right - pad >= w + pad) left = r.right + pad;
+    else left = viewW - w - pad;
+    left = Math.max(pad, Math.min(left, viewW - w - pad));
+    const top = Math.max(pad, Math.min(r.top, usableBottom - h - pad));
+    return { left, top };
   }
 
   // --- Öffentliche Schnittstelle ------------------------------------------
@@ -919,6 +971,8 @@ const Tour = (() => {
     availableTours,
     isDone,
     savedProgress,
+    /** Nur für Prüfungen: die reine Platzierungsrechnung (siehe sidePosition). */
+    _sidePosition: sidePosition,
     /** @returns {boolean} true, solange eine Tour läuft. */
     get running() { return !!t.tour; },
     /** @returns {boolean} true im schreibfreien Modus (für das GUI-Abzeichen). */

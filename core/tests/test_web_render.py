@@ -1183,3 +1183,22 @@ def test_detail_states_are_visible_in_the_process_map() -> None:
     assert ".gnode.d-suspended" in css and ".gnode.d-failed" in css, (
         "Die CSS-Klassen des Status-Overlays fehlen"
     )
+
+
+def test_audit_names_the_login_and_supervision_asks_for_a_reason() -> None:
+    """Acceptance test 2026-09: the audit showed "System" for a human completion.
+
+    The timeline must resolve the actor through ``auditActorLabel`` (agent ->
+    login in ``detail.actor`` -> "System" only as the last resort), and a
+    completion refused as Aufsichtseingriff must lead to the reason dialog
+    instead of a dead-end error toast.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert 'ev.agent_id ? agentNameOf(ev.agent_id) : "System"' not in src
+    assert 'el("span", { class: "tl-actor" }, auditActorLabel(ev))' in src
+    assert "ev.detail && ev.detail.actor" in src
+    assert "ACTIVITY_SUPERVISED:" in src
+    # promptComplete reacts to the core's 422 by asking, and resends with reason.
+    assert "if (isSupervisionRequired(err)) { askSupervisionReason(" in src
+    assert "payload.supervision_reason = supervisionReason" in src

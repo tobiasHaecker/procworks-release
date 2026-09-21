@@ -113,6 +113,15 @@ curl -X POST https://host/v1/instances/instance_42/nodes/act_pruefen/complete \
 # Diskriminator-Wert beim Abschließen des vorgelagerten Schritts zu übergeben.
 ```
 
+**Wer schließt ab?** Ein Token, das an einen Bearbeiter gebunden ist, schließt
+als dieser Bearbeiter ab; ein ungebundenes Token nennt ihn über `agent_id`, und
+die Bearbeiterregel des Schritts wird geprüft (`409`, wenn er nicht zuständig
+ist). Ein ungebundenes Token **ohne** `agent_id` an einem Schritt mit
+Bearbeiterregel ist ein **Aufsichtseingriff**: Er braucht eine Begründung im
+Feld `supervision_reason` (sonst `422`) und wird mit ihr im Audit festgehalten.
+Bei aktiver Lizenzierung ist er nicht zulässig (`403`) — dann immer mit einem
+lizenzierten Bearbeiter abschließen.
+
 ### 2.3 Instanzdaten lesen
 
 ```bash

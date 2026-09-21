@@ -587,6 +587,65 @@ def _resolve_acting_agent(principal: Principal, requested: str | None) -> str | 
     return requested
 
 
+def _require_supervision_reason(
+    principal: Principal,
+    acting_agent: str | None,
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    reason: str | None,
+) -> str | None:
+    """Gate a completion that no agent stands behind (Aufsichtseingriff).
+
+    A login without an agent binding (modeler/admin without a person behind it)
+    completes a step **outside** the staff-rule check: the core only verifies
+    eligibility when an ``agent_id`` is present. That is legitimate as an
+    exceptional *supervision* action, but it must never become a routine work
+    path, because it would sidestep two guarantees at once -- the BZR (four-eyes
+    principle) and the licensing, which counts *agents* who work.
+
+    Rules (all boundary-only, the core stays untouched):
+
+    * Exempt: throw-away test instances (no audit, no productive work), steps
+      without a staff rule (nobody to bypass), an agent-backed caller, and the
+      open dev mode (no identity exists, the quickstart keeps working).
+    * With **licensing enforced** such a completion is refused (403): otherwise
+      an unbound login would be unlimited unlicensed labour.
+    * Otherwise a non-blank ``reason`` is mandatory (422) -- the visible price
+      of the exception.
+
+    Returns the trimmed reason when this *is* a supervision completion, else
+    ``None``.
+    """
+
+    if (
+        acting_agent is not None
+        or instance.is_test
+        or node_id not in schema.staff_rules
+        or _auth_mode() == "open"
+    ):
+        return None
+    if _license.enforced:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Abschluss ohne Agentenbindung ist bei aktiver Lizenzierung nicht "
+                "zulässig: Der Login muss an einen lizenzierten Bearbeiter gebunden sein."
+            ),
+        )
+    cleaned = (reason or "").strip()
+    if not cleaned:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Aufsichtseingriff: Dieser Login ist keinem Bearbeiter zugeordnet. "
+                "Bitte eine Begründung angeben, warum der Schritt an der "
+                "Bearbeiterregel vorbei abgeschlossen wird."
+            ),
+        )
+    return cleaned
+
+
 def _label_of(schema: ProcessSchema, node_id: str) -> str | None:
     """Return the human-readable label of a node, if it exists."""
 
@@ -1163,6 +1222,11 @@ class CompleteActivityRequest(BaseModel):
     node_id: str = Field(..., examples=["act_1"])
     data: dict[str, object] = Field(default_factory=dict)
     agent_id: str | None = Field(default=None, examples=["a1"])
+    #: Pflichtbegründung eines **Aufsichtseingriffs**: Abschluss durch einen
+    #: Login *ohne* Agentenbindung (siehe :func:`_require_supervision_reason`).
+    supervision_reason: str | None = Field(
+        default=None, examples=["Bearbeiterin krank, Frist läuft ab"]
+    )
 
 
 class AdhocInsertRequest(BaseModel):
@@ -4310,6 +4374,9 @@ def post_complete_activity(
     schema = _effective_schema_for(before)
     before_states = dict(before.node_states)
     acting_agent = _resolve_acting_agent(principal, req.agent_id)
+    supervision = _require_supervision_reason(
+        principal, acting_agent, before, schema, req.node_id, req.supervision_reason
+    )
     after = _run_or_409(
         lambda: exe.complete_activity(
             before,
@@ -4332,7 +4399,21 @@ def post_complete_activity(
             node_id=req.node_id,
             label=_label_of(schema, req.node_id),
             agent_id=acting_agent,
+            # Wer hat abgeschlossen, wenn kein Agent dahintersteht: der Login.
+            detail={"actor": principal.subject} if acting_agent is None else None,
         )
+        if supervision is not None:
+            # Eigenes Ereignis (nicht in KPIs/Mining): die Begründung bleibt
+            # in der Hash-Kette und ist im Verlauf sichtbar.
+            _audit.append(
+                EventType.ACTIVITY_SUPERVISED,
+                after.id,
+                after.schema_id,
+                schema_version=after.schema_version,
+                node_id=req.node_id,
+                label=_label_of(schema, req.node_id),
+                detail={"actor": principal.subject, "reason": supervision},
+            )
         _record_completion(before, after)
         _after_advance(schema, before_states, after)
     return after
@@ -4561,6 +4642,9 @@ class SetDataRequest(BaseModel):
 class V1CompleteRequest(BaseModel):
     data: dict[str, object] = Field(default_factory=dict)
     agent_id: str | None = Field(default=None, examples=["a1"])
+    #: Begründung eines Aufsichtseingriffs (ungebundener Token ohne ``agent_id``
+    #: an einem Schritt mit Bearbeiterregel); siehe ``_require_supervision_reason``.
+    supervision_reason: str | None = None
 
 
 def _validate_data_values(
@@ -4721,7 +4805,10 @@ def v1_complete_task(
 
     def produce() -> ProcessInstance:
         completion = CompleteActivityRequest(
-            node_id=node_id, data=body.data, agent_id=body.agent_id
+            node_id=node_id,
+            data=body.data,
+            agent_id=body.agent_id,
+            supervision_reason=body.supervision_reason,
         )
         return post_complete_activity(instance_id, completion, principal)
 

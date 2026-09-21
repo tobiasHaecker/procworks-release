@@ -34,6 +34,11 @@ class EventType(StrEnum):
     #: these never distort a figure.
     ACTIVITY_CLAIMED = "ACTIVITY_CLAIMED"
     ACTIVITY_RETURNED = "ACTIVITY_RETURNED"
+    #: Supervision completion: a login without an agent binding completed a
+    #: staff-rule step (mandatory reason in ``detail``). Type-filtered like the
+    #: claim events -- no KPI/mining impact; the regular ``ACTIVITY_COMPLETED``
+    #: event is written alongside, so figures stay unchanged.
+    ACTIVITY_SUPERVISED = "ACTIVITY_SUPERVISED"
     #: An escalation stage fired for an overdue task (T3/E9). Real
     #: per-instance history; type-filtered like the claim events, so it never
     #: distorts a KPI or the mined process map.

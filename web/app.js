@@ -5758,8 +5758,8 @@ async function renderInstanceDetail(container, withActions) {
       tl.appendChild(el("div", { class: "tl-item" },
         el("span", { class: "tl-time" }, fmtTimestamp(ev.timestamp)),
         el("span", { class: "tl-type" }, eventLabel(ev.event_type)),
-        el("span", { class: "tl-actor" }, ev.agent_id ? agentNameOf(ev.agent_id) : "System"),
-        el("span", { class: "tl-meta" }, ev.label || ev.node_id || "\u2013")));
+        el("span", { class: "tl-actor" }, auditActorLabel(ev)),
+        el("span", { class: "tl-meta" }, auditDetailText(ev))));
     });
     tlBody.appendChild(tl);
   }
@@ -5956,6 +5956,35 @@ function openInstanceDataForm(schema, inst) {
 // bliebe es leer und der Schritt waere fachlich nicht entscheidbar. Auch
 // Schreibfelder starten mit dem bisherigen Wert, damit eine Uebernahme aus einem
 // Vor- oder Elternprozess nur bestaetigt statt abgetippt werden muss.
+/**
+ * Ist die Ablehnung die Aufforderung zum Aufsichtseingriff?
+ * Erkennt die 422-Antwort des Kerns, die eine Begruendung verlangt.
+ * @param {{status?: number, detail?: unknown}} err abgefangener Request-Fehler
+ * @returns {boolean}
+ */
+function isSupervisionRequired(err) {
+  return !!err && err.status === 422 && typeof err.detail === "string" && err.detail.startsWith("Aufsichtseingriff");
+}
+
+/**
+ * Fragt die Pflichtbegruendung eines Aufsichtseingriffs ab. Der Dialog erklaert,
+ * warum (kein Bearbeiter hinter dem Login) und dass die Angabe im Audit steht.
+ * @param {string} label Bezeichnung des Schritts
+ * @param {(reason: string) => Promise<unknown>} onConfirm sendet den Abschluss mit Begruendung
+ */
+function askSupervisionReason(label, onConfirm) {
+  const reason = el("textarea", { rows: "3", placeholder: "z. B. Bearbeiterin krank, Frist l\u00E4uft ab" });
+  const body = el("div", { class: "form-grid" },
+    el("div", { class: "card-hint" },
+      "Dieser Login ist keinem Bearbeiter zugeordnet. Der Schritt wird an der Bearbeiterregel vorbei abgeschlossen (Aufsichtseingriff). Die Begr\u00FCndung wird im Audit-Verlauf festgehalten."),
+    el("label", { class: "field" }, "Begr\u00FCndung *", reason));
+  openModal(`Aufsichtseingriff: ${label}`, body, async () => {
+    const text = reason.value.trim();
+    if (!text) { toast("err", "Bitte eine Begr\u00FCndung angeben"); return false; }
+    return onConfirm(text);
+  }, "Trotzdem abschlie\u00DFen");
+}
+
 async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone, dataValues) {
   // Bevorzugt die gestaltete Eingabemaske dieses Schritts; sonst generische
   // Felder fuer die Pflicht-Schreibvariablen.
@@ -6006,13 +6035,24 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       toast("err", "Bitte alle Pflichtfelder ausfüllen", missing);
       return false;
     }
+    return submitCompletion(data, null);
+  };
+  // Sendet den Abschluss. Der Kern entscheidet, ob ein Aufsichtseingriff
+  // vorliegt (Login ohne Agentenbindung an einem Schritt mit Bearbeiterregel) und
+  // verlangt dann eine Begruendung -- der Client kennt diese Regel nicht, er
+  // reagiert nur auf die Ablehnung und fragt nach (keine Korrektheitslogik hier).
+  const submitCompletion = async (data, supervisionReason) => {
     try {
       const payload = { node_id: nodeId, data };
       if (agentId) payload.agent_id = agentId;
+      if (supervisionReason) payload.supervision_reason = supervisionReason;
       await api.post(`/instances/${instanceId}/complete`, payload);
       toast("ok", "Schritt abgeschlossen");
       if (onDone) await onDone();
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) {
+      if (isSupervisionRequired(err)) { askSupervisionReason(label, (reason) => submitCompletion(data, reason)); return false; }
+      const d = describeError(err); toast("err", d.title, d.lines); return false;
+    }
   };
   if (form || Object.keys(inputs).length) openModal(`Abschlie\u00DFen: ${label}`, body, doComplete, "Abschlie\u00DFen");
   else doComplete();
@@ -6481,6 +6521,7 @@ const EVENT_LABELS = {
   INSTANCE_CREATED: "Instanz erstellt",
   ACTIVITY_STARTED: "Aktivit\u00E4t gestartet",
   ACTIVITY_COMPLETED: "Aktivit\u00E4t abgeschlossen",
+  ACTIVITY_SUPERVISED: "Aufsichtseingriff",
   BRANCH_DECIDED: "Zweig entschieden",
   ADHOC_INSERTED: "Ad-hoc eingef\u00FCgt",
   ADHOC_DELETED: "Ad-hoc gel\u00F6scht",
@@ -6490,6 +6531,33 @@ const EVENT_LABELS = {
 };
 
 function eventLabel(t) { return EVENT_LABELS[t] || t; }
+
+/**
+ * Wer hat das Ereignis ausgeloest? Reihenfolge: gebundener Bearbeiter, dann der
+ * Login (`detail.actor`, gesetzt wenn kein Agent dahintersteht), sonst
+ * "System" -- und das nur fuer Ereignisse, die tatsaechlich die Maschine
+ * ausloest. Fruehere Fassung zeigte "System" auch fuer manuelle Abschluesse.
+ * @param {{agent_id?: string|null, detail?: Record<string,string>}} ev Audit-Ereignis
+ * @returns {string}
+ */
+function auditActorLabel(ev) {
+  if (ev.agent_id) return agentNameOf(ev.agent_id);
+  const actor = ev.detail && ev.detail.actor;
+  if (actor) return actor === "anonymous" ? "unbekannt (offener Zugang)" : actor;
+  return "System";
+}
+
+/**
+ * Detailspalte eines Audit-Ereignisses: Schrittname; bei einem Aufsichtseingriff
+ * zusaetzlich die Begruendung.
+ * @param {{label?: string|null, node_id?: string|null, detail?: Record<string,string>}} ev Audit-Ereignis
+ * @returns {string}
+ */
+function auditDetailText(ev) {
+  const base = ev.label || ev.node_id || "\u2013";
+  const reason = ev.detail && ev.detail.reason;
+  return reason ? `${base} \u2013 Begr\u00FCndung: ${reason}` : base;
+}
 
 function fmtTimestamp(iso) {
   if (!iso) return "";

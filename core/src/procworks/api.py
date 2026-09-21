@@ -48,10 +48,12 @@ from procworks import (
 from procworks.assignment import OpenTask
 from procworks.audit import (
     AuditEvent,
+    ConformanceReport,
     EventType,
     KpiReport,
     ProcessMap,
     compute_kpis,
+    conformance,
     create_audit_log,
     discover_process_map,
     instance_timeline,
@@ -140,9 +142,11 @@ from procworks.model import (
     value_matches_type,
 )
 from procworks.outbox import (
+    WEBHOOK_EVENTS,
     OutboxDispatcher,
     WebhookError,
     build_push_endpoint_registry,
+    preview_delivery,
 )
 from procworks.store import (
     create_absence_store,
@@ -644,6 +648,30 @@ def _require_supervision_reason(
             ),
         )
     return cleaned
+
+
+def _completion_detail(
+    before: ProcessInstance,
+    node_id: str,
+    principal: Principal,
+    acting_agent: str | None,
+) -> dict[str, str] | None:
+    """Detail of an ``ACTIVITY_COMPLETED`` event.
+
+    * ``actor`` -- the login, when no agent stands behind the completion.
+    * ``ready_at`` -- when the step became ready (the activation stamp the
+      boundary already keeps for the worklist clock). It lets the KPI report
+      measure a step's lead time even when it was completed without being
+      claimed -- the audit deliberately has no separate activation event.
+    """
+
+    detail: dict[str, str] = {}
+    if acting_agent is None:
+        detail["actor"] = principal.subject
+    ready = before.node_activated_at.get(node_id)
+    if ready is not None:
+        detail["ready_at"] = ready.isoformat()
+    return detail or None
 
 
 def _label_of(schema: ProcessSchema, node_id: str) -> str | None:
@@ -4399,8 +4427,7 @@ def post_complete_activity(
             node_id=req.node_id,
             label=_label_of(schema, req.node_id),
             agent_id=acting_agent,
-            # Wer hat abgeschlossen, wenn kein Agent dahintersteht: der Login.
-            detail={"actor": principal.subject} if acting_agent is None else None,
+            detail=_completion_detail(before, req.node_id, principal, acting_agent),
         )
         if supervision is not None:
             # Eigenes Ereignis (nicht in KPIs/Mining): die Begründung bleibt
@@ -4851,6 +4878,22 @@ def get_kpis(schema_id: str | None = None) -> KpiReport:
 @app.get("/monitoring/process-map", response_model=ProcessMap, dependencies=[_read])
 def get_process_map(schema_id: str | None = None) -> ProcessMap:
     return discover_process_map(_audit.list_all(), schema_id)
+
+
+@app.get(
+    "/schemas/{schema_id}/conformance",
+    response_model=ConformanceReport,
+    dependencies=[_read],
+)
+def get_conformance(schema_id: str) -> ConformanceReport:
+    """Target/actual comparison: how the recorded history fits the model.
+
+    Read-only (``audit.conformance``): per step how often it completed and how
+    long it took, observed transitions the model does not allow, and completed
+    steps the model does not contain (ad-hoc).
+    """
+
+    return conformance(_get_or_404(schema_id), _audit.list_all())
 
 
 @app.get(
@@ -5495,6 +5538,45 @@ def v1_create_webhook(
     )
     assert isinstance(result, WebhookSubscription)
     return result
+
+
+class WebhookPreviewRequest(BaseModel):
+    url: str = Field(..., examples=["https://hooks.example.com/procworks"])
+    event: str = Field(default="task.completed", examples=["task.completed"])
+    secret_ref: str = Field(default="", examples=["WEBHOOK_SECRET"])
+
+
+class WebhookPreviewResponse(BaseModel):
+    """Verdict + exact request of a delivery that is NOT sent (see ``preview_delivery``)."""
+
+    allowed: bool
+    reason: str
+    resolved_address: str
+    egress_locked: bool
+    would_send: bool
+    signed: bool
+    headers: dict[str, str]
+    body: str
+
+
+@_v1.post("/webhooks/preview", response_model=WebhookPreviewResponse)
+def v1_preview_webhook(
+    req: WebhookPreviewRequest,
+    principal: Principal = Depends(
+        require_scope(SCOPE_EVENTS_SUBSCRIBE, "modeler", "admin")
+    ),
+) -> WebhookPreviewResponse:
+    """Show what a delivery to ``url`` would send and whether the SSRF rule allows it.
+
+    Nothing is sent and nothing is stored -- a diagnostic that also works where
+    outbound traffic is locked (the public demo). Same rights as creating a
+    subscription, because it reveals how a target name resolves.
+    """
+
+    if req.event not in WEBHOOK_EVENTS and req.event != "webhook.test":
+        raise HTTPException(status_code=422, detail=f"unknown webhook event '{req.event}'")
+    p = preview_delivery(req.url, req.event, req.secret_ref)
+    return WebhookPreviewResponse(**p.__dict__)
 
 
 @_v1.delete("/webhooks/{subscription_id}", status_code=204)

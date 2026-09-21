@@ -510,6 +510,21 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .modal-h h3 { margin: 0; font-size: 16px; }
 .modal-b { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; max-height: 70vh; overflow: auto; }
 .modal-f { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 10px; }
+/* Prozesskarte Soll/Ist (conformancePanel in app.js). */
+.graph g.obs-none { opacity: .45; }
+.graph g.obs-none rect { stroke-dasharray: 4 3; }
+.conf-picker { margin-left: auto; }
+.conf-facts { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 10px 0; font-size: 13px; color: var(--txt-dim); }
+.conf-facts .conf-warn { color: var(--amber); font-weight: 600; }
+.conf-raw { margin-top: 10px; font-size: 13px; }
+.conf-raw summary { cursor: pointer; color: var(--txt-dim); }
+/* Webhook-Probelauf (renderWebhookPreview in app.js). */
+.wh-preview:empty { display: none; }
+.wh-preview-code {
+  margin: 8px 0 0; padding: 10px 12px; border-radius: 8px; max-height: 220px; overflow: auto;
+  background: var(--bg-elev2); border: 1px solid var(--line); color: var(--txt);
+  font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all;
+}
 /* Migrationsassistent (openMigrationAssistant in app.js). */
 .mig-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .mig-table th, .mig-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }

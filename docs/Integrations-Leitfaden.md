@@ -295,12 +295,39 @@ curl -X POST https://host/v1/webhooks \
 curl https://host/v1/webhooks/$WID/deliveries -H "Authorization: Bearer $TOKEN"  # Protokoll
 curl -X POST https://host/v1/webhooks/$WID/test -H "Authorization: Bearer $TOKEN" # Testping
 curl -X DELETE https://host/v1/webhooks/$WID -H "Authorization: Bearer $TOKEN"
+
+# Probelauf: zeigt Urteil, Kopfzeilen und signierten Rumpf -- sendet NICHTS
+curl -X POST https://host/v1/webhooks/preview \
+     -H "Authorization: Bearer $TOKEN" \
+     -d '{"url": "https://hooks.example.com/pw", "event": "task.completed",
+          "secret_ref": "WH_SECRET"}'
 ```
 
 Verfügbare Ereignisse: `instance.started`, `instance.completed`, `task.ready`,
 `task.completed`, `task.incident`. Jede Zustellung ist HMAC-signiert (`secret_ref` ist ein
-ENV-Variablenname) und trägt eine eindeutige `delivery_id` zur Entdoppelung. Ziele werden
-gegen die **SSRF-Allowlist** `PROCWORKS_WEBHOOK_ALLOWLIST` geprüft.
+ENV-Variablenname) und trägt eine eindeutige `delivery_id` zur Entdoppelung. Mit dem
+**Probelauf** lässt sich der eigene Empfänger testen, bevor ein Abonnement Ereignisse
+zustellt: Er liefert genau die Kopfzeilen und den Rumpf, die eine echte Zustellung
+hätte, samt Signatur zum Nachprüfen.
+
+**Schutz vor Server-Side Request Forgery (SSRF).** Ein Webhook-Ziel wird geprüft, wenn
+das Abonnement angelegt wird, **und erneut bei jeder Zustellung**:
+
+- Ist `PROCWORKS_WEBHOOK_ALLOWLIST` gesetzt (kommagetrennte Hostnamen), sind nur diese
+  Hosts erlaubt. **Empfehlung für den Betrieb.**
+- Ohne Allowlist sind nur Ziele erlaubt, deren Name ausschließlich auf **öffentliche**
+  Adressen auflöst. Abgelehnt werden private, Loopback-, Link-Local- (etwa
+  Cloud-Metadaten `169.254.169.254`), CGNAT- und reservierte Adressen – auch in
+  Sonderschreibweisen (`2130706433`, `0x7f000001`, `::ffff:127.0.0.1`).
+- Die Verbindung geht an **genau die geprüfte Adresse** (kein zweites Auflösen, damit
+  kein DNS-Rebinding). TLS prüft das Zertifikat trotzdem gegen den Hostnamen.
+- **Weiterleitungen werden nicht befolgt.** Ein 3xx gilt als fehlgeschlagene Zustellung.
+- URLs mit Zugangsdaten (`https://user:pw@…`) werden abgelehnt.
+- `PROCWORKS_EGRESS_DENY=1` sperrt jede ausgehende Zustellung, auch bereits
+  eingereihte.
+
+Push-Ziele (`PROCWORKS_PUSH_ENDPOINTS`) konfiguriert nur der Betreiber; sie dürfen im
+internen Netz liegen, werden aber ebenfalls an die geprüfte Adresse gebunden.
 
 ---
 
@@ -350,6 +377,7 @@ geprüft (kein Injection-Risiko).
 | `GET · POST /v1/webhooks` | `events:subscribe` | Abonnements auflisten/anlegen |
 | `DELETE /v1/webhooks/{id}` | `events:subscribe` | Abonnement löschen |
 | `POST /v1/webhooks/{id}/test` | `events:subscribe` | Testzustellung |
+| `POST /v1/webhooks/preview` | `events:subscribe` | Probelauf: Urteil + Anfrage, ohne Senden |
 | `GET /v1/webhooks/{id}/deliveries` | `events:subscribe` | Zustellprotokoll |
 
 Die maschinenlesbare Spezifikation (Parameter, Schemata, Beispiele) liefert `/openapi.json`
@@ -363,7 +391,9 @@ bzw. die Swagger-UI unter `/docs`.
 - **Exactly-once:** External-Task-Lock + Worker-Bindung verhindern Doppelanwendung.
 - **At-least-once-Zustellung:** transaktionale Outbox + Backoff-Retry + Circuit-Breaker.
 - **Keine Secrets im Modell:** Connector-/Push-/Webhook-Secrets nur serverseitig (`${ENV}`/`secret_ref`).
-- **SSRF-Schutz:** Webhook-Ziele gegen Allowlist; Push-Ziele nur vom Betreiber konfigurierbar.
+- **SSRF-Schutz:** Webhook-Ziele gegen Allowlist bzw. nur öffentliche Adressen, geprüft bei
+  jeder Zustellung, Verbindung an die geprüfte Adresse, keine Weiterleitungen (§5); Push-Ziele
+  nur vom Betreiber konfigurierbar.
 - **Kein Injection:** ausschließlich parametrisierte DAL-Zugriffe; whitelisted Bezeichner.
 - **Kern bleibt rein:** die Integrationsschicht treibt den Kern über bestehende Operationen;
   ein Integrationsfehler kann ein gültiges Schema oder eine laufende Instanz **nie** beschädigen.

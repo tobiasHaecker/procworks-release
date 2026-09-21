@@ -1244,6 +1244,13 @@ function renderGraph(schema, opts) {
     const detail = opts.instance && opts.instance.node_details
       ? opts.instance.node_details[id] : null;
     let sub = opts.instance && opts.instance.node_states ? (opts.instance.node_states[id] || "") : node.type;
+    // Soll-Ist-Sicht (opts.observed, aus /schemas/{id}/conformance): Haeufigkeit
+    // und mittlere Dauer am Schritt; nie ausgefuehrte Schritte blass.
+    const obs = opts.observed && opts.observed[id];
+    if (obs) {
+      sub = obs.completed ? `${obs.completed}× · Ø ${fmtStepDuration(obs.avg_total_seconds)}` : "nie ausgeführt";
+      if (!obs.completed) g.classList.add("obs-none");
+    }
     if (detail === "SUSPENDED") { sub += " · angehalten"; g.classList.add("d-suspended"); }
     else if (detail === "FAILED") { sub += " · gescheitert"; g.classList.add("d-failed"); }
     g.appendChild(svg("text", { class: "gstate", x: p.x + p.w / 2, y: p.y + p.h / 2 + 14, "text-anchor": "middle" },
@@ -6484,6 +6491,88 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
 // View: Monitoring
 // --------------------------------------------------------------------------
 
+/**
+ * Dauer fuer die Engpass-Tabelle: „keine Zeitdaten“ statt eines Strichs, und
+ * „< 1 s“ statt „0 s“ -- ein Strich sah aus wie ein fehlendes Feature.
+ * @param {number|null|undefined} sec Sekunden
+ * @returns {string}
+ */
+function fmtStepDuration(sec) {
+  if (sec == null) return "keine Zeitdaten";
+  if (sec < 1) return "< 1 s";
+  return fmtDuration(sec);
+}
+
+/**
+ * Panel „Prozesskarte (Soll/Ist)“ im Monitoring.
+ *
+ * Zeigt fuer ein gewaehltes Schema das Soll-Modell mit der beobachteten
+ * Haeufigkeit und Dauer je Schritt (``renderGraph`` mit ``observed``) und
+ * listet, was davon abweicht: Uebergaenge, die das Modell nicht vorsieht, und
+ * Schritte, die im Modell fehlen (Ad-hoc). Die Rechnung liegt im Kern
+ * (``GET /schemas/{id}/conformance``); der Client zeigt nur an. Die rohe
+ * Directly-follows-Tabelle bleibt einklappbar erhalten.
+ *
+ * @param {object[]} instances die geladenen Instanzen (fuer die Schema-Auswahl)
+ * @param {object|null} pmap entdeckte Prozesskarte (Directly-follows) oder null
+ * @returns {Promise<HTMLElement>}
+ */
+async function conformancePanel(instances, pmap) {
+  const withRuns = [...new Set(instances.map((i) => i.schema_id))];
+  if (!state.conformanceSchema || !withRuns.includes(state.conformanceSchema)) {
+    state.conformanceSchema = withRuns.includes(state.schemaId) ? state.schemaId : withRuns[0] || null;
+  }
+  const picker = el("select", { class: "conf-picker", onChange: (e) => { state.conformanceSchema = e.target.value; render(); } },
+    ...withRuns.map((sid) => {
+      const o = el("option", { value: sid }, schemaLabel(sid));
+      if (sid === state.conformanceSchema) o.selected = true;
+      return o;
+    }));
+  const body = el("div", { class: "panel-b" });
+  const panel = el("div", { class: "panel" },
+    el("div", { class: "panel-h" }, el("h2", null, "Prozesskarte (Soll/Ist)"),
+      el("span", { class: "sub" }, "Process Mining über dem Modell"), withRuns.length ? picker : null),
+    body);
+  if (!state.conformanceSchema) { body.appendChild(emptyState("Noch keine Abläufe. Starte eine Instanz und schließe Schritte ab.")); return panel; }
+
+  let report = null, schema = null;
+  try {
+    [report, schema] = await Promise.all([
+      api.get(`/schemas/${state.conformanceSchema}/conformance`),
+      api.get(`/schemas/${state.conformanceSchema}`),
+    ]);
+  } catch (err) { body.appendChild(emptyState("Soll/Ist-Vergleich nicht verfügbar.")); return panel; }
+
+  const observed = {};
+  report.steps.forEach((st) => { observed[st.node_id] = st; });
+  body.appendChild(renderGraph(schema, { observed }));
+  const never = report.steps.filter((st) => !st.completed);
+  const facts = el("div", { class: "conf-facts" },
+    el("span", null, `${report.instances} Instanz(en) ausgewertet`),
+    el("span", null, never.length ? `${never.length} Schritt(e) nie ausgeführt` : "jeder Schritt wurde ausgeführt"),
+    el("span", { class: report.deviations.length ? "conf-warn" : "" },
+      report.deviations.length ? `${report.deviations.length} Abweichung(en) vom Modell` : "keine Abweichung vom Modell"));
+  body.appendChild(facts);
+  if (report.deviations.length) {
+    const foreign = new Set(report.foreign_steps);
+    const stepName = (id, label) => (label || id) + (foreign.has(id) ? " (nicht im Modell)" : "");
+    body.appendChild(table(["Von", "Nach", "Häufigkeit"], report.deviations.map((d) => [
+      stepName(d.source, d.source_label), stepName(d.target, d.target_label), String(d.frequency)])));
+    body.appendChild(el("p", { class: "muted", style: "font-size:12px;margin-top:6px" },
+      "Übergänge, die das Modell nicht erzeugen kann – meist Ad-hoc-Änderungen einzelner Instanzen oder Verläufe einer früheren Version."));
+  }
+  // Rohdaten (alle Schemata) bleiben erreichbar, aber eingeklappt.
+  const edges = (pmap && pmap.edges) || [];
+  if (edges.length) {
+    const names = {};
+    ((pmap && pmap.nodes) || []).forEach((n) => { names[n.node_id] = n.label || n.node_id; });
+    body.appendChild(el("details", { class: "conf-raw" },
+      el("summary", null, "Alle beobachteten Übergänge (Directly-follows, alle Prozesse)"),
+      table(["Von", "Nach", "Häufigkeit"], edges.map((e) => [names[e.source] || e.source, names[e.target] || e.target, String(e.frequency)]))));
+  }
+  return panel;
+}
+
 /** Filterstufen der Instanzliste im Monitoring (Wert = InstanceState bzw. "all"). */
 const INSTANCE_FILTERS = [
   { key: "all", label: "Alle" },
@@ -6598,29 +6687,28 @@ async function viewMonitor() {
     content.appendChild(detail);
   }
 
-  // Engpass-Analyse (Aktivitaeten nach Haeufigkeit + Dauer)
-  const stats = (report && report.activity_stats) || [];
-  const statRows = stats.map((s) => [s.label || s.node_id, String(s.completed), fmtDuration(s.avg_duration_seconds)]);
+  // Engpass-Analyse: je Schritt Liegezeit (bereit -> uebernommen), Bearbeitung
+  // (uebernommen -> erledigt) und Gesamtdauer (bereit -> erledigt). Die
+  // Gesamtdauer gibt es auch, wenn ohne Uebernahme erledigt wurde -- vorher stand
+  // dann ueberall „–“. Sortiert nach Gesamtdauer: der Engpass steht oben.
+  const stats = ((report && report.activity_stats) || []).slice()
+    .sort((a, b) => (b.avg_total_seconds ?? -1) - (a.avg_total_seconds ?? -1));
+  const statRows = stats.map((s) => [s.label || s.node_id, String(s.completed),
+    fmtStepDuration(s.avg_total_seconds), fmtStepDuration(s.avg_wait_seconds), fmtStepDuration(s.avg_duration_seconds)]);
   content.appendChild(el("div", { class: "panel" },
-    el("div", { class: "panel-h" }, el("h2", null, "Engp\u00E4sse \u2013 Aktivit\u00E4ten"), el("span", { class: "sub" }, "H\u00E4ufigkeit & \u00D8 Bearbeitungszeit")),
+    el("div", { class: "panel-h" }, el("h2", null, "Engp\u00E4sse \u2013 Aktivit\u00E4ten"),
+      el("span", { class: "sub" }, "\u00D8 Dauer von \u201Ebereit\u201C bis \u201Eerledigt\u201C \u2013 l\u00E4ngste zuerst")),
     el("div", { class: "panel-b" }, statRows.length
-      ? table(["Aktivit\u00E4t", "Abschl\u00FCsse", "\u00D8 Dauer"], statRows)
+      ? el("div", null,
+          table(["Aktivit\u00E4t", "Abschl\u00FCsse", "\u00D8 gesamt", "\u00D8 Liegezeit", "\u00D8 Bearbeitung"], statRows),
+          el("p", { class: "muted", style: "font-size:12px;margin-top:8px" },
+            "Liegezeit und Bearbeitung gibt es nur für Aufgaben, die vor dem Erledigen übernommen wurden. „keine Zeitdaten“: Abschlüsse aus der Zeit vor dieser Messung."))
       : emptyState("Noch keine abgeschlossenen Aktivit\u00E4ten erfasst."))));
 
-  // Entdeckte Prozesskarte (Process Mining: directly-follows)
-  const edges = (pmap && pmap.edges) || [];
-  const nameOfNode = {};
-  ((pmap && pmap.nodes) || []).forEach((n) => { nameOfNode[n.node_id] = n.label || n.node_id; });
-  const edgeRows = edges.map((e) => [
-    nameOfNode[e.source] || e.source,
-    nameOfNode[e.target] || e.target,
-    String(e.frequency),
-  ]);
-  content.appendChild(el("div", { class: "panel" },
-    el("div", { class: "panel-h" }, el("h2", null, "Prozesskarte (entdeckt)"), el("span", { class: "sub" }, "Process Mining \u2013 reale Abl\u00E4ufe")),
-    el("div", { class: "panel-b" }, edgeRows.length
-      ? table(["Von", "Nach", "H\u00E4ufigkeit"], edgeRows)
-      : emptyState("Noch keine Abl\u00E4ufe entdeckt. Schlie\u00DFe Aktivit\u00E4ten ab."))));
+  // Prozesskarte Soll/Ist: das Beobachtete ueber dem Soll-Modell (dieselbe
+  // Zeichnung wie ueberall), dazu die Abweichungen. Frueher nur eine Tabelle
+  // „von / nach / Haeufigkeit“ ohne Bezug zum Modell.
+  content.appendChild(await conformancePanel(instances, pmap));
 
   // Inzidente externer Aufgaben (Integrations-Konzept 11.5). Sichtbar fuer alle
   // Monitoring-Leser; "Erneut versuchen" (Aufloesen + Wiedereinreihen) ist nur
@@ -8415,6 +8503,13 @@ async function webhookPanel() {
   });
   const addBtn = el("button", { class: "btn small", onClick: addWebhook }, "+ Abonnement");
   const body = el("div", { class: "panel-b" },
+    // In der oeffentlichen Demo ist jede ausgehende Verbindung gesperrt
+    // (PROCWORKS_EGRESS_DENY). Ohne Hinweis wirkt das wie ein Defekt; der
+    // Probelauf zeigt trotzdem, was gesendet wuerde und wie die SSRF-Regel urteilt.
+    state.demoPassword
+      ? el("div", { class: "warn-banner", style: "margin-bottom:10px" },
+          "In der öffentlichen Demo sind ausgehende Verbindungen gesperrt – Zustellungen scheitern hier absichtlich. Beim Anlegen zeigt „Probelauf“, was gesendet würde und ob ein Ziel die Sicherheitsprüfung besteht (interne Adressen werden abgelehnt).")
+      : null,
     subs.length ? table(["Ziel-URL", "Ereignisse", "Secret-Ref", ""], rows)
       : emptyState("Noch keine Webhook-Abonnements."));
   return el("div", { class: "panel" },
@@ -8429,11 +8524,22 @@ function addWebhook() {
     const cb = el("input", { type: "checkbox", value: ev });
     return { cb, row: el("label", { class: "check-row" }, cb, " " + ev) };
   });
+  const result = el("div", { class: "wh-preview" });
+  const previewBtn = el("button", { class: "btn small", onClick: async () => {
+    const chosen = checks.filter((c) => c.cb.checked).map((c) => c.cb.value);
+    if (!url.value.trim()) { toast("info", "Bitte eine Ziel-URL angeben"); return; }
+    try {
+      const p = await api.post("/v1/webhooks/preview",
+        { url: url.value.trim(), event: chosen[0] || "task.completed", secret_ref: secret.value.trim() });
+      renderWebhookPreview(result, p);
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } }, "Probelauf (sendet nichts)");
   const body = el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Ziel-URL", url),
     el("label", { class: "field" }, "Secret-Referenz (Servername, optional)", secret),
     el("div", { class: "field" }, el("span", null, "Ereignisse"),
-      el("div", { class: "check-list" }, ...checks.map((c) => c.row))));
+      el("div", { class: "check-list" }, ...checks.map((c) => c.row))),
+    el("div", null, previewBtn), result);
   openModal("Webhook-Abonnement", body, async () => {
     const events = checks.filter((c) => c.cb.checked).map((c) => c.cb.value);
     if (!url.value.trim() || !events.length) return false;
@@ -8442,6 +8548,32 @@ function addWebhook() {
       render(); toast("ok", "Webhook angelegt");
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Anlegen");
+}
+
+/**
+ * Ergebnis eines Webhook-Probelaufs (``POST /v1/webhooks/preview``) anzeigen.
+ *
+ * Der Kern sendet dabei nichts. Gezeigt werden das Urteil der SSRF-Regel (mit
+ * derselben Begruendung, die eine echte Zustellung haette), eine Egress-Sperre
+ * getrennt davon, und Kopfzeilen samt signiertem Rumpf -- ein Empfaenger kann
+ * die Signatur daran nachpruefen.
+ *
+ * @param {HTMLElement} box Zielbehaelter (wird geleert)
+ * @param {object} p Antwort des Probelaufs
+ */
+function renderWebhookPreview(box, p) {
+  clear(box);
+  box.appendChild(p.allowed
+    ? el("div", { class: "ok-banner" }, `\u2713 Ziel zulässig${p.resolved_address ? ` (Adresse ${p.resolved_address})` : ""}.`)
+    : el("div", { class: "warn-banner" }, `Ziel abgelehnt: ${p.reason}`));
+  if (p.egress_locked) {
+    box.appendChild(el("div", { class: "warn-banner", style: "margin-top:6px" },
+      "Auf dieser Instanz sind ausgehende Verbindungen gesperrt – gesendet würde trotzdem nichts."));
+  }
+  box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-top:8px" },
+    p.signed ? "Signiert (X-ProcWorks-Signature, HMAC-SHA256 über den Rumpf)." : "Nicht signiert – keine Secret-Referenz oder sie ist auf dem Server nicht gesetzt."));
+  const headerText = Object.entries(p.headers).map(([k, v]) => `${k}: ${v}`).join("\n");
+  box.appendChild(el("pre", { class: "wh-preview-code" }, headerText + "\n\n" + p.body));
 }
 
 async function testWebhook(id) {

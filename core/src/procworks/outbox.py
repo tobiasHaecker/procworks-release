@@ -29,17 +29,17 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import os
 import socket
+import ssl
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 from urllib.parse import urlparse
 
 from procworks.model import (
@@ -98,55 +98,108 @@ def _allowed_hosts() -> set[str]:
     return {h.strip() for h in raw.split(",") if h.strip()}
 
 
-def _is_internal_host(host: str) -> bool:
-    """Return whether ``host`` points at a private/loopback/reserved address.
+def _lookup(host: str) -> list[str]:
+    """Resolve ``host`` to IP address strings (monkeypatchable seam for tests).
 
-    Used only when no explicit allow-list is configured; a resolution failure is
-    treated as internal (deny) so an unknown target can never be called.
+    Literal addresses are returned as-is; names go through ``getaddrinfo``.
+    Raises ``OSError`` when the name does not resolve.
     """
 
-    addresses: list[str] = []
     try:
-        addresses.append(str(ipaddress.ip_address(host)))
+        return [str(ipaddress.ip_address(host))]
     except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, None)
-        except OSError:
-            return True
-        addresses = [str(info[4][0]) for info in infos]
-    for address in addresses:
-        try:
-            ip = ipaddress.ip_address(address)
-        except ValueError:
-            return True
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            return True
-    return False
+        pass
+    return [str(info[4][0]) for info in socket.getaddrinfo(host, None)]
 
 
-def assert_url_allowed(url: str, *, allow_internal: bool = False) -> None:
-    """Validate a webhook/push target against the SSRF policy (rule I6).
+def _is_public(address: str) -> bool:
+    """Whether ``address`` is a globally routable address (SSRF rule I6).
 
-    Only ``http``/``https`` are allowed. With an allow-list configured the host
-    must be listed; without one, obviously-internal targets are blocked.
-    ``allow_internal`` relaxes the internal/allow-list checks for *trusted*,
-    server-configured push targets (resolved from ``PROCWORKS_PUSH_ENDPOINTS``),
-    which may legitimately live on a private network -- the scheme and host are
-    still enforced. User-supplied webhook URLs always use the strict policy.
-
-    When the hard egress lockdown (``PROCWORKS_EGRESS_DENY``) is active, *every*
-    target is refused up front -- even ``allow_internal`` push targets -- so a
-    locked-down instance (e.g. a public demo) makes no outbound HTTP at all.
+    An IPv4-mapped IPv6 address (``::ffff:127.0.0.1``) is judged by the IPv4
+    address it carries -- whether ``ipaddress`` does that on its own depends on
+    the Python version, so it is unwrapped explicitly. ``is_global`` is False
+    for every special-purpose range at once: private, loopback, link-local
+    (cloud metadata ``169.254.169.254``), carrier-grade NAT ``100.64/10``,
+    reserved, multicast and unspecified.
     """
 
-    if _egress_denied():
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return bool(ip.is_global) and not ip.is_multicast
+
+
+def _is_internal_host(host: str) -> bool:
+    """Return whether ``host`` points at a non-public address (or does not resolve).
+
+    A resolution failure counts as internal (deny), so an unknown target can
+    never be called. Every resolved address must be public -- one internal
+    record is enough to refuse.
+    """
+
+    try:
+        addresses = _lookup(host)
+    except OSError:
+        return True
+    return not addresses or not all(_is_public(a) for a in addresses)
+
+
+@dataclass(frozen=True)
+class PinnedTarget:
+    """A delivery target whose address was checked *and* is used for the call.
+
+    ``ip`` is the address the policy approved; the connection goes to exactly
+    that address, while ``host`` stays the name for the ``Host`` header and for
+    TLS (SNI + certificate check). Checking one resolution and connecting after
+    a second one is the DNS-rebinding gap this closes.
+    """
+
+    scheme: str
+    host: str
+    port: int
+    path: str
+    ip: str
+
+
+def resolve_target(
+    url: str,
+    *,
+    allow_internal: bool = False,
+    pin: bool = True,
+    honour_lockdown: bool = True,
+) -> PinnedTarget:
+    """Validate a webhook/push target against the SSRF policy and pin its address.
+
+    Rule I6. Order: hard egress lockdown (``PROCWORKS_EGRESS_DENY`` -> 403),
+    scheme ``http``/``https``, a host. Then the name is resolved **once**:
+
+    * ``allow_internal`` (trusted, server-configured push targets) or a host on
+      ``PROCWORKS_WEBHOOK_ALLOWLIST``: any address is accepted -- the operator
+      vouched for it -- but it is still pinned.
+    * With an allow-list configured and the host not on it: refused.
+    * Otherwise every resolved address must be public (:func:`_is_public`).
+
+    Called when a subscription is created **and again at every delivery**
+    (:meth:`OutboxDispatcher._deliver`): a name that resolved to a public
+    address yesterday may resolve to an internal one today.
+
+    ``pin=False`` (configuration time only) skips the lookup for a *trusted*
+    host -- the verdict does not depend on it, and a transient DNS outage must
+    not block configuring an allow-listed endpoint. The returned ``ip`` is then
+    empty and must not be used to connect. Untrusted hosts are always resolved,
+    because their verdict is the resolution.
+
+    ``honour_lockdown=False`` is only for :func:`preview_delivery`, which sends
+    nothing and reports the lockdown separately -- a real delivery always
+    honours it.
+
+    Raises :class:`WebhookError` (403 lockdown, 422 policy).
+    """
+
+    if honour_lockdown and _egress_denied():
         raise WebhookError("outbound webhook/push delivery is disabled on this instance", 403)
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -154,15 +207,146 @@ def assert_url_allowed(url: str, *, allow_internal: bool = False) -> None:
     host = parsed.hostname
     if not host:
         raise WebhookError("webhook url has no host", 422)
-    if allow_internal:
-        return
+    if parsed.username or parsed.password:
+        raise WebhookError("webhook url must not carry credentials", 422)
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise WebhookError(f"webhook url has an invalid port: {exc}", 422) from exc
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+
     allow = _allowed_hosts()
-    if host in allow:
-        return
-    if allow:
+    trusted = allow_internal or host in allow
+    if not trusted and allow:
         raise WebhookError(f"webhook host '{host}' is not in the allow-list", 422)
-    if _is_internal_host(host):
+    if trusted and not pin:
+        return PinnedTarget(scheme=parsed.scheme, host=host, port=port, path=path, ip="")
+    try:
+        addresses = _lookup(host)
+    except OSError as exc:
+        raise WebhookError(f"webhook host '{host}' does not resolve", 422) from exc
+    if not addresses:
+        raise WebhookError(f"webhook host '{host}' does not resolve", 422)
+    if not trusted and not all(_is_public(a) for a in addresses):
         raise WebhookError(f"webhook host '{host}' resolves to an internal address", 422)
+    return PinnedTarget(scheme=parsed.scheme, host=host, port=port, path=path, ip=addresses[0])
+
+
+def assert_url_allowed(url: str, *, allow_internal: bool = False) -> None:
+    """Validate a webhook/push target against the SSRF policy (rule I6).
+
+    Thin wrapper around :func:`resolve_target` for callers that only need the
+    verdict (subscription creation, push-endpoint registration).
+    """
+
+    resolve_target(url, allow_internal=allow_internal, pin=False)
+
+
+def build_request(
+    delivery_id: str,
+    event_type: str,
+    payload: dict[str, object],
+    timestamp: float,
+    secret: str | None,
+) -> tuple[bytes, dict[str, str]]:
+    """Body and headers of one delivery -- the ONE place that shapes them.
+
+    Shared by the real delivery and :func:`preview_delivery`, so a preview
+    shows byte-for-byte what a receiver would get (and can verify the
+    signature against). The body is canonical JSON (sorted keys); the
+    ``X-ProcWorks-Signature`` header is present only when a secret resolves.
+    """
+
+    body = json.dumps(
+        {
+            "delivery_id": delivery_id,
+            "event": event_type,
+            "data": payload,
+            "timestamp": timestamp,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "X-ProcWorks-Event": event_type,
+        "X-ProcWorks-Delivery": delivery_id,
+    }
+    if secret:
+        headers["X-ProcWorks-Signature"] = sign_body(secret, body)
+    return body, headers
+
+
+@dataclass(frozen=True)
+class DeliveryPreview:
+    """What a delivery to ``url`` would look like -- nothing is sent.
+
+    ``allowed``/``reason`` is the SSRF verdict (rule I6) exactly as a real
+    delivery would reach it, ``resolved_address`` the address it would pin.
+    ``egress_locked`` reports ``PROCWORKS_EGRESS_DENY`` separately: in a locked
+    instance (public demo) the verdict is still shown, but ``would_send`` is
+    False. ``signed`` tells whether the secret reference resolved.
+    """
+
+    allowed: bool
+    reason: str
+    resolved_address: str
+    egress_locked: bool
+    would_send: bool
+    signed: bool
+    headers: dict[str, str]
+    body: str
+
+
+#: Example payloads per event for the preview (same shape as the real events).
+_PREVIEW_PAYLOADS: dict[str, dict[str, object]] = {
+    "instance.started": {"instance_id": "instance_42", "schema_id": "schema_7",
+                         "schema_version": 1, "state": "RUNNING"},
+    "instance.completed": {"instance_id": "instance_42", "schema_id": "schema_7",
+                           "schema_version": 1, "state": "COMPLETED"},
+    "task.ready": {"instance_id": "instance_42", "node_id": "act_pruefen",
+                   "label": "Antrag prüfen"},
+    "task.completed": {"instance_id": "instance_42", "node_id": "act_pruefen",
+                       "label": "Antrag prüfen"},
+    "task.incident": {"instance_id": "instance_42", "node_id": "act_export",
+                      "message": "ERP nicht erreichbar"},
+}
+
+
+def preview_delivery(
+    url: str, event_type: str, secret_ref: str, *, now: float | None = None
+) -> DeliveryPreview:
+    """Dry run of a webhook delivery: verdict, headers, signed body. Sends nothing.
+
+    A diagnostic for integrators (does my receiver verify the signature?) and
+    the way to *show* the SSRF rule where outbound traffic is locked: an
+    internal target is refused with the same message a real delivery would
+    produce. Only the policy check runs (it may resolve the host name); no
+    connection is opened.
+    """
+
+    try:
+        target = resolve_target(url, honour_lockdown=False)
+        allowed, reason, address = True, "", target.ip
+    except WebhookError as exc:
+        allowed, reason, address = False, exc.message, ""
+    locked = _egress_denied()
+    secret = _resolve_secret(secret_ref)
+    payload = _PREVIEW_PAYLOADS.get(event_type, {"message": "ProcWorks webhook test"})
+    body, headers = build_request(
+        "preview", event_type, payload, time.time() if now is None else now, secret
+    )
+    return DeliveryPreview(
+        allowed=allowed,
+        reason=reason,
+        resolved_address=address,
+        egress_locked=locked,
+        would_send=allowed and not locked,
+        signed=bool(secret),
+        headers=headers,
+        body=body.decode("utf-8"),
+    )
 
 
 def sign_body(secret: str, body: bytes) -> str:
@@ -294,18 +478,67 @@ class Transport(Protocol):
         ...
 
 
+#: Upper bound for reading a receiver's response body (the status is all we use).
+_MAX_RESPONSE_BYTES = 64 * 1024
+
+
 class UrllibTransport:
-    """Default stdlib transport (no extra runtime dependency)."""
+    """Default stdlib transport (no extra runtime dependency), SSRF-hardened.
+
+    Two properties the former ``urllib.urlopen`` implementation lacked:
+
+    * **Pinned address.** It connects to the address the policy approved
+      (:class:`PinnedTarget`), never to a fresh resolution of the name.
+    * **No redirects.** ``http.client`` does not follow them; a 3xx is returned
+      as the delivery status (and counts as a failed delivery). A redirect from
+      a public endpoint to an internal one therefore goes nowhere.
+
+    TLS verifies the certificate against the *host name* (SNI), not the IP, so
+    pinning does not weaken HTTPS. The name is kept for compatibility; the
+    class is exported as the default transport.
+    """
+
+    def post_pinned(
+        self, target: PinnedTarget, body: bytes, headers: dict[str, str], timeout: float
+    ) -> int:
+        """POST ``body`` to the pinned address of ``target``; return the status."""
+
+        raw = socket.create_connection((target.ip, target.port), timeout=timeout)
+        conn: http.client.HTTPConnection
+        if target.scheme == "https":
+            context = ssl.create_default_context()
+            sock: socket.socket = context.wrap_socket(raw, server_hostname=target.host)
+            conn = http.client.HTTPSConnection(target.host, target.port, timeout=timeout)
+        else:
+            sock = raw
+            conn = http.client.HTTPConnection(target.host, target.port, timeout=timeout)
+        conn.sock = sock  # already connected to the pinned address
+        try:
+            default_port = 443 if target.scheme == "https" else 80
+            name = f"[{target.host}]" if ":" in target.host else target.host  # IPv6 literal
+            port_suffix = "" if target.port == default_port else f":{target.port}"
+            host_header = name + port_suffix
+            conn.putrequest("POST", target.path, skip_host=True, skip_accept_encoding=True)
+            conn.putheader("Host", host_header)
+            for name, value in headers.items():
+                conn.putheader(name, value)
+            conn.putheader("Content-Length", str(len(body)))
+            conn.endheaders(body)
+            resp = conn.getresponse()
+            # Only the status matters. Read at most a small, bounded amount so a
+            # hostile receiver cannot tie up memory with an endless body; the
+            # connection is closed right after (no keep-alive reuse).
+            resp.read(_MAX_RESPONSE_BYTES)
+            return int(resp.status)
+        finally:
+            conn.close()
 
     def post(
         self, url: str, body: bytes, headers: dict[str, str], timeout: float
     ) -> int:
-        req = urllib_request.Request(url, data=body, headers=headers, method="POST")
-        try:
-            with urllib_request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-                return int(resp.status)
-        except urllib_error.HTTPError as err:
-            return int(err.code)
+        """Compatibility entry point: resolve with the strict policy, then pin."""
+
+        return self.post_pinned(resolve_target(url), body, headers, timeout)
 
 
 class OutboxDispatcher:
@@ -481,31 +714,29 @@ class OutboxDispatcher:
 
     def _deliver(self, entry: OutboxEntry, now: float) -> WebhookDelivery:
         sub = self._store.get_subscription(entry.subscription_id)
-        body = json.dumps(
-            {
-                "delivery_id": entry.delivery_id,
-                "event": entry.event_type,
-                "data": entry.payload,
-                "timestamp": now,
-            },
-            sort_keys=True,
-        ).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "X-ProcWorks-Event": entry.event_type,
-            "X-ProcWorks-Delivery": entry.delivery_id,
-        }
         secret = _resolve_secret(sub.secret_ref) if sub is not None else _resolve_secret(
             entry.secret_ref
         )
-        if secret:
-            headers["X-ProcWorks-Signature"] = sign_body(secret, body)
+        body, headers = build_request(
+            entry.delivery_id, entry.event_type, entry.payload, now, secret
+        )
 
         attempt = entry.attempts + 1
         status: int | None = None
         error: str | None = None
         try:
-            status = self._transport.post(entry.url, body, headers, self._timeout_s)
+            # The policy is checked again at EVERY delivery, not only when the
+            # subscription was created: DNS may have changed since (rebinding),
+            # and an allow-list or lockdown may have been tightened. A push
+            # entry (no subscription) targets an admin-configured endpoint and
+            # keeps its relaxed policy. The approved address is then the one
+            # the transport connects to.
+            target = resolve_target(entry.url, allow_internal=not entry.subscription_id)
+            post_pinned = getattr(self._transport, "post_pinned", None)
+            if post_pinned is not None:
+                status = int(post_pinned(target, body, headers, self._timeout_s))
+            else:
+                status = self._transport.post(entry.url, body, headers, self._timeout_s)
             ok = 200 <= status < 300
             if not ok:
                 error = f"HTTP {status}"

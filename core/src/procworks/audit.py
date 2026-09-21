@@ -21,6 +21,8 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from procworks.model import NodeType, ProcessSchema, block_join, loop_block
+
 
 class EventType(StrEnum):
     """The kinds of runtime events recorded in the audit log."""
@@ -276,12 +278,29 @@ def create_audit_log() -> AuditLog:
 
 
 class ActivityStat(BaseModel):
-    """Per-activity throughput figures used to spot bottlenecks."""
+    """Per-activity throughput figures used to spot bottlenecks.
+
+    Three durations, each averaged over the completions that allow it:
+
+    * ``avg_duration_seconds`` -- **processing** (started/claimed -> completed).
+      Only for completions preceded by ``ACTIVITY_STARTED``; unchanged meaning.
+    * ``avg_wait_seconds`` -- **waiting** (ready -> started), same completions.
+    * ``avg_total_seconds`` -- **lead time of the step** (ready -> completed),
+      for every completion that carries ``detail["ready_at"]``. This is the
+      figure that exists even when a task is completed without being claimed
+      (allowed, E1) -- previously the bottleneck view then showed nothing.
+
+    ``ready_at`` is the activation stamp the API boundary already keeps
+    (``ProcessInstance.node_activated_at``) and hands to the completion event;
+    there is deliberately still no separate activation event in the log.
+    """
 
     node_id: str
     label: str | None = None
     completed: int
     avg_duration_seconds: float | None = None
+    avg_wait_seconds: float | None = None
+    avg_total_seconds: float | None = None
 
 
 class KpiReport(BaseModel):
@@ -354,6 +373,30 @@ def _by_instance(
     return grouped
 
 
+def _mean(values: list[float] | None) -> float | None:
+    """Arithmetic mean, ``None`` for no values."""
+
+    return sum(values) / len(values) if values else None
+
+
+def _ready_at(event: AuditEvent) -> datetime | None:
+    """The activation stamp a completion event carries (``detail["ready_at"]``).
+
+    Absent on events written before the field existed and on steps without a
+    worklist clock (automatic steps); an unparsable value is ignored rather
+    than failing the whole report.
+    """
+
+    raw = event.detail.get("ready_at")
+    if not raw:
+        return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def compute_kpis(
     events: Iterable[AuditEvent], schema_id: str | None = None
 ) -> KpiReport:
@@ -367,6 +410,8 @@ def compute_kpis(
     completions: dict[str, int] = {}
     labels: dict[str, str | None] = {}
     durations: dict[str, list[float]] = {}
+    waits: dict[str, list[float]] = {}
+    totals: dict[str, list[float]] = {}
     adhoc_instances = 0
 
     for entries in grouped.values():
@@ -408,17 +453,24 @@ def compute_kpis(
                     durations.setdefault(event.node_id, []).append(
                         (event.timestamp - start).total_seconds()
                     )
+                ready = _ready_at(event)
+                if ready is not None:
+                    totals.setdefault(event.node_id, []).append(
+                        max(0.0, (event.timestamp - ready).total_seconds())
+                    )
+                    if start is not None:
+                        waits.setdefault(event.node_id, []).append(
+                            max(0.0, (start - ready).total_seconds())
+                        )
 
     activity_stats = [
         ActivityStat(
             node_id=node_id,
             label=labels.get(node_id),
             completed=count,
-            avg_duration_seconds=(
-                sum(durations[node_id]) / len(durations[node_id])
-                if durations.get(node_id)
-                else None
-            ),
+            avg_duration_seconds=_mean(durations.get(node_id)),
+            avg_wait_seconds=_mean(waits.get(node_id)),
+            avg_total_seconds=_mean(totals.get(node_id)),
         )
         for node_id, count in sorted(
             completions.items(), key=lambda kv: kv[1], reverse=True
@@ -480,3 +532,173 @@ def discover_process_map(
         )
     ]
     return ProcessMap(schema_id=schema_id, nodes=nodes, edges=edges)
+
+
+# --- conformance (target vs. actual) --------------------------------------
+
+
+class ConformanceStep(BaseModel):
+    """How often a modelled activity was completed, and how long it took."""
+
+    node_id: str
+    label: str | None = None
+    completed: int
+    avg_total_seconds: float | None = None
+
+
+class ConformanceDeviation(BaseModel):
+    """An observed directly-follows transition the model does not allow."""
+
+    source: str
+    target: str
+    source_label: str | None = None
+    target_label: str | None = None
+    frequency: int
+
+
+class ConformanceReport(BaseModel):
+    """Target/actual comparison of one schema against its recorded history.
+
+    ``steps`` covers every ACTIVITY/SUBPROCESS of the model (``completed == 0``
+    = never executed). ``deviations`` lists observed transitions the model
+    cannot produce -- typically ad-hoc changes, or history recorded on an
+    earlier revision whose structure differed. ``foreign_steps`` are completed
+    node ids the model does not contain at all (ad-hoc inserted steps).
+    Read-only, never persisted (like :func:`compute_kpis`).
+    """
+
+    schema_id: str
+    instances: int
+    steps: list[ConformanceStep]
+    deviations: list[ConformanceDeviation]
+    foreign_steps: list[str]
+
+
+_STEP_TYPES = frozenset({NodeType.ACTIVITY, NodeType.SUBPROCESS})
+
+
+def model_directly_follows(schema: ProcessSchema) -> set[tuple[str, str]]:
+    """All ``(a, b)`` step pairs where ``b`` may directly follow ``a`` in a trace.
+
+    Three sources, matching how the engine can order completions:
+
+    1. **Sequence through gateways** -- from ``a`` along control edges, passing
+       through non-step nodes (splits, joins, loop delimiters), to the next
+       steps.
+    2. **Loop back-jump** -- reaching a ``LOOP_END`` also continues at its
+       ``LOOP_START`` (the back edge is implicit, never stored).
+    3. **Parallel interleaving** -- steps in different branches of the same
+       ``AND_SPLIT`` can complete in any order, so every cross-branch pair is
+       allowed in both directions.
+
+    An over-approximation on purpose (it ignores data conditions of XOR
+    branches): a transition reported as a deviation is then certainly outside
+    the model, never a false alarm caused by a branch decision.
+    """
+
+    loop_start_of: dict[str, str] = {}
+    for node in schema.nodes.values():
+        if node.type is NodeType.LOOP_START:
+            try:
+                end, _ = loop_block(schema, node.id)
+            except ValueError:
+                continue
+            loop_start_of[end] = node.id
+
+    def next_steps(node_id: str) -> set[str]:
+        found: set[str] = set()
+        stack = [e.target for e in schema.outgoing(node_id)]
+        seen: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            node = schema.nodes.get(current)
+            if node is None:
+                continue
+            if node.type in _STEP_TYPES:
+                found.add(current)
+                continue
+            stack.extend(e.target for e in schema.outgoing(current))
+            if current in loop_start_of:
+                stack.extend(e.target for e in schema.outgoing(loop_start_of[current]))
+        return found
+
+    steps = [n.id for n in schema.nodes.values() if n.type in _STEP_TYPES]
+    allowed = {(a, b) for a in steps for b in next_steps(a)}
+    for node in schema.nodes.values():
+        if node.type is not NodeType.AND_SPLIT:
+            continue
+        try:
+            _, branches = block_join(schema, node.id)
+        except ValueError:
+            continue
+        step_sets = [
+            {n for n in body if schema.nodes[n].type in _STEP_TYPES} for body in branches
+        ]
+        for i, left in enumerate(step_sets):
+            for j, right in enumerate(step_sets):
+                if i != j:
+                    allowed |= {(a, b) for a in left for b in right}
+    return allowed
+
+
+def conformance(schema: ProcessSchema, events: Iterable[AuditEvent]) -> ConformanceReport:
+    """Compare the recorded history of ``schema`` with the model (target/actual)."""
+
+    events = list(events)
+    grouped = _by_instance(events, schema.id)
+    counts: dict[str, int] = {}
+    observed: dict[tuple[str, str], int] = {}
+    seen_labels: dict[str, str] = {}
+    for entries in grouped.values():
+        previous: str | None = None
+        for event in entries:
+            if event.event_type is not EventType.ACTIVITY_COMPLETED or event.node_id is None:
+                continue
+            counts[event.node_id] = counts.get(event.node_id, 0) + 1
+            if event.label:
+                seen_labels[event.node_id] = event.label
+            if previous is not None:
+                key = (previous, event.node_id)
+                observed[key] = observed.get(key, 0) + 1
+            previous = event.node_id
+
+    kpis = {s.node_id: s for s in compute_kpis(events, schema.id).activity_stats}
+    steps = [
+        ConformanceStep(
+            node_id=node.id,
+            label=node.label,
+            completed=counts.get(node.id, 0),
+            avg_total_seconds=kpis[node.id].avg_total_seconds if node.id in kpis else None,
+        )
+        for node in schema.nodes.values()
+        if node.type in _STEP_TYPES
+    ]
+    allowed = model_directly_follows(schema)
+
+    def label(node_id: str) -> str | None:
+        # Model label first; an ad-hoc step is not in the model, but its
+        # completion event recorded the name it had in the instance.
+        node = schema.nodes.get(node_id)
+        if node is not None and node.label:
+            return node.label
+        return seen_labels.get(node_id)
+
+    deviations = [
+        ConformanceDeviation(
+            source=a, target=b, source_label=label(a), target_label=label(b), frequency=f
+        )
+        for (a, b), f in sorted(observed.items(), key=lambda kv: -kv[1])
+        if (a, b) not in allowed
+    ]
+    foreign = sorted(nid for nid in counts if nid not in schema.nodes)
+    return ConformanceReport(
+        schema_id=schema.id,
+        instances=len(grouped),
+        steps=steps,
+        deviations=deviations,
+        foreign_steps=foreign,
+    )
+

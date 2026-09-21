@@ -1392,3 +1392,42 @@ def test_migration_assistant_is_wired_in_both_surfaces_and_the_run_view() -> Non
     assert "execute: false" in body and "execute: true" in body
     assert "/migration-report" in body and "/migrate-instances" in body
     assert "findingText(f, { withHint: true })" in body
+
+
+# ---------------------------------------------------------------------------
+# Integration vorführbar, Monitoring mit Dauern und Soll/Ist (1.19.0)
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_dialog_offers_a_preview_that_sends_nothing() -> None:
+    src = APP_JS.read_text(encoding="utf-8")
+    body = _function_body(src, "function addWebhook(")
+    assert '"/v1/webhooks/preview"' in body and "renderWebhookPreview(result, p)" in body
+    preview = _function_body(src, "function renderWebhookPreview(")
+    assert "p.egress_locked" in preview and "p.reason" in preview
+    # Die Demo erklaert die Egress-Sperre, statt sie wie einen Defekt wirken zu lassen.
+    hint = _function_body(src, "async function webhookPanel(")
+    assert "ausgehende Verbindungen gesperrt" in hint
+
+
+def test_bottleneck_view_shows_lead_time_wait_and_processing() -> None:
+    """Die Engpass-Tabelle stand ueberall auf „–“ (nur gestartet -> erledigt)."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    for field in ("avg_total_seconds", "avg_wait_seconds", "avg_duration_seconds"):
+        assert f"fmtStepDuration(s.{field})" in src
+    helper = _function_body(src, "function fmtStepDuration(")
+    assert '"keine Zeitdaten"' in helper and '"< 1 s"' in helper
+
+
+def test_process_map_is_drawn_over_the_model_with_deviations() -> None:
+    """Die entdeckte Prozesskarte war nur eine Tabelle ohne Bezug zum Modell."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    panel = _function_body(src, "async function conformancePanel(")
+    assert "/conformance`" in panel and "renderGraph(schema, { observed })" in panel
+    assert "report.deviations" in panel and "report.foreign_steps" in panel
+    graph = _function_body(src, "function renderGraph(")
+    assert "const obs = opts.observed && opts.observed[id];" in graph
+    monitor = _function_body(src, "async function viewMonitor(")
+    assert "await conformancePanel(instances, pmap)" in monitor

@@ -287,3 +287,16 @@ def test_templates_start_a_new_lineage() -> None:
     tpl = client.post("/templates", json={"schema_id": v2, "name": "Aus Revision"}).json()
     fresh = client.post(f"/templates/{tpl['id']}/instantiate", json={}).json()
     assert fresh["revision_of"] is None and fresh["version"] == 1
+
+
+def test_completion_carries_the_ready_stamp_into_the_kpis() -> None:
+    """End to end: a step completed via the API shows a lead time in the KPIs."""
+
+    sid, ids = _released_v1("Kennzahlen-Dauer")
+    iid = _start(sid)
+    _complete(iid, ids["W"])
+    events = client.get(f"/instances/{iid}/audit").json()
+    done = [e for e in events if e["event_type"] == "ACTIVITY_COMPLETED"][-1]
+    assert "ready_at" in done["detail"]
+    stats = {s["node_id"]: s for s in client.get("/monitoring/kpis").json()["activity_stats"]}
+    assert stats[ids["W"]]["avg_total_seconds"] is not None

@@ -130,3 +130,45 @@ def test_discover_process_map_directly_follows() -> None:
     assert len(pmap.edges) == 1
     edge = pmap.edges[0]
     assert (edge.source, edge.target, edge.frequency) == ("a", "b", 2)
+
+
+def _ready(seconds: int) -> dict[str, str]:
+    """``detail`` of a completion whose step became ready at ``seconds``."""
+
+    return {"ready_at": (datetime(2024, 1, 1, tzinfo=UTC) + timedelta(seconds=seconds)).isoformat()}
+
+
+def test_lead_time_is_measured_without_a_claim() -> None:
+    """Completing without claiming is allowed -- the step's lead time must still show.
+
+    Before the ``ready_at`` detail the bottleneck view had no figure at all for
+    such steps (only started -> completed was measurable).
+    """
+
+    done = _ev(2, EventType.ACTIVITY_COMPLETED, "i1", node_id="a", seconds=70)
+    done = done.model_copy(update={"detail": _ready(10)})
+    [stat] = compute_kpis([_ev(1, EventType.INSTANCE_CREATED, "i1"), done]).activity_stats
+    assert stat.avg_total_seconds == 60.0
+    assert stat.avg_duration_seconds is None and stat.avg_wait_seconds is None
+
+
+def test_wait_and_processing_are_split_when_the_step_was_claimed() -> None:
+    started = _ev(2, EventType.ACTIVITY_STARTED, "i1", node_id="a", seconds=40)
+    done = _ev(3, EventType.ACTIVITY_COMPLETED, "i1", node_id="a", seconds=100)
+    done = done.model_copy(update={"detail": _ready(10)})
+    [stat] = compute_kpis([_ev(1, EventType.INSTANCE_CREATED, "i1"), started, done]).activity_stats
+    assert (stat.avg_wait_seconds, stat.avg_duration_seconds, stat.avg_total_seconds) == (
+        30.0, 60.0, 90.0
+    )
+
+
+def test_old_events_without_ready_stamp_keep_their_figures() -> None:
+    """Existing logs (no ``ready_at``) report exactly what they did before."""
+
+    started = _ev(2, EventType.ACTIVITY_STARTED, "i1", node_id="a", seconds=10)
+    done = _ev(3, EventType.ACTIVITY_COMPLETED, "i1", node_id="a", seconds=40)
+    garbled = _ev(4, EventType.ACTIVITY_COMPLETED, "i1", node_id="b", seconds=50)
+    garbled = garbled.model_copy(update={"detail": {"ready_at": "kein Datum"}})
+    stats = {s.node_id: s for s in compute_kpis([started, done, garbled]).activity_stats}
+    assert stats["a"].avg_duration_seconds == 30.0 and stats["a"].avg_total_seconds is None
+    assert stats["b"].avg_total_seconds is None  # unparsable stamp is ignored, not fatal

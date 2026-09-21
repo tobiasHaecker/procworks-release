@@ -14,6 +14,7 @@ Covers four layers:
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import procworks.api as api_module
+import procworks.outbox as outbox_module
 from procworks import (
     InMemoryWebhookStore,
     OutboxDispatcher,
@@ -70,9 +72,27 @@ class _FakeTransport:
         return self.status
 
 
+#: A public address the test host "resolves" to. Delivery resolves and pins the
+#: target, so the fictitious allow-listed host needs an answer (no real DNS).
+_PUBLIC_IP = "93.184.216.34"
+
+
+def _fake_dns(monkeypatch: pytest.MonkeyPatch, answer: str = _PUBLIC_IP) -> None:
+    """Resolve every name to ``answer`` (literal addresses stay themselves)."""
+
+    def lookup(host: str) -> list[str]:
+        try:
+            return [str(ipaddress.ip_address(host))]
+        except ValueError:
+            return [answer]
+
+    monkeypatch.setattr(outbox_module, "_lookup", lookup)
+
+
 @pytest.fixture
 def allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(_ALLOWLIST, "hooks.example.com")
+    _fake_dns(monkeypatch)
 
 
 # --- pure helpers: HMAC + SSRF guard --------------------------------------
@@ -360,6 +380,7 @@ client = TestClient(app)
 @pytest.fixture
 def webhook_api(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv(_ALLOWLIST, "hooks.example.com")
+    _fake_dns(monkeypatch)
     monkeypatch.setenv("WH_SECRET", "api-secret")
     fake = _FakeTransport(status=200)
     monkeypatch.setattr(api_module._outbox, "_transport", fake)
@@ -439,3 +460,248 @@ def test_api_viewer_may_not_subscribe(
         json={"url": _URL, "events": ["task.ready"], "secret_ref": "WH_SECRET"},
     )
     assert res.status_code == 403
+
+
+# --- SSRF hardening: checked at delivery, pinned, no redirects -------------
+
+
+class _PinnedFake:
+    """Transport that records the pinned target it was asked to call."""
+
+    def __init__(self) -> None:
+        self.targets: list[object] = []
+
+    def post_pinned(
+        self, target: object, body: bytes, headers: dict[str, str], timeout: float
+    ) -> int:
+        self.targets.append(target)
+        return 200
+
+    def post(self, url: str, body: bytes, headers: dict[str, str], timeout: float) -> int:
+        raise AssertionError("the dispatcher must use the pinned path")
+
+
+def test_delivery_rechecks_the_target_and_blocks_dns_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Public when subscribed, internal when delivered: nothing may be sent.
+
+    Before the hardening the policy ran only at ``subscribe``; the transport then
+    resolved the name again on its own -- a rebinding name passed the check and
+    the POST went to the internal address.
+    """
+
+    answers = iter(["93.184.216.34", "127.0.0.1"])
+    monkeypatch.setattr(outbox_module, "_lookup", lambda host: [next(answers)])
+    transport = _PinnedFake()
+    disp = _dispatcher(transport, _Clock())  # type: ignore[arg-type]
+    disp.subscribe("https://rebind.example.net/hook", ["task.completed"], "WH_SECRET")
+    disp.emit("task.completed", {"task_id": "et1"})
+    disp.dispatch_pending()
+
+    assert transport.targets == []
+    delivery = disp.deliveries(disp.list_subscriptions()[0].id)[-1]
+    assert delivery.ok is False
+    assert "internal address" in (delivery.error or "")
+
+
+def test_delivery_connects_to_the_approved_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_dns(monkeypatch)
+    transport = _PinnedFake()
+    disp = _dispatcher(transport, _Clock())  # type: ignore[arg-type]
+    disp.subscribe("https://hooks.example.net:8443/in?x=1", ["task.completed"], "WH_SECRET")
+    disp.emit("task.completed", {"task_id": "et1"})
+    disp.dispatch_pending()
+
+    [target] = transport.targets
+    assert (target.ip, target.host, target.port, target.path) == (  # type: ignore[attr-defined]
+        _PUBLIC_IP, "hooks.example.net", 8443, "/in?x=1"
+    )
+
+
+def test_egress_lockdown_also_stops_already_queued_deliveries(
+    allowlist: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = _PinnedFake()
+    disp = _dispatcher(transport, _Clock())  # type: ignore[arg-type]
+    disp.subscribe(_URL, ["task.completed"], "WH_SECRET")
+    disp.emit("task.completed", {"task_id": "et1"})
+    monkeypatch.setenv("PROCWORKS_EGRESS_DENY", "1")
+    disp.dispatch_pending()
+
+    assert transport.targets == []
+    delivery = disp.deliveries(disp.list_subscriptions()[0].id)[-1]
+    assert "disabled" in (delivery.error or "")
+
+
+def test_push_targets_keep_their_relaxed_policy_but_are_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admin-configured push endpoints may live on the private network."""
+
+    _fake_dns(monkeypatch, answer="10.0.0.7")
+    transport = _PinnedFake()
+    disp = _dispatcher(transport, _Clock())  # type: ignore[arg-type]
+    disp.push("http://erp.intern/hook", "WH_SECRET", "task.ready", {"x": 1})
+    disp.dispatch_pending()
+
+    [target] = transport.targets
+    assert target.ip == "10.0.0.7"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata
+        "http://[::ffff:169.254.169.254]/",  # the same, IPv4-mapped
+        "http://[::ffff:127.0.0.1]/",
+        "http://100.100.100.200/",  # carrier-grade NAT (some clouds' metadata)
+        "http://2130706433/",  # 127.0.0.1 written as one number
+        "http://0x7f000001/",  # ... and in hex
+        "http://[::1]/",
+        "http://0.0.0.0/",
+    ],
+)
+def test_special_addresses_are_refused_whatever_the_notation(url: str) -> None:
+    with pytest.raises(WebhookError, match="internal address|does not resolve"):
+        assert_url_allowed(url)
+
+
+def test_credentials_in_the_url_are_refused(allowlist: None) -> None:
+    with pytest.raises(WebhookError, match="credentials"):
+        assert_url_allowed("https://user:pw@hooks.example.com/x")
+
+
+def test_transport_does_not_follow_redirects_and_sends_the_real_host() -> None:
+    """A public endpoint answering 302 -> internal URL must lead nowhere.
+
+    The former ``urlopen`` transport followed the redirect (POST became GET) to
+    wherever the ``Location`` pointed. The pinned transport returns the 3xx as
+    the delivery status. It also connects to the pinned IP while announcing the
+    real name in ``Host``.
+    """
+
+    import http.server
+    import threading
+
+    from procworks.outbox import PinnedTarget, UrllibTransport
+
+    seen: list[tuple[str, str | None]] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            seen.append((self.path, self.headers.get("Host")))
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(302)
+            self.send_header("Location", "/intern")
+            self.end_headers()
+
+        do_GET = do_POST  # noqa: N815
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_port
+        target = PinnedTarget("http", "hooks.example.test", port, "/start", "127.0.0.1")
+        status = UrllibTransport().post_pinned(target, b"{}", {"X-T": "1"}, 5)
+    finally:
+        server.shutdown()
+
+    assert status == 302
+    assert seen == [("/start", f"hooks.example.test:{port}")]
+
+
+# --- delivery preview (nothing is sent) -----------------------------------
+
+
+def test_preview_shows_the_exact_signed_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    from procworks.outbox import preview_delivery
+
+    monkeypatch.setenv("WH_SECRET", "topsecret")
+    p = preview_delivery("https://hooks.example.net/in", "task.completed", "WH_SECRET", now=1.0)
+    assert (p.allowed, p.would_send, p.egress_locked, p.signed) == (True, True, False, True)
+    assert p.resolved_address == "93.184.216.34"
+    # A receiver can verify the shown signature against the shown body.
+    assert p.headers["X-ProcWorks-Signature"] == sign_body("topsecret", p.body.encode("utf-8"))
+    assert '"event": "task.completed"' in p.body
+
+
+def test_preview_refuses_internal_targets_with_the_delivery_message() -> None:
+    from procworks.outbox import preview_delivery
+
+    p = preview_delivery("http://169.254.169.254/latest/meta-data/", "task.completed", "")
+    assert p.allowed is False and p.would_send is False
+    assert "internal address" in p.reason
+    assert p.signed is False and "X-ProcWorks-Signature" not in p.headers
+
+
+def test_preview_shows_the_verdict_even_under_egress_lockdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public demo locks all egress; the SSRF rule must stay demonstrable."""
+
+    from procworks.outbox import preview_delivery
+
+    monkeypatch.setenv("PROCWORKS_EGRESS_DENY", "1")
+    public = preview_delivery("https://hooks.example.net/in", "task.ready", "")
+    internal = preview_delivery("http://127.0.0.1:8080/admin", "task.ready", "")
+    assert (public.allowed, public.egress_locked, public.would_send) == (True, True, False)
+    assert internal.allowed is False and "internal address" in internal.reason
+
+
+def test_api_preview_sends_and_stores_nothing(webhook_api: None) -> None:
+    fake = api_module._outbox._transport
+    resp = client.post(
+        "/v1/webhooks/preview",
+        json={"url": "http://10.1.2.3/hook", "event": "instance.completed"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # The fixture configures an allow-list, so that rule refuses first.
+    assert body["allowed"] is False and "allow-list" in body["reason"]
+    assert api_module._outbox._store.list_entries() == []
+    assert getattr(fake, "calls", []) == []
+
+    bad = client.post("/v1/webhooks/preview", json={"url": _URL, "event": "bogus"})
+    assert bad.status_code == 422
+
+
+def test_transport_reads_only_a_bounded_part_of_the_response() -> None:
+    """A receiver answering with an endless body must not tie up memory."""
+
+    import socket
+    import threading
+
+    from procworks.outbox import _MAX_RESPONSE_BYTES, PinnedTarget, UrllibTransport
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    sent = {"bytes": 0}
+
+    def serve() -> None:
+        conn, _ = listener.accept()
+        conn.recv(65536)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000000\r\n\r\n")
+        chunk = b"x" * 65536
+        try:
+            while sent["bytes"] < 50 * 1024 * 1024:
+                conn.sendall(chunk)
+                sent["bytes"] += len(chunk)
+        except OSError:
+            pass  # client closed after its bounded read -- expected
+        finally:
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        port = listener.getsockname()[1]
+        target = PinnedTarget("http", "big.example.test", port, "/", "127.0.0.1")
+        assert UrllibTransport().post_pinned(target, b"{}", {}, 5) == 200
+    finally:
+        listener.close()
+    assert sent["bytes"] < 50 * 1024 * 1024, "the whole body was consumed"
+    assert _MAX_RESPONSE_BYTES <= 1024 * 1024

@@ -1343,3 +1343,52 @@ def test_tour_uses_a_fallback_anchor_and_side_placement() -> None:
     tours = TOURS_JS.read_text(encoding="utf-8")
     assert "Wähle links" not in tours
     assert tours.count('placement: "side"') == 2
+
+
+# ---------------------------------------------------------------------------
+# Meldungskatalog und Migrationsassistent (1.18.0)
+# ---------------------------------------------------------------------------
+
+
+def test_every_finding_display_goes_through_the_catalog() -> None:
+    """Befunde erschienen englisch und mit interner Knoten-ID. Jede Anzeigestelle
+    nutzt jetzt ``findingText``; die rohe Kernmeldung liest nur noch der
+    Rueckfall in ``findingText`` selbst."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert src.count("f.message") == 1, "Befundtext bitte ueber findingText(f) anzeigen"
+    assert "(f && f.message)" in _function_body(src, "function findingText(")
+    assert '` [${f.node_id}]`' not in src, "keine internen Knoten-IDs in Befundzeilen"
+    assert "Vom Kern abgelehnt (Regelverletzung)" not in src
+
+
+def test_catalog_covers_every_code_the_core_emits() -> None:
+    """Jeder Befund-Code, den der Kern vergibt, hat einen deutschen Text --
+    sonst faellt er unbemerkt auf die englische Meldung zurueck."""
+
+    src_dir = Path(__file__).resolve().parents[1] / "src" / "procworks"
+    emitted: set[str] = set()
+    for py in src_dir.glob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        emitted |= set(re.findall(r'code="([A-Z][A-Z0-9]*\.[a-z-]+)"', text))
+    assert emitted, "keine Befund-Codes im Kern gefunden -- Waechter angleichen"
+    app = APP_JS.read_text(encoding="utf-8")
+    catalog = set(re.findall(r'^  "([A-Z][A-Z0-9]*\.[a-z-]+)": ', app, re.M))
+    missing = sorted(emitted - catalog)
+    assert not missing, "ohne deutschen Text im Katalog: " + ", ".join(missing)
+
+
+def test_migration_assistant_is_wired_in_both_surfaces_and_the_run_view() -> None:
+    """Die Migration war im Client nicht auffindbar. Der Knopf haengt an der
+    gemeinsamen Kopfzeile (beide Oberflaechen), die Instanz-Ansicht bietet sie
+    einzeln an -- beides fuehrt in denselben Assistenten."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "migrationHeaderButton(schema, draft)" in _function_body(src, "function modelHeader(")
+    detail = _function_body(src, "async function renderInstanceDetail(")
+    assert "await instanceMigrationPanel(inst)" in detail
+    body = _function_body(src, "async function openMigrationAssistant(")
+    # Trockenlauf vor Ausfuehrung
+    assert "execute: false" in body and "execute: true" in body
+    assert "/migration-report" in body and "/migrate-instances" in body
+    assert "findingText(f, { withHint: true })" in body

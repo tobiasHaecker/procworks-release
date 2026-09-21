@@ -127,7 +127,10 @@ from procworks.migration import (
     build_migration_report,
     check_migration,
     is_migratable,
+    latest_successor,
     migrate_instance,
+    missing_mandatory_data,
+    predecessor_ids,
 )
 from procworks.model import (
     AbsenceEntry,
@@ -505,6 +508,9 @@ __all__ = [
     "assign_service",
     "assign_staff_rule",
     "build_migration_report",
+    "latest_successor",
+    "missing_mandatory_data",
+    "predecessor_ids",
     "bind_external_data",
     "bind_sql_select",
     "bind_sql_write",

@@ -241,3 +241,56 @@ def test_worklist_drives_target_after_migration() -> None:
     migrated = migrate_instance(instance, source, target)
     # B is still the ready activity on the target schema.
     assert b_id in worklist(migrated, target)
+
+
+def _instance_past_w() -> tuple[ProcessSchema, object, list[str]]:
+    """``start -> W -> A -> B -> end`` with W completed, A ready."""
+
+    source = create_empty_schema("Daten", schema_id="data-front")
+    source = serial_insert(source, "B", after_node_id="start")
+    source = serial_insert(source, "A", after_node_id="start")
+    source = serial_insert(source, "W", after_node_id="start")
+    source = release(staffed(source))
+    ids = _ordered_activities(source)
+    store = InMemoryInstanceStore()
+    context = ExecutionContext(_resolver_for(source), store)
+    instance = instantiate(source, context=context)
+    instance = complete_activity(instance, source, ids[0], context=context)
+    return source, instance, ids
+
+
+def test_m4_catches_data_whose_only_writer_already_ran() -> None:
+    """A future reader whose writer lies behind the execution front.
+
+    The target lets the already-completed W write a new element and the
+    not-yet-run B read it mandatorily. D1 holds for the *target* (W precedes B
+    on every path), and B is ahead of the front -- but W will never run again,
+    so after a migration B would read a value that nobody ever writes. M4 must
+    demand the value (``data_mapping``) instead of letting the instance through.
+    """
+
+    source, instance, (w_id, _a_id, b_id) = _instance_past_w()
+    target = new_revision(source)
+    target = add_data_element(target, "Beleg", DataType.STRING, element_id="doc")
+    target = connect_data(target, w_id, "doc", AccessMode.WRITE)
+    target = connect_data(target, b_id, "doc", AccessMode.READ)
+    target = release(staffed(target))
+
+    findings = check_migration(instance, source, target)
+    m4 = [f for f in findings if f.rule == "M4"]
+    assert m4, f"migration would leave B without its input: {findings}"
+    assert m4[0].node_id == b_id
+    assert is_migratable(instance, source, target, data_mapping={"doc": "B-001"})
+
+
+def test_m4_leaves_data_alone_that_a_future_step_still_writes() -> None:
+    """Counter-check: a writer ahead of the front supplies the value itself."""
+
+    source, instance, (_w_id, a_id, b_id) = _instance_past_w()
+    target = new_revision(source)
+    target = add_data_element(target, "Beleg", DataType.STRING, element_id="doc")
+    target = connect_data(target, a_id, "doc", AccessMode.WRITE)
+    target = connect_data(target, b_id, "doc", AccessMode.READ)
+    target = release(staffed(target))
+
+    assert check_migration(instance, source, target) == []

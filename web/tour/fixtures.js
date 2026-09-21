@@ -23,8 +23,13 @@
 const TOUR_FIXTURES = {
   "rejection": [
     {
+      "code": "D1.read-before-write",
       "message": "mandatory input 'Urlaubstage' may be read before it is written on some execution path",
       "node_id": "act_1",
+      "params": {
+        "element": "Urlaubstage",
+        "step": "Resturlaub prüfen"
+      },
       "rule": "D1"
     }
   ],
@@ -165,6 +170,7 @@ const TOUR_FIXTURES = {
           }
         },
         "org_model_id": null,
+        "revision_of": null,
         "service_bindings": {},
         "staff_rules": {
           "act_2": {
@@ -338,6 +344,7 @@ const TOUR_FIXTURES = {
           }
         },
         "org_model_id": null,
+        "revision_of": null,
         "service_bindings": {},
         "staff_rules": {
           "act_2": {
@@ -511,6 +518,7 @@ const TOUR_FIXTURES = {
           }
         },
         "org_model_id": null,
+        "revision_of": null,
         "service_bindings": {},
         "staff_rules": {
           "act_2": {

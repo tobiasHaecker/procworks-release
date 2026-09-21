@@ -112,6 +112,7 @@ def _require_editable(schema: ProcessSchema) -> None:
                     message=(
                         f"schema is {schema.lifecycle_state.value}; only ENTWURF is editable"
                     ),
+                    code="R0.not-draft",
                 )
             ]
         )
@@ -2398,6 +2399,7 @@ def release(schema: ProcessSchema, resolver: SchemaResolver | None = None) -> Pr
                 ValidationFinding(
                     rule="LC",
                     message=f"cannot release from state {schema.lifecycle_state.value}",
+                    code="LC.not-draft",
                 )
             ]
         )
@@ -2430,12 +2432,15 @@ def new_revision(schema: ProcessSchema, *, new_schema_id: str | None = None) -> 
                     message=(
                         f"can only revise a RELEASED schema, not {schema.lifecycle_state.value}"
                     ),
+                    code="LC.not-released",
                 )
             ]
         )
     revision = schema.model_copy(deep=True)
     revision.id = new_schema_id or _new_id("schema")
     revision.version = schema.version + 1
+    # Lineage for the migration assistant (which older instances belong here).
+    revision.revision_of = schema.id
     revision.lifecycle_state = LifecycleState.ENTWURF
     return raise_if_invalid(revision)
 
@@ -2461,6 +2466,7 @@ def snapshot_for_template(schema: ProcessSchema, *, snapshot_id: str) -> Process
     candidate.org_model_id = None
     candidate.lifecycle_state = LifecycleState.ENTWURF
     candidate.version = 1
+    candidate.revision_of = None  # a template starts a new lineage
     return raise_if_invalid(candidate)
 
 
@@ -2521,6 +2527,7 @@ def instantiate_template(
     candidate.name = name or template.name
     candidate.lifecycle_state = LifecycleState.ENTWURF
     candidate.version = 1
+    candidate.revision_of = None  # fresh schema, not a revision of anything
     return raise_if_invalid(candidate)
 
 

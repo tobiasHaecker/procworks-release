@@ -4540,15 +4540,32 @@ def post_migration_check(
 @app.post("/instances/{instance_id}/migrate", response_model=ProcessInstance, dependencies=[_run])
 def post_migrate(instance_id: str, req: MigrateRequest) -> ProcessInstance:
     instance = _get_instance_or_404(instance_id)
-    source = _get_or_404(instance.schema_id)
     target = _get_or_404(req.target_schema_id)
+    return _migrate_and_record(instance, target, req.data_mapping or None)
+
+
+def _migrate_and_record(
+    instance: ProcessInstance,
+    target: ProcessSchema,
+    data_mapping: dict[str, object] | None,
+) -> ProcessInstance:
+    """Migrate one instance (M1-M5 via the core) and do the boundary follow-ups.
+
+    The single path shared by ``POST /instances/{id}/migrate`` and the bulk
+    assistant (``POST /schemas/{id}/migrate-instances``), so both write the same
+    audit event and trigger the same notifications. Raises HTTP 422 with the
+    findings when the core refuses; the stored instance is then untouched
+    (``_commit_instance_or_422`` persists only a successful result).
+    """
+
+    source = _get_or_404(instance.schema_id)
     before_states = dict(instance.node_states)
     after = _commit_instance_or_422(
         lambda: migration.migrate_instance(
             instance,
             source,
             target,
-            data_mapping=req.data_mapping or None,
+            data_mapping=data_mapping,
             resolver=_resolver,
         )
     )
@@ -4559,7 +4576,7 @@ def post_migrate(instance_id: str, req: MigrateRequest) -> ProcessInstance:
         schema_version=after.schema_version,
         detail={
             "source_schema_id": instance.schema_id,
-            "target_schema_id": req.target_schema_id,
+            "target_schema_id": target.id,
         },
     )
     if not instance.is_test:
@@ -4567,6 +4584,238 @@ def post_migrate(instance_id: str, req: MigrateRequest) -> ProcessInstance:
         # the source did not have, or a re-mapped position) -> notify (§10.7).
         _after_advance(_effective_schema_for(after), before_states, after)
     return after
+
+
+# --- migration assistant (bulk, per target revision) ----------------------
+
+
+class MigrationCandidate(BaseModel):
+    """One running instance of an earlier revision, assessed against a target."""
+
+    instance_id: str
+    schema_id: str
+    schema_version: int
+    migratable: bool
+    findings: list[ValidationFinding]
+    #: Mandatory elements the instance lacks and the target can no longer
+    #: produce (M4) -- the assistant asks for start values for exactly these.
+    missing_data: list[str]
+
+
+class MigrationAssistantReport(BaseModel):
+    target_schema_id: str
+    target_version: int
+    candidates: list[MigrationCandidate]
+
+
+class BulkMigrateRequest(BaseModel):
+    #: Instances to migrate; ``None`` = every candidate of the target.
+    instance_ids: list[str] | None = None
+    #: Start values for newly required data (M4), shared by all instances.
+    #: Only applied to instances that actually lack the element.
+    data_mapping: dict[str, object] = Field(default_factory=dict)
+    #: ``False`` (default) = dry run: report what *would* happen, change nothing.
+    execute: bool = False
+
+
+class BulkMigrateResult(BaseModel):
+    instance_id: str
+    migrated: bool
+    findings: list[ValidationFinding]
+
+
+class BulkMigrateReport(BaseModel):
+    target_schema_id: str
+    executed: bool
+    results: list[BulkMigrateResult]
+
+
+class MigrationTarget(BaseModel):
+    """The newest released revision an instance could move to (or none)."""
+
+    schema_id: str | None = None
+    version: int | None = None
+    name: str | None = None
+
+
+def _migration_candidates(target: ProcessSchema) -> list[ProcessInstance]:
+    """Running top-level instances of earlier revisions of ``target``.
+
+    Excluded on purpose: test instances (throw-away, no productive state),
+    finished instances (nothing left to change) and **child instances of a
+    sub-process** -- they run on the version their parent's SUBPROCESS binding
+    pinned, and moving one on its own would silently change that binding. The
+    single-instance endpoint stays available for deliberate cases.
+    """
+
+    schemas = [s for sid in _store.list_ids() if (s := _store.get(sid)) is not None]
+    sources = migration.predecessor_ids(target, schemas)
+    candidates: list[ProcessInstance] = []
+    for iid in _instances.list_ids():
+        inst = _instances.get(iid)
+        if (
+            inst is None
+            or inst.schema_id not in sources
+            or inst.state is not InstanceState.RUNNING
+            or inst.is_test
+            or inst.parent_instance_id is not None
+        ):
+            continue
+        candidates.append(inst)
+    return sorted(candidates, key=lambda i: i.id)
+
+
+def _assess(
+    instance: ProcessInstance,
+    target: ProcessSchema,
+    data_mapping: dict[str, object] | None,
+) -> tuple[list[ValidationFinding], list[str]]:
+    """M1-M5 findings plus the element ids still missing (M4) for one instance."""
+
+    source = _get_or_404(instance.schema_id)
+    findings = migration.check_migration(
+        instance, source, target, resolver=_resolver, data_mapping=data_mapping
+    )
+    missing = sorted(
+        {e for e, _ in migration.missing_mandatory_data(instance, target, data_mapping)}
+    )
+    return findings, missing
+
+
+def _mapping_for(
+    instance: ProcessInstance, target: ProcessSchema, shared: dict[str, object]
+) -> dict[str, object] | None:
+    """The part of the shared start values this instance actually needs.
+
+    A shared value never overwrites data the instance already carries -- the
+    assistant fills gaps, it does not rewrite history.
+    """
+
+    needed = {e for e, _ in migration.missing_mandatory_data(instance, target)}
+    picked = {k: v for k, v in shared.items() if k in needed}
+    return picked or None
+
+
+@app.get(
+    "/schemas/{schema_id}/migration-report",
+    response_model=MigrationAssistantReport,
+    dependencies=[_read],
+)
+def get_migration_report(schema_id: str) -> MigrationAssistantReport:
+    """Which running instances of earlier revisions could move to this one?
+
+    Read-only. For a draft target every candidate reports M1 (not released) --
+    the assistant is meant for released revisions, but the answer stays honest.
+    """
+
+    target = _get_or_404(schema_id)
+    candidates = []
+    for inst in _migration_candidates(target):
+        findings, missing = _assess(inst, target, None)
+        candidates.append(
+            MigrationCandidate(
+                instance_id=inst.id,
+                schema_id=inst.schema_id,
+                schema_version=inst.schema_version,
+                migratable=not findings,
+                findings=findings,
+                missing_data=missing,
+            )
+        )
+    return MigrationAssistantReport(
+        target_schema_id=target.id, target_version=target.version, candidates=candidates
+    )
+
+
+@app.post(
+    "/schemas/{schema_id}/migrate-instances",
+    response_model=BulkMigrateReport,
+    dependencies=[_run],
+)
+def post_migrate_instances(schema_id: str, req: BulkMigrateRequest) -> BulkMigrateReport:
+    """Bulk migration onto ``schema_id`` -- a dry run unless ``execute`` is set.
+
+    Every instance goes through the same core check and the same
+    :func:`_migrate_and_record` as the single endpoint; there is no bulk
+    shortcut. Instances are handled one by one, each atomically: a refused one
+    stays exactly as it was, the others still move (partial success is
+    reported per instance). Start values are type-checked against the target
+    first (D3); a type error rejects the whole request before anything moves.
+    Requested ids that are not candidates are reported as not migrated.
+    """
+
+    target = _get_or_404(schema_id)
+    type_findings = _validate_data_values(target, req.data_mapping)
+    if type_findings:
+        raise HTTPException(
+            status_code=422, detail={"findings": [f.model_dump() for f in type_findings]}
+        )
+    candidates = {i.id: i for i in _migration_candidates(target)}
+    wanted = req.instance_ids if req.instance_ids is not None else list(candidates)
+    results: list[BulkMigrateResult] = []
+    for iid in wanted:
+        inst = candidates.get(iid)
+        if inst is None:
+            results.append(
+                BulkMigrateResult(
+                    instance_id=iid,
+                    migrated=False,
+                    findings=[
+                        ValidationFinding(
+                            rule="M0",
+                            message=(
+                                f"instance '{iid}' is not a running instance of an "
+                                f"earlier revision of '{target.id}'"
+                            ),
+                            code="M0.not-candidate",
+                        )
+                    ],
+                )
+            )
+            continue
+        mapping = _mapping_for(inst, target, req.data_mapping)
+        findings, _ = _assess(inst, target, mapping)
+        if findings or not req.execute:
+            results.append(
+                BulkMigrateResult(instance_id=iid, migrated=False, findings=findings)
+            )
+            continue
+        try:
+            _migrate_and_record(inst, target, mapping)
+        except HTTPException as exc:
+            # A race with a concurrent change: report it, keep going.
+            detail: dict[str, object] = exc.detail if isinstance(exc.detail, dict) else {}
+            raw = detail.get("findings", [])
+            if not isinstance(raw, list):
+                raw = []
+            results.append(
+                BulkMigrateResult(
+                    instance_id=iid,
+                    migrated=False,
+                    findings=[ValidationFinding(**f) for f in raw],
+                )
+            )
+            continue
+        results.append(BulkMigrateResult(instance_id=iid, migrated=True, findings=[]))
+    return BulkMigrateReport(
+        target_schema_id=target.id, executed=req.execute, results=results
+    )
+
+
+@app.get(
+    "/instances/{instance_id}/migration-target",
+    response_model=MigrationTarget,
+    dependencies=[_read],
+)
+def get_migration_target(instance_id: str) -> MigrationTarget:
+    """The newest released revision this instance's schema has (if any)."""
+
+    inst = _get_instance_or_404(instance_id)
+    schemas = [s for sid in _store.list_ids() if (s := _store.get(sid)) is not None]
+    best = migration.latest_successor(inst.schema_id, schemas)
+    if best is None:
+        return MigrationTarget()
+    return MigrationTarget(schema_id=best.id, version=best.version, name=best.name)
 
 
 # --- monitoring + audit (step 15) ----------------------------------------
@@ -4660,6 +4909,8 @@ def _validate_data_values(
                 ValidationFinding(
                     rule="D3",
                     message=f"unknown data element '{element_id}'",
+                    code="D3.unknown-element",
+                    params={"element": element_id},
                 )
             )
             continue
@@ -4671,6 +4922,8 @@ def _validate_data_values(
                         f"value for '{element_id}' is not a "
                         f"{element.data_type.value}"
                     ),
+                    code="D3.wrong-type",
+                    params={"element": element.name, "type": element.data_type.value},
                 )
             )
     return findings

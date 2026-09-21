@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from procworks.conditions import ConditionError, referenced_names
 from procworks.model import (
@@ -67,11 +67,54 @@ SchemaResolver = Callable[[str, "int | None"], "ProcessSchema | None"]
 
 
 class ValidationFinding(BaseModel):
-    """A single, localized correctness violation."""
+    """A single, localized correctness violation.
+
+    ``message`` is the technical (English) text; it stays the stable basis for
+    logs, tests and API consumers. ``code`` and ``params`` are an **additive**,
+    language-neutral description of the same finding for user-facing clients:
+    ``code`` names the case (``"D1.read-before-write"``), ``params`` carries the
+    human-readable parts (step and element *names*, never ids) the client's
+    message catalog fills into its own wording. Language is a boundary concern
+    -- the core stays language-neutral and every existing consumer keeps
+    working. Not every finding has a code yet; clients fall back to
+    ``message``.
+    """
 
     rule: str
     message: str
     node_id: str | None = None
+    code: str | None = None
+    params: dict[str, str] = Field(default_factory=dict)
+
+
+def node_name(schema: ProcessSchema, node_id: str | None) -> str:
+    """Human-readable name of a node for ``ValidationFinding.params``.
+
+    The label when there is one, otherwise a German description of the node
+    type (a gateway has no label), and the raw id only as the last resort.
+    """
+
+    if node_id is None:
+        return ""
+    node = schema.nodes.get(node_id)
+    if node is None:
+        return node_id
+    if node.label:
+        return node.label
+    return _NODE_TYPE_NAMES.get(node.type, node_id)
+
+
+#: German fallbacks for unlabelled nodes (gateways, start/end).
+_NODE_TYPE_NAMES: dict[NodeType, str] = {
+    NodeType.START: "Start",
+    NodeType.END: "Ende",
+    NodeType.AND_SPLIT: "Parallel-Verzweigung",
+    NodeType.AND_JOIN: "Parallel-Zusammenführung",
+    NodeType.XOR_SPLIT: "Entscheidung",
+    NodeType.XOR_JOIN: "Entscheidungs-Zusammenführung",
+    NodeType.LOOP_START: "Schleifenanfang",
+    NodeType.LOOP_END: "Schleifenende",
+}
 
 
 class CorrectnessError(Exception):
@@ -187,6 +230,8 @@ def check_executable(schema: ProcessSchema) -> list[ValidationFinding]:
                     f"interactive step '{node.label or node.id}' has no staff rule "
                     f"(BZR); it would be activated but appear in nobody's worklist"
                 ),
+                code="B2.no-staff",
+                params={"step": node_name(schema, node.id)},
             )
         )
     return findings
@@ -289,6 +334,12 @@ def _check_k1_gateways(schema: ProcessSchema) -> list[ValidationFinding]:
                         f"unbalanced gateways: {n_splits} x {split_type.value} "
                         f"vs {n_joins} x {join_type.value}"
                     ),
+                    code="K1.unbalanced",
+                    params={
+                        "splits": str(n_splits),
+                        "joins": str(n_joins),
+                        "kind": _NODE_TYPE_NAMES.get(split_type, split_type.value),
+                    },
                 )
             )
     if findings or _check_k2_endpoints_and_degrees(schema):
@@ -302,7 +353,13 @@ def _check_k1_gateways(schema: ProcessSchema) -> list[ValidationFinding]:
             join_id, _ = block_join(schema, node.id)
         except ValueError as exc:
             findings.append(
-                ValidationFinding(rule="K1", node_id=node.id, message=str(exc))
+                ValidationFinding(
+                    rule="K1",
+                    node_id=node.id,
+                    message=str(exc),
+                    code="K1.unpaired",
+                    params={"step": node_name(schema, node.id)},
+                )
             )
             continue
         expected = SPLIT_JOIN_PAIR[node.type]
@@ -316,6 +373,11 @@ def _check_k1_gateways(schema: ProcessSchema) -> list[ValidationFinding]:
                         f"{node.type.value} '{node.id}' is closed by "
                         f"{actual.value} '{join_id}', expected {expected.value}"
                     ),
+                    code="K1.wrong-join",
+                    params={
+                        "split": node_name(schema, node.id),
+                        "join": node_name(schema, join_id),
+                    },
                 )
             )
         if join_id in claimed_by:
@@ -327,6 +389,8 @@ def _check_k1_gateways(schema: ProcessSchema) -> list[ValidationFinding]:
                         f"join '{join_id}' closes two splits "
                         f"('{claimed_by[join_id]}' and '{node.id}')"
                     ),
+                    code="K1.shared-join",
+                    params={"join": node_name(schema, join_id)},
                 )
             )
             continue
@@ -977,6 +1041,11 @@ def _check_d1_supply(schema: ProcessSchema) -> list[ValidationFinding]:
                         f"mandatory input '{element.name}' may be read before it is "
                         f"written on some execution path"
                     ),
+                    code="D1.read-before-write",
+                    params={
+                        "step": node_name(schema, access.node_id),
+                        "element": element.name,
+                    },
                 )
             )
     return findings

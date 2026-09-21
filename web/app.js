@@ -358,15 +358,130 @@ function toast(kind, title, lines) {
   }
 }
 
+// --------------------------------------------------------------------------
+// Meldungskatalog fuer Regelbefunde
+// --------------------------------------------------------------------------
+
+/**
+ * Deutsche Texte je Befund-Code (``ValidationFinding.code``).
+ *
+ * Der Kern bleibt sprachneutral: Er liefert neben der technischen, englischen
+ * ``message`` einen Code und die menschenlesbaren Teile (Schritt- und
+ * Elementnamen, nie IDs) als ``params``. Formuliert wird ausschliesslich hier --
+ * EIN Katalog fuer alle Anzeigestellen (Fehlermeldung, Befundliste, Karte,
+ * Statusleiste, Marker am Knoten, Migrationsassistent), damit sie nicht
+ * auseinanderlaufen. Frueher erschienen Ablehnungen englisch und mit interner
+ * Knoten-ID („act_246“).
+ *
+ * Jeder Eintrag liefert ``{ text, hint }``: ``text`` sagt, was nicht geht,
+ * ``hint`` (optional) was zu tun ist. Fehlt ein Code, faellt ``findingText``
+ * auf die Kernmeldung zurueck; ``FINDING_FALLBACK_RULES`` im Waechter
+ * dokumentiert, welche Regeln bewusst noch nicht uebersetzt sind.
+ */
+const FINDING_TEXTS = {
+  "D1.read-before-write": (p) => ({
+    text: `„${p.step}“ würde „${p.element}“ lesen, bevor es auf jedem Weg geschrieben wurde.`,
+    hint: `Den Schritt hinter einen Schritt legen, der „${p.element}“ schreibt – oder die Bindung nicht als Pflicht setzen.`,
+  }),
+  "K1.unbalanced": (p) => ({
+    text: `Die Verzweigungen sind nicht vollständig: ${p.splits}× ${p.kind}, aber ${p.joins} passende Zusammenführung(en).`,
+    hint: "Jede Verzweigung braucht genau eine Zusammenführung derselben Art.",
+  }),
+  "K1.wrong-join": (p) => ({
+    text: `„${p.split}“ wird von „${p.join}“ geschlossen – das ist die falsche Art der Zusammenführung.`,
+    hint: "Eine parallele Verzweigung schließt eine parallele Zusammenführung, eine Entscheidung eine Entscheidungs-Zusammenführung.",
+  }),
+  "K1.shared-join": (p) => ({
+    text: `„${p.join}“ schließt zwei Verzweigungen zugleich – die Blöcke überkreuzen sich.`,
+    hint: "Jeder Block muss vollständig innerhalb oder außerhalb eines anderen liegen.",
+  }),
+  "K1.unpaired": (p) => ({
+    text: `Zu „${p.step}“ gibt es keine eindeutig passende Zusammenführung.`,
+    hint: "Das Modell ist nicht sauber blockstrukturiert (typisch bei importiertem BPMN).",
+  }),
+  "B2.no-staff": (p) => ({
+    text: `„${p.step}“ hat keine Bearbeiterzuordnung und würde in keiner Arbeitsliste erscheinen.`,
+    hint: "Dem Schritt eine Rolle, Abteilung oder Person zuordnen.",
+  }),
+  "R0.not-draft": () => ({
+    text: "Dieses Schema ist freigegeben und damit unveränderlich.",
+    hint: "Für Änderungen eine neue Revision anlegen.",
+  }),
+  "LC.not-draft": () => ({ text: "Nur ein Entwurf kann freigegeben werden." }),
+  "LC.not-released": () => ({ text: "Eine neue Revision lässt sich nur von einer freigegebenen Version anlegen." }),
+  "D3.unknown-element": (p) => ({ text: `Das Datenelement „${p.element}“ gibt es in diesem Schema nicht.` }),
+  "D3.wrong-type": (p) => ({ text: `Der Wert für „${p.element}“ passt nicht zum Typ ${p.type}.` }),
+  "M0.not-candidate": () => ({ text: "Diese Instanz läuft nicht auf einer früheren Version dieses Schemas." }),
+  "M1.not-released": (p) => ({
+    text: `Die Zielversion v${p.version} ist noch nicht freigegeben.`,
+    hint: "Erst freigeben, dann migrieren.",
+  }),
+  "M1.incorrect": (p) => ({ text: `Die Zielversion ist nicht korrekt (Regel ${p.rule}).` }),
+  "M2.step-removed": (p) => ({
+    text: `Der bereits bearbeitete Schritt „${p.step}“ fehlt in der neuen Version.`,
+    hint: "Bereits erledigte Schritte dürfen in der neuen Version nicht entfernt werden. Diese Instanz läuft sicher auf ihrer Version weiter.",
+  }),
+  "M2.step-changed": (p) => ({ text: `Der bereits bearbeitete Schritt „${p.step}“ ist in der neuen Version kein Schritt derselben Art mehr.` }),
+  "M2.path-changed": (p) => ({
+    text: `Die neue Version ändert den bereits durchlaufenen Weg zwischen „${p.from}“ und „${p.to}“.`,
+    hint: "Änderungen sind nur vor der aktuellen Position der Instanz möglich.",
+  }),
+  "M3.rewired": (p) => ({
+    text: `Nach dem erledigten Schritt „${p.step}“ ginge es in der neuen Version anders weiter.`,
+    hint: "Die Instanz steht schon dahinter – sie läuft sicher auf ihrer Version weiter.",
+  }),
+  "M3.running-removed": (p) => ({ text: `Der gerade laufende Schritt „${p.step}“ ist in der neuen Version kein ausführbarer Schritt mehr.` }),
+  "M4.missing-data": (p) => ({
+    text: `„${p.step}“ braucht „${p.element}“, aber die Instanz hat dafür keinen Wert, und kein späterer Schritt liefert ihn.`,
+    hint: `Einen Startwert für „${p.element}“ angeben.`,
+  }),
+  "M5.adhoc": () => ({
+    text: "Diese Instanz wurde einzeln angepasst (Ad-hoc-Änderung) und wird deshalb nicht automatisch migriert.",
+    hint: "Sie läuft sicher auf ihrer Version weiter.",
+  }),
+};
+
+/**
+ * Anzeigetext eines Befunds: aus dem Katalog, sonst die Kernmeldung.
+ *
+ * Im Rueckfall wird eine enthaltene Knoten-ID durch den Schrittnamen ersetzt,
+ * soweit das geladene Schema ihn kennt -- so erscheint auch ein noch nicht
+ * uebersetzter Befund nicht mit „act_246“.
+ *
+ * @param {{rule:string, message:string, node_id?:string|null, code?:string|null, params?:Object<string,string>}} f Befund
+ * @param {{withHint?: boolean}} [opts] ``withHint`` haengt den Handlungsvorschlag an
+ * @returns {string}
+ */
+function findingText(f, opts) {
+  const entry = f && f.code && FINDING_TEXTS[f.code];
+  if (entry) {
+    const t = entry(f.params || {});
+    return opts && opts.withHint && t.hint ? `${t.text} ${t.hint}` : t.text;
+  }
+  let msg = (f && f.message) || "";
+  const nodes = state.schema && state.schema.nodes;
+  if (nodes) {
+    msg = msg.replace(/'([A-Za-z0-9_-]+)'/g, (m, id) =>
+      nodes[id] && nodes[id].label ? `„${nodes[id].label}“` : m);
+  }
+  return msg;
+}
+
+/** Befundzeile fuer Listen und Meldungen: „Regel – Text“ (Regel bleibt als Kuerzel stehen). */
+function findingLine(f, opts) {
+  return `${f.rule}: ${findingText(f, opts)}`;
+}
+
 function describeError(err) {
-  // err.detail can be: string, {message}, {findings:[{rule,message,node_id}]}
+  // err.detail can be: string, {message}, {findings:[{rule,message,node_id,code,params}]}
   const d = err && err.detail;
   if (!d) return { title: err.message || "Fehler", lines: [] };
   if (typeof d === "string") return { title: d, lines: [] };
   if (d.findings) {
+    // Titel ohne Fachjargon; die Regel steht als Kuerzel vor jeder Zeile.
     return {
-      title: "Vom Kern abgelehnt (Regelverletzung)",
-      lines: d.findings.map((f) => `${f.rule}: ${f.message}` + (f.node_id ? ` [${f.node_id}]` : "")),
+      title: d.findings.length === 1 ? "Diese Änderung ist nicht zulässig" : "Diese Änderung ist nicht zulässig – mehrere Gründe",
+      lines: d.findings.map((f) => findingLine(f, { withHint: true })),
     };
   }
   if (d.message) return { title: d.message, lines: [] };
@@ -1311,7 +1426,7 @@ function renderNodeFindingMark(root, node, p, opts) {
     onClick: opts.onFinding ? (e) => { e.stopPropagation(); opts.onFinding(node.id); } : null,
   });
   g.appendChild(svg("title", null, document.createTextNode(
-    list.map((f) => `[${f.rule}] ${f.message}`).join("\n"))));
+    list.map((f) => findingLine(f)).join("\n"))));
   g.appendChild(svg("circle", { class: "gfind-bg", cx, cy, r: 8 }));
   g.appendChild(svg("text", { class: "gfind-txt", x: cx, y: cy + 4, "text-anchor": "middle" },
     document.createTextNode(list.length > 1 ? String(list.length) : "!")));
@@ -1674,6 +1789,14 @@ async function refreshSchema() {
     const report = await api.get(`/schemas/${state.schemaId}/metrics`);
     state.hints = (report && report.hints) || [];
   } catch (err) { state.hints = []; }
+  // Migrationsassistent: nur fuer freigegebene Revisionen und nur fuer Rollen,
+  // die migrieren duerfen. Best effort wie die Hinweise -- ohne Bericht fehlt
+  // nur der Knopf, das Modellieren bleibt unberuehrt.
+  state.migrationReport = null;
+  if (state.schema && state.schema.lifecycle_state === "RELEASED" && hasRole("operator", "modeler", "admin")) {
+    try { state.migrationReport = await api.get(`/schemas/${state.schemaId}/migration-report`); }
+    catch (err) { state.migrationReport = null; }
+  }
   localStorage.setItem("schemaId", state.schemaId);
 }
 
@@ -1955,6 +2078,7 @@ function modelHeader(schema, draft) {
         ? el("button", { class: "btn small ghost", onClick: newRevision,
             title: "Bearbeitbares ENTWURF-Duplikat dieser Revision anlegen" }, "Neue Revision")
         : null,
+      migrationHeaderButton(schema, draft),
       draft
         ? el("button", { class: "btn small green", "data-tour": "model.release", onClick: releaseSchema }, "Freigeben")
         : el("button", { class: "btn small primary", onClick: () => { state.view = "run"; setActiveNav(); render(); } }, "Zur Ausf\u00FChrung"),
@@ -2094,7 +2218,7 @@ function modelStatusBar(schema, draft) {
   if (notReady.length) {
     bar.appendChild(el("span", {
       class: "pill pill-amber",
-      title: notReady.map((f) => f.message).join("\n"),
+      title: notReady.map((f) => findingText(f)).join("\n"),
     }, `${notReady.length} Schritt(e) ohne Bearbeiter`));
   }
   // Modellhinweise (G-Gruppe): rein beratend, dritter Zustand neben „korrekt"
@@ -2123,8 +2247,8 @@ function modelStatusBar(schema, draft) {
     title: "Pfeiltasten bewegen die Auswahl im Kontrollfluss (← → entlang des Ablaufs, ↑ ↓ zwischen Zweigen), Enter springt in die Karte, Esc hebt die Auswahl auf" },
     "← → Schritt · ↑ ↓ Zweig · ↵ Karte · Esc abwählen"));
   globals.forEach((f) => bar.appendChild(
-    el("span", { class: "model-status-find", title: f.message },
-      el("span", { class: "rule" }, f.rule), f.message)));
+    el("span", { class: "model-status-find", title: findingText(f, { withHint: true }) },
+      el("span", { class: "rule" }, f.rule), findingText(f))));
   return bar;
 }
 
@@ -2736,7 +2860,7 @@ function stepCard(schema, draft) {
   if (findings.length) {
     body.appendChild(cardSection("findings", "Befunde", String(findings.length), (b) => {
       findings.forEach((f) => b.appendChild(el("div", { class: "finding" },
-        el("span", { class: "rule" }, f.rule), el("span", null, f.message))));
+        el("span", { class: "rule" }, f.rule), el("span", null, findingText(f, { withHint: true })))));
     }));
   }
   if (!draft) {
@@ -4542,7 +4666,7 @@ function findingsPanel() {
   } else {
     v.findings.forEach((f) => body.appendChild(el("div", { class: "finding" },
       el("span", { class: "rule" }, f.rule),
-      el("span", null, f.message + (f.node_id ? ` [${f.node_id}]` : "")))));
+      el("span", null, findingText(f, { withHint: true })))));
   }
   // Modellhinweise (G-Gruppe, /metrics): beratend, kein Korrektheitsurteil.
   // Bewusst im selben Panel, aber klar abgesetzt \u2013 ein Hinweis ist kein Befund.
@@ -4880,6 +5004,189 @@ async function newRevision() {
   } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 }
 
+// --------------------------------------------------------------------------
+// Migrationsassistent (laufende Instanzen auf eine neue Revision heben)
+// --------------------------------------------------------------------------
+
+/**
+ * Kopfzeilen-Knopf „Laufende Instanzen migrieren (N)“.
+ *
+ * Erscheint nur bei einer freigegebenen Revision, fuer die der Kern laufende
+ * Instanzen frueherer Versionen meldet (``state.migrationReport``, geladen in
+ * ``refreshSchema``). ``modelHeader`` ist beiden Modellier-Oberflaechen
+ * gemeinsam, der Knopf existiert damit in beiden.
+ *
+ * @param {object} schema das angezeigte Schema
+ * @param {boolean} draft ob es ein Entwurf ist
+ * @returns {HTMLElement|null}
+ */
+function migrationHeaderButton(schema, draft) {
+  const report = state.migrationReport;
+  if (draft || !report || report.target_schema_id !== schema.id || !report.candidates.length) return null;
+  const ok = report.candidates.filter((c) => c.migratable).length;
+  return el("button", {
+    class: "btn small primary", "data-tour": "model.migrate",
+    title: `${report.candidates.length} laufende Instanz(en) früherer Versionen, ${ok} davon sofort migrierbar`,
+    onClick: () => openMigrationAssistant(schema.id, null),
+  }, `Laufende Instanzen migrieren (${report.candidates.length})`);
+}
+
+/**
+ * Hinweis in der Instanz-Ansicht, wenn eine neuere freigegebene Version existiert.
+ * @param {object} inst die angezeigte Instanz
+ * @returns {Promise<HTMLElement|null>}
+ */
+async function instanceMigrationPanel(inst) {
+  // Die Laufzeit-Sichten zeichnen im Takt neu (Revisions-Poll); die Antwort
+  // wird deshalb je Instanz+Version 30 s gemerkt, statt bei jedem Neuzeichnen
+  // alle Schemata serverseitig durchzusehen.
+  const key = `${inst.id}|${inst.schema_id}`;
+  const cache = state.migrationTargetCache || (state.migrationTargetCache = {});
+  let target = cache[key] && Date.now() - cache[key].at < 30000 ? cache[key].target : undefined;
+  if (target === undefined) {
+    try { target = await api.get(`/instances/${inst.id}/migration-target`); } catch (e) { return null; }
+    cache[key] = { at: Date.now(), target };
+  }
+  if (!target || !target.schema_id) return null;
+  return el("div", { class: "panel" },
+    el("div", { class: "panel-h" }, el("h2", null, "Neue Version verfügbar"),
+      el("span", { class: "sub" }, `v${inst.schema_version} → v${target.version}`)),
+    el("div", { class: "panel-b row" },
+      el("span", { class: "muted", style: "font-size:12px;flex:1" },
+        "Diese Instanz läuft auf einer älteren Version. Ob sie wechseln kann, prüft der Kern – bereits Erledigtes bleibt unverändert."),
+      el("button", { class: "btn small primary", onClick: () => openMigrationAssistant(target.schema_id, [inst.id]) },
+        "Auf neue Version migrieren")));
+}
+
+/** Eingabeart eines Startwert-Felds nach Datentyp. */
+function startValueWidget(elem) {
+  if (!elem) return "TEXT";
+  if (elem.data_type === "BOOLEAN") return "CHECKBOX";
+  if (elem.data_type === "INTEGER" || elem.data_type === "FLOAT") return "NUMBER";
+  return "TEXT";
+}
+
+/**
+ * Der Migrationsassistent.
+ *
+ * Zeigt je laufender Instanz frueherer Versionen, ob sie auf ``targetId``
+ * wechseln kann, und warum nicht (Klartext aus dem Meldungskatalog). Fehlen
+ * Pflichtdaten, die die neue Version verlangt und kein spaeterer Schritt mehr
+ * liefert (M4), fragt er Startwerte ab -- einmal fuer alle; der Kern setzt sie
+ * nur dort ein, wo die Instanz den Wert noch nicht hat. „Erneut prüfen“ ist ein
+ * Trockenlauf; migriert wird erst mit dem Bestaetigen, und zwar jede Instanz
+ * einzeln und atomar: eine abgelehnte bleibt unveraendert, die anderen wechseln.
+ *
+ * Der Client entscheidet nichts -- er zeigt nur an, was der Kern meldet.
+ *
+ * @param {string} targetId Schema-ID der freigegebenen Zielversion
+ * @param {string[]|null} onlyIds auf diese Instanzen beschraenken (null = alle)
+ */
+async function openMigrationAssistant(targetId, onlyIds) {
+  let report, target;
+  try {
+    [report, target] = await Promise.all([
+      api.get(`/schemas/${targetId}/migration-report`),
+      api.get(`/schemas/${targetId}`),
+    ]);
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return; }
+  const cands = onlyIds ? report.candidates.filter((c) => onlyIds.includes(c.instance_id)) : report.candidates;
+  if (!cands.length) {
+    toast("info", "Nichts zu migrieren", ["Es laufen keine Instanzen früherer Versionen."]);
+    return;
+  }
+
+  // Startwerte fuer fehlende Pflichtdaten (Vereinigung ueber alle Kandidaten).
+  const inputs = {};
+  const missing = [...new Set(cands.flatMap((c) => c.missing_data))];
+  const valueBox = el("div", { class: "form-grid" });
+  missing.forEach((eid) => {
+    const elem = target.data_elements[eid];
+    const { control, read } = maskControl(elem, startValueWidget(elem), null, undefined);
+    inputs[eid] = { read, elem };
+    valueBox.appendChild(el("label", { class: "field" }, `${elem ? elem.name : eid} (${elem ? elem.data_type : "?"})`, control));
+  });
+  const readMapping = () => {
+    const mapping = {};
+    for (const [eid, { read }] of Object.entries(inputs)) {
+      const v = read();
+      if (v === undefined || (typeof v === "number" && Number.isNaN(v))) continue;
+      mapping[eid] = v;
+    }
+    return mapping;
+  };
+
+  // Tabelle: Auswahl, Instanz, Version, Ergebnis der Pruefung.
+  const checks = {};
+  const statusCells = {};
+  const rowsById = {};
+  const tbody = el("tbody");
+  cands.forEach((c) => {
+    const box = el("input", { type: "checkbox" });
+    box.checked = c.migratable;
+    checks[c.instance_id] = box;
+    statusCells[c.instance_id] = el("td", { class: "mig-status" });
+    rowsById[c.instance_id] = el("tr", null,
+      el("td", null, box), el("td", null, c.instance_id), el("td", null, `v${c.schema_version}`),
+      statusCells[c.instance_id]);
+    tbody.appendChild(rowsById[c.instance_id]);
+  });
+  const showStatus = (iid, findings) => {
+    const cell = statusCells[iid];
+    clear(cell);
+    if (!findings.length) { cell.appendChild(el("span", { class: "pill pill-green" }, "migrierbar")); return; }
+    cell.appendChild(el("span", { class: "pill pill-amber" }, "bleibt auf ihrer Version"));
+    findings.forEach((f) => cell.appendChild(el("div", { class: "mig-reason" }, findingText(f, { withHint: true }))));
+  };
+  cands.forEach((c) => showStatus(c.instance_id, c.findings));
+
+  const recheck = el("button", { class: "btn small", onClick: async () => {
+    try {
+      const res = await api.post(`/schemas/${targetId}/migrate-instances`,
+        { instance_ids: cands.map((c) => c.instance_id), data_mapping: readMapping(), execute: false });
+      res.results.forEach((r) => { showStatus(r.instance_id, r.findings); checks[r.instance_id].checked = !r.findings.length; });
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } }, "Mit diesen Startwerten erneut prüfen");
+
+  const body = el("div", null,
+    el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
+      `Ziel: ${target.name} v${target.version}. Bereits Erledigtes bleibt, wie es ist; eine Instanz, die nicht passt, läuft sicher auf ihrer Version weiter.`),
+    missing.length
+      ? el("div", { class: "mig-values" },
+          el("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, "Startwerte für neue Pflichtdaten"),
+          valueBox, recheck)
+      : null,
+    el("table", { class: "mig-table" },
+      el("thead", null, el("tr", null, ...["", "Instanz", "Version", "Ergebnis"].map((h) => el("th", null, h)))),
+      tbody));
+
+  openModal(`Instanzen auf v${target.version} migrieren`, body, async () => {
+    const ids = cands.map((c) => c.instance_id).filter((iid) => checks[iid].checked);
+    if (!ids.length) { toast("info", "Keine Instanz ausgewählt"); return false; }
+    try {
+      const res = await api.post(`/schemas/${targetId}/migrate-instances`,
+        { instance_ids: ids, data_mapping: readMapping(), execute: true });
+      const moved = res.results.filter((r) => r.migrated);
+      const kept = res.results.filter((r) => !r.migrated);
+      kept.forEach((r) => showStatus(r.instance_id, r.findings));
+      // Bereits migrierte verschwinden aus dem offenen Dialog -- ein zweiter
+      // Durchgang soll nur noch die uebrigen betreffen.
+      moved.forEach((r) => {
+        rowsById[r.instance_id].remove();
+        const i = cands.findIndex((c) => c.instance_id === r.instance_id);
+        if (i >= 0) cands.splice(i, 1);
+      });
+      state.migrationTargetCache = {};
+      toast(kept.length ? "err" : "ok", `${moved.length} Instanz(en) migriert` + (kept.length ? `, ${kept.length} nicht` : ""),
+        kept.map((r) => `${r.instance_id}: ${r.findings.map((f) => findingText(f)).join(" ")}`));
+      if (state.instance && moved.some((r) => r.instance_id === state.instance.id)) await loadInstance(state.instance.id);
+      if (state.schemaId) await refreshSchema();
+      render();
+      return kept.length ? false : undefined;   // bei Rest offen lassen, damit die Gruende lesbar bleiben
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+  }, "Ausgewählte migrieren");
+}
+
 async function exportBpmn() {
   try {
     const xml = await api.raw(`/schemas/${state.schemaId}/bpmn`);
@@ -4957,7 +5264,7 @@ function dFindingsPanel() {
   const dz = v && !v.correct ? v.findings.filter((f) => f.rule[0] === "D" || f.rule[0] === "C") : [];
   const body = el("div", { class: "panel-b" });
   if (!dz.length) body.appendChild(el("div", { class: "ok-banner" }, "\u2713 Datenfluss konsistent (D/C)."));
-  else dz.forEach((f) => body.appendChild(el("div", { class: "finding" }, el("span", { class: "rule" }, f.rule), el("span", null, f.message + (f.node_id ? ` [${f.node_id}]` : "")))));
+  else dz.forEach((f) => body.appendChild(el("div", { class: "finding" }, el("span", { class: "rule" }, f.rule), el("span", null, findingText(f, { withHint: true })))));
   return el("div", { class: "panel" }, el("div", { class: "panel-h" }, el("h2", null, "Datenfluss-Befunde")), body);
 }
 
@@ -5441,7 +5748,7 @@ function zFindingsPanel() {
   const zs = v && !v.correct ? v.findings.filter((f) => f.rule[0] === "Z" || f.rule[0] === "A") : [];
   const body = el("div", { class: "panel-b" });
   if (!zs.length) body.appendChild(el("div", { class: "ok-banner" }, "\u2713 Ressourcen/Bearbeiter konsistent (Z/A)."));
-  else zs.forEach((f) => body.appendChild(el("div", { class: "finding" }, el("span", { class: "rule" }, f.rule), el("span", null, f.message + (f.node_id ? ` [${f.node_id}]` : "")))));
+  else zs.forEach((f) => body.appendChild(el("div", { class: "finding" }, el("span", { class: "rule" }, f.rule), el("span", null, findingText(f, { withHint: true })))));
   return el("div", { class: "panel" }, el("div", { class: "panel-h" }, el("h2", null, "Ressourcen-Befunde")), body);
 }
 
@@ -5883,7 +6190,14 @@ async function renderInstanceDetail(container, withActions) {
     ? renderAdhocPanel(runSchema, inst)
     : null;
 
-  container.appendChild(el("div", { class: "grid-2" }, graphPanel, el("div", null, wlPanel, dataPanel, adhocPanel, timelinePanel)));
+  // Neuere freigegebene Version vorhanden? Dann Migration anbieten (derselbe
+  // Assistent wie in der Modellieren-Sicht, auf diese eine Instanz beschraenkt).
+  const migratePanel = (withActions && hasRole("operator", "modeler", "admin")
+      && inst.state === "RUNNING" && !inst.is_test && !inst.parent_instance_id)
+    ? await instanceMigrationPanel(inst)
+    : null;
+
+  container.appendChild(el("div", { class: "grid-2" }, graphPanel, el("div", null, migratePanel, wlPanel, dataPanel, adhocPanel, timelinePanel)));
 }
 
 // Panel fuer die Ad-hoc-Anpassung einer einzelnen Instanz. Die Auswahl der

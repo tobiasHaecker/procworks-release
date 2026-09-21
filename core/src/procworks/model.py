@@ -1315,6 +1315,14 @@ class ProcessSchema(BaseModel):
     id: str
     name: str
     version: int = 1
+    #: Id of the schema this one was derived from as its next revision
+    #: (set by :func:`procworks.operations.new_revision`). It is the lineage the
+    #: migration assistant follows to find running instances of *older*
+    #: versions of the same process. ``None`` for an original schema and for
+    #: revisions created before the field existed (then the assistant falls back
+    #: to "same name, lower version"). Pure metadata: no correctness rule reads
+    #: it, and M1-M5 still decide every migration on their own.
+    revision_of: str | None = None
     lifecycle_state: LifecycleState = LifecycleState.ENTWURF
     nodes: dict[str, Node] = Field(default_factory=dict)
     edges: list[ControlEdge] = Field(default_factory=list)

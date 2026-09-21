@@ -510,6 +510,11 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .modal-h h3 { margin: 0; font-size: 16px; }
 .modal-b { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; max-height: 70vh; overflow: auto; }
 .modal-f { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 10px; }
+/* Migrationsassistent (openMigrationAssistant in app.js). */
+.mig-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.mig-table th, .mig-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.mig-reason { color: var(--txt-dim); font-size: 12px; margin-top: 4px; line-height: 1.35; }
+.mig-values { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--bg-elev2); }
 /* Segment-Filter (z. B. Instanzliste im Monitoring). */
 .seg-filter { display: inline-flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
 .seg-btn {

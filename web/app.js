@@ -378,11 +378,39 @@ function toast(kind, title, lines) {
  * auf die Kernmeldung zurueck; ``FINDING_FALLBACK_RULES`` im Waechter
  * dokumentiert, welche Regeln bewusst noch nicht uebersetzt sind.
  */
+/** Namen der Objektarten fuer „gibt es nicht / gibt es schon“ (Code OP.*). */
+const OP_KIND_NAMES = {
+  node: "Der Schritt", data_element: "Das Datenelement", role: "Die Rolle", org_unit: "Die Abteilung",
+  agent: "Die Person", follow_up: "Der Folgeprozess", activity_template: "Die Dienst-Vorlage", connector: "Der Connector",
+};
+
+/** Texte fuer „geht an dieser Knotenart nicht“ (Code OP.wrong-node-kind, Parameter ``what``). */
+const OP_WRONG_KIND = {
+  loop_decision: "Eine Wiederholungsbedingung gehört an ein Schleifenende.",
+  sync: "Warte-Beziehungen verbinden nur Aufgaben-Schritte.",
+  rename: "Nur Schritte und Teilprozesse lassen sich umbenennen.",
+  move: "Nur Schritte und Teilprozesse lassen sich verschieben.",
+  empty_branch: "Einen leeren Zweig gibt es nur an einer Entscheidung.",
+  data_access: "Daten lassen sich nur an Aufgaben-Schritte binden.",
+  input_mask: "Eine Eingabemaske gibt es nur an Aufgaben-Schritten.",
+  service: "Ein Dienst lässt sich nur an Aufgaben-Schritte binden.",
+  staff_rule: "Bearbeiter lassen sich nur Aufgaben-Schritten zuordnen.",
+  subprocess_convert: "Nur ein Aufgaben-Schritt lässt sich in einen Teilprozess umwandeln.",
+  subprocess: "Das ist kein Teilprozess-Schritt.",
+  value_class: "Eine Wertklasse tragen nur Schritte und Teilprozesse.",
+  automation: "Eine Automatik lässt sich nur an Aufgaben-Schritten einstellen.",
+  priority: "Eine Priorität tragen nur Schritte und Teilprozesse.",
+  mail: "Eine E-Mail-Benachrichtigung gibt es nur an Aufgaben-Schritten.",
+  time_constraint: "Zeitvorgaben tragen nur Schritte und Teilprozesse.",
+};
+
 const FINDING_TEXTS = {
   "D1.read-before-write": (p) => ({
     text: `„${p.step}“ würde „${p.element}“ lesen, bevor es auf jedem Weg geschrieben wurde.`,
     hint: `Den Schritt hinter einen Schritt legen, der „${p.element}“ schreibt – oder die Bindung nicht als Pflicht setzen.`,
   }),
+  "K2.start-count": (p) => ({ text: `Ein Prozess braucht genau einen Start, hier sind es ${p.count}.` }),
+  "K2.end-count": (p) => ({ text: `Ein Prozess braucht genau ein Ende, hier sind es ${p.count}.` }),
   "K1.unbalanced": (p) => ({
     text: `Die Verzweigungen sind nicht vollständig: ${p.splits}× ${p.kind}, aber ${p.joins} passende Zusammenführung(en).`,
     hint: "Jede Verzweigung braucht genau eine Zusammenführung derselben Art.",
@@ -398,6 +426,33 @@ const FINDING_TEXTS = {
   "K1.unpaired": (p) => ({
     text: `Zu „${p.step}“ gibt es keine eindeutig passende Zusammenführung.`,
     hint: "Das Modell ist nicht sauber blockstrukturiert (typisch bei importiertem BPMN).",
+  }),
+  "K3.unreachable": (p) => ({
+    text: `„${p.step}“ ist vom Start aus nicht erreichbar.`,
+    hint: "Typisch bei importiertem BPMN: der Schritt hängt an keiner Verbindung vom Start.",
+  }),
+  "K3.dead-end": (p) => ({
+    text: `Von „${p.step}“ aus geht es nicht zum Ende weiter (Sackgasse).`,
+    hint: "Jeder Schritt braucht einen Weg zum Ende.",
+  }),
+  "D2.parallel-writes": (p) => ({
+    text: `„${p.a}“ und „${p.b}“ laufen parallel und schreiben beide „${p.element}“ – welcher Wert gilt, wäre Zufall.`,
+    hint: "Nur einen der beiden Schritte schreiben lassen oder die Schritte nacheinander anordnen.",
+  }),
+  "Z2.nobody": (p) => ({
+    text: `Für „${p.step}“ gibt es niemanden, der die Bearbeiterregel erfüllt.`,
+    hint: "Der Rolle oder Abteilung mindestens eine Person zuordnen.",
+  }),
+  "Z3.reference-not-before": (p) => ({
+    text: `„${p.step}“ bezieht sich auf die Person aus „${p.ref}“ – dieser Schritt läuft aber nicht auf jedem Weg vorher.`,
+    hint: "Einen Schritt wählen, der garantiert vorher erledigt ist.",
+  }),
+  "Z4.automatic-with-staff": (p) => ({
+    text: `„${p.step}“ läuft automatisch und darf deshalb keine Bearbeiterzuordnung haben.`,
+  }),
+  "T2.deadline": (p) => ({
+    text: `Der längste Weg dauert ${fmtDuration(Number(p.critical))} und passt nicht in den Termin von ${fmtDuration(Number(p.deadline))}.`,
+    hint: "Soll-Zeiten der Schritte verkürzen oder den Termin verlängern.",
   }),
   "B2.no-staff": (p) => ({
     text: `„${p.step}“ hat keine Bearbeiterzuordnung und würde in keiner Arbeitsliste erscheinen.`,
@@ -435,6 +490,97 @@ const FINDING_TEXTS = {
     text: `„${p.step}“ braucht „${p.element}“, aber die Instanz hat dafür keinen Wert, und kein späterer Schritt liefert ihn.`,
     hint: `Einen Startwert für „${p.element}“ angeben.`,
   }),
+  // --- Vorbedingungen der Operationen (Regel OP) -------------------------
+  "OP.not-found": (p) => ({
+    text: `${OP_KIND_NAMES[p.kind] || "Das Element"} „${p.name}“ gibt es nicht (mehr).`,
+    hint: "Ansicht neu laden – vermutlich wurde es inzwischen geändert oder entfernt.",
+  }),
+  "OP.already-exists": (p) => ({
+    text: `${OP_KIND_NAMES[p.kind] || "Ein Element"} mit der Kennung „${p.name}“ gibt es schon.`,
+    hint: "Eine andere Kennung wählen oder das vorhandene Element verwenden.",
+  }),
+  "OP.after-end": () => ({ text: "Hinter dem Ende lässt sich nichts einfügen.", hint: "Am „+“ vor dem Ende einfügen." }),
+  "OP.anchor-not-serial": () => ({
+    text: "Hier lässt sich nicht einfügen – der Schritt hat mehrere Nachfolger.",
+    hint: "Das „+“ auf der Verbindungslinie verwenden, an der eingefügt werden soll.",
+  }),
+  "OP.too-few-branches": () => ({ text: "Eine Verzweigung braucht mindestens zwei Zweige." }),
+  "OP.discriminator-type": (p) => ({
+    text: p.where === "LOOP"
+      ? "Dieses Datenelement kann nicht über eine Wiederholung entscheiden."
+      : "Nach diesem Datenelement kann nicht verzweigt werden.",
+    hint: "Ein Element vom Typ Ja/Nein, Zahl oder Text wählen.",
+  }),
+  "OP.loop-discriminator-source": () => ({
+    text: "Über die Wiederholung kann nur ein Datenelement des Vorgangs entscheiden, kein extern geliefertes.",
+  }),
+  "OP.loop-discriminator-type": () => ({
+    text: "Für diese Wiederholungsbedingung muss das Merkmal Ja/Nein sein.",
+    hint: "Ein Ja/Nein-Element wählen oder die Wiederhol-Werte angeben.",
+  }),
+  "OP.label-missing": () => ({ text: "Der neue Schritt braucht eine Bezeichnung." }),
+  "OP.sync-self": () => ({ text: "Ein Schritt kann nicht auf sich selbst warten." }),
+  "OP.sync-exists": () => ({ text: "Diese Warte-Beziehung gibt es schon." }),
+  "OP.sync-missing": () => ({ text: "Diese Warte-Beziehung gibt es nicht." }),
+  "OP.sync-sets-empty": () => ({ text: "Für einen Querschritt bitte Schritte davor und danach wählen." }),
+  "OP.sync-not-parallel": () => ({
+    text: "Warte-Beziehungen gibt es nur zwischen Schritten paralleler Zweige desselben Blocks.",
+  }),
+  "OP.move-self": () => ({ text: "Ein Schritt kann nicht hinter sich selbst verschoben werden." }),
+  "OP.not-serial": () => ({
+    text: "Dieser Schritt steht an einer Verzweigung und lässt sich so nicht verschieben oder entfernen.",
+    hint: "Den ganzen Block über seine Verzweigung bearbeiten.",
+  }),
+  "OP.sole-loop-node": () => ({
+    text: "Das ist der einzige Schritt der Schleife.",
+    hint: "Erst einen weiteren Schritt in die Schleife einfügen oder die Schleife als Ganzes entfernen.",
+  }),
+  "OP.sole-parallel-node": () => ({
+    text: "Das ist der einzige Schritt dieses parallelen Zweigs.",
+    hint: "Erst einen weiteren Schritt einfügen oder den Zweig entfernen.",
+  }),
+  "OP.last-xor-branch": () => ({
+    text: "Eine Entscheidung braucht mindestens einen Zweig mit Schritten.",
+    hint: "Die ganze Verzweigung über die Entscheidung entfernen.",
+  }),
+  "OP.delete-start-end": () => ({ text: "Start und Ende lassen sich nicht entfernen." }),
+  "OP.delete-split-instead": () => ({
+    text: "Eine Zusammenführung wird nicht einzeln entfernt.",
+    hint: "Die Verzweigung auswählen und entfernen – dann geht der ganze Block auf einmal.",
+  }),
+  "OP.delete-loop-instead": () => ({
+    text: "Ein Schleifenende wird nicht einzeln entfernt.",
+    hint: "Den Schleifenanfang auswählen und entfernen – dann geht die ganze Schleife auf einmal.",
+  }),
+  "OP.block-unclear": () => ({
+    text: "Zu dieser Verzweigung lässt sich der Block nicht eindeutig bestimmen.",
+    hint: "Das Modell ist nicht sauber blockstrukturiert – bitte melden, wenn es so entstanden ist.",
+  }),
+  "OP.no-empty-branch": () => ({ text: "Diese Entscheidung hat keinen leeren Zweig." }),
+  "OP.no-data-access": () => ({ text: "Diese Datenbindung gibt es an diesem Schritt nicht." }),
+  "OP.mask-empty": () => ({ text: "Eine Eingabemaske braucht mindestens ein Feld." }),
+  "OP.mask-duplicate-field": () => ({
+    text: "Ein Datenelement steht zweimal in der Maske.",
+    hint: "Jedes Element nur einmal aufnehmen.",
+  }),
+  "OP.mask-columns": () => ({ text: "Eine Maske hat eine bis drei Spalten." }),
+  "OP.no-mask": () => ({ text: "Dieser Schritt hat keine Eingabemaske." }),
+  "OP.org-cycle": () => ({
+    text: "So entstünde eine Schleife in der Abteilungsstruktur.",
+    hint: "Eine Abteilung kann nicht unter sich selbst oder unter einer ihrer Unterabteilungen hängen.",
+  }),
+  "OP.shared-org": () => ({
+    text: "Dieses Schema nutzt eine geteilte Organisation.",
+    hint: "Rollen, Abteilungen und Personen dort pflegen – die Änderung gilt dann für alle verknüpften Schemata.",
+  }),
+  "OP.no-service": () => ({ text: "Dieser Schritt hat keinen Dienst." }),
+  "OP.no-staff-rule": () => ({ text: "Dieser Schritt hat keine Bearbeiterzuordnung." }),
+  "OP.no-subprocess": () => ({ text: "Dieser Schritt ist an keinen Teilprozess gebunden." }),
+  "OP.automation-needs-service": () => ({
+    text: "Für eine Automatik braucht der Schritt zuerst einen Dienst.",
+    hint: "Unter „Dienst“ einen Dienst zuweisen, dann die Automatik einstellen.",
+  }),
+  "OP.wrong-node-kind": (p) => ({ text: OP_WRONG_KIND[p.what] || "Das geht an diesem Knoten nicht." }),
   "M5.adhoc": () => ({
     text: "Diese Instanz wurde einzeln angepasst (Ad-hoc-Änderung) und wird deshalb nicht automatisch migriert.",
     hint: "Sie läuft sicher auf ihrer Version weiter.",

@@ -1487,3 +1487,25 @@ def test_mask_layout_is_shared_and_the_designer_keeps_help_texts() -> None:
     assert designer.count("help_text: f.help_text || null") == 2  # load + save
     css = _css_without_comments()
     assert re.search(r"@media \(max-width: 720px\)\s*\{\s*\.mask-cols", css)
+
+
+def test_every_operation_precondition_carries_a_code_the_client_can_word() -> None:
+    """Die Vorbedingungen der Operationen (Regel OP) erschienen englisch.
+
+    Jede OP-Meldung im Kern traegt einen Code; jede Objekt- und Knotenart, die als
+    Parameter mitkommt, hat einen deutschen Namen im Client."""
+
+    ops_path = Path(__file__).resolve().parents[1] / "src" / "procworks" / "operations.py"
+    ops_src = ops_path.read_text(encoding="utf-8")
+    blocks = re.findall(r"ValidationFinding\((.*?)\n\s*\)", ops_src, re.S)
+    op_blocks = [b for b in blocks if 'rule="OP"' in b]
+    assert op_blocks, "keine OP-Befunde gefunden -- Waechter angleichen"
+    assert all("code=" in b for b in op_blocks), "OP-Befund ohne code= in operations.py"
+
+    app = APP_JS.read_text(encoding="utf-8")
+    kinds = set(re.findall(r'"kind": "(\w+)"', ops_src))
+    whats = set(re.findall(r'"what": "(\w+)"', ops_src))
+    kind_map = app[app.index("const OP_KIND_NAMES = {"): app.index("const OP_WRONG_KIND = {")]
+    what_map = app[app.index("const OP_WRONG_KIND = {"): app.index("const FINDING_TEXTS = {")]
+    assert not {k for k in kinds if f"{k}:" not in kind_map}, "Objektart ohne deutschen Namen"
+    assert not {w for w in whats if f"{w}:" not in what_map}, "Knotenart ohne deutschen Text"

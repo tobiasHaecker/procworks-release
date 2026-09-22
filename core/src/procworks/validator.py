@@ -247,11 +247,21 @@ def _check_k2_endpoints_and_degrees(schema: ProcessSchema) -> list[ValidationFin
     ends = [n for n in schema.nodes.values() if n.type is NodeType.END]
     if len(starts) != 1:
         findings.append(
-            ValidationFinding(rule="K2", message=f"expected exactly one START, found {len(starts)}")
+            ValidationFinding(
+                rule="K2",
+                message=f"expected exactly one START, found {len(starts)}",
+                code="K2.start-count",
+                params={"count": str(len(starts))},
+            )
         )
     if len(ends) != 1:
         findings.append(
-            ValidationFinding(rule="K2", message=f"expected exactly one END, found {len(ends)}")
+            ValidationFinding(
+                rule="K2",
+                message=f"expected exactly one END, found {len(ends)}",
+                code="K2.end-count",
+                params={"count": str(len(ends))},
+            )
         )
 
     for node in schema.nodes.values():
@@ -871,13 +881,21 @@ def _check_k3_reachability(schema: ProcessSchema) -> list[ValidationFinding]:
         if node.id not in forward:
             findings.append(
                 ValidationFinding(
-                    rule="K3", node_id=node.id, message="node not reachable from START"
+                    rule="K3",
+                    node_id=node.id,
+                    message="node not reachable from START",
+                    code="K3.unreachable",
+                    params={"step": node_name(schema, node.id)},
                 )
             )
         if node.id not in backward:
             findings.append(
                 ValidationFinding(
-                    rule="K3", node_id=node.id, message="node cannot reach END (dead end)"
+                    rule="K3",
+                    node_id=node.id,
+                    message="node cannot reach END (dead end)",
+                    code="K3.dead-end",
+                    params={"step": node_name(schema, node.id)},
                 )
             )
     return findings
@@ -1143,6 +1161,12 @@ def _check_d2_concurrent_writes(schema: ProcessSchema) -> list[ValidationFinding
                                 f"concurrent writes to data element '{name}' on "
                                 f"parallel AND branches ({a}, {b})"
                             ),
+                            code="D2.parallel-writes",
+                            params={
+                                "element": name,
+                                "a": node_name(schema, a),
+                                "b": node_name(schema, b),
+                            },
                         )
                     )
     return findings
@@ -2072,6 +2096,8 @@ def _check_z4_service(schema: ProcessSchema) -> list[ValidationFinding]:
                     rule="Z4",
                     node_id=node_id,
                     message="automatic step must not carry a staff rule (BZR)",
+                    code="Z4.automatic-with-staff",
+                    params={"step": node_name(schema, node_id)},
                 )
             )
     return findings
@@ -2380,6 +2406,8 @@ def _check_z2_resolvable(schema: ProcessSchema) -> list[ValidationFinding]:
                     rule="Z2",
                     node_id=node_id,
                     message="staff rule cannot resolve to any agent in the org model",
+                    code="Z2.nobody",
+                    params={"step": node_name(schema, node_id)},
                 )
             )
     return findings
@@ -2471,6 +2499,11 @@ def _check_z3_backrefs(schema: ProcessSchema) -> list[ValidationFinding]:
                             f"NodePerformingAgent('{ref}') is not guaranteed to run "
                             f"before this node on all paths"
                         ),
+                        code="Z3.reference-not-before",
+                        params={
+                            "step": node_name(schema, node_id),
+                            "ref": node_name(schema, ref),
+                        },
                     )
                 )
     return findings
@@ -3244,6 +3277,11 @@ def _check_temporal(schema: ProcessSchema) -> list[ValidationFinding]:
                         f"critical path of {critical:g}s exceeds the deadline of "
                         f"{schema.deadline_seconds:g}s"
                     ),
+                    code="T2.deadline",
+                    params={
+                        "critical": f"{critical:g}",
+                        "deadline": f"{schema.deadline_seconds:g}",
+                    },
                 )
             )
     return findings

@@ -96,6 +96,20 @@ docker compose -f deploy/docker-compose.full.yml up --build -d
 docker compose -f deploy/docker-compose.full.yml logs api | grep "Initial admin"
 ```
 
+### Ist alles bereit? Der Selbsttest
+
+Nach dem Start prüft **ein Befehl**, ob die Installation wirklich einsatzbereit
+ist – mit Zeitangabe je Schritt: Dienste laufen, Server und Oberfläche antworten,
+das Start-Passwort liegt vor, eine Sicherung lässt sich anlegen **und** wieder
+einspielen (geprüft in einer Wegwerf-Datenbank, Ihre Daten bleiben unberührt).
+
+```bash
+sh deploy/selftest.sh
+```
+
+Unter Windows in **WSL** oder **Git Bash** aus dem Ordner `C:\ProcWorks`
+ausführen. Am Ende steht „Ergebnis: bestanden" oder, was genau fehlt.
+
 ### Sofort ausprobieren: Beispieldaten laden
 
 Damit alle Funktionen **sofort greifbar** sind, bringt ProcWorks fertige

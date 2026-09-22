@@ -131,6 +131,7 @@ def _require_local_org(schema: ProcessSchema) -> None:
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.shared-org",
                     message=(
                         "schema uses a shared organisation; edit it via the shared "
                         "org model instead"
@@ -144,7 +145,14 @@ def _require_node(schema: ProcessSchema, node_id: str) -> Node:
     node = schema.nodes.get(node_id)
     if node is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"node '{node_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"node '{node_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "node", "name": str(node_id)},
+                )
+            ]
         )
     return node
 
@@ -156,6 +164,7 @@ def _single_outgoing(schema: ProcessSchema, node_id: str) -> ControlEdge:
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.anchor-not-serial",
                     node_id=node_id,
                     message=(
                         f"insertion anchor must have exactly one outgoing edge (has {len(out)})"
@@ -179,7 +188,14 @@ def serial_insert(schema: ProcessSchema, label: str, after_node_id: str) -> Proc
     anchor = _require_node(candidate, after_node_id)
     if anchor.type is NodeType.END:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", node_id=after_node_id, message="cannot insert after END")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=after_node_id,
+                    message="cannot insert after END",
+                    code="OP.after-end",
+                )
+            ]
         )
     edge = _single_outgoing(candidate, after_node_id)
     successor_id = edge.target
@@ -203,7 +219,13 @@ def parallel_insert(
 
     if len(branch_labels) < 2:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message="parallel_insert requires at least 2 branches")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message="parallel_insert requires at least 2 branches",
+                    code="OP.too-few-branches",
+                )
+            ]
         )
     return _insert_block(schema, after_node_id, NodeType.AND_SPLIT, branch_labels)
 
@@ -253,7 +275,9 @@ def conditional_insert(
         raise CorrectnessError(
             [
                 ValidationFinding(
-                    rule="OP", message="conditional_insert requires at least 2 branches"
+                    rule="OP",
+                    message="conditional_insert requires at least 2 branches",
+                    code="OP.too-few-branches",
                 )
             ]
         )
@@ -263,7 +287,14 @@ def conditional_insert(
     anchor = _require_node(candidate, after_node_id)
     if anchor.type is NodeType.END:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", node_id=after_node_id, message="cannot insert after END")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=after_node_id,
+                    message="cannot insert after END",
+                    code="OP.after-end",
+                )
+            ]
         )
     element = candidate.data_elements.get(discriminator)
     if element is None:
@@ -271,6 +302,8 @@ def conditional_insert(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(discriminator)},
                     message=f"unknown discriminator data element '{discriminator}'",
                 )
             ]
@@ -281,6 +314,8 @@ def conditional_insert(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.discriminator-type",
+                    params={"where": "XOR"},
                     message=(
                         f"data type {element.data_type.value} "
                         "cannot be used as an XOR discriminator"
@@ -338,7 +373,14 @@ def _insert_block(
     anchor = _require_node(candidate, after_node_id)
     if anchor.type is NodeType.END:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", node_id=after_node_id, message="cannot insert after END")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=after_node_id,
+                    message="cannot insert after END",
+                    code="OP.after-end",
+                )
+            ]
         )
     edge = _single_outgoing(candidate, after_node_id)
     successor_id = edge.target
@@ -388,6 +430,8 @@ def _build_loop_decision(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(discriminator)},
                     message=f"loop discriminator '{discriminator}' does not exist",
                 )
             ]
@@ -397,6 +441,7 @@ def _build_loop_decision(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.loop-discriminator-source",
                     message=(
                         f"loop discriminator '{element.name}' must be an "
                         "INSTANCE element"
@@ -410,6 +455,7 @@ def _build_loop_decision(
                 [
                     ValidationFinding(
                         rule="OP",
+                        code="OP.loop-discriminator-type",
                         message=(
                             f"loop discriminator '{element.name}' must be BOOLEAN "
                             "unless repeat/exit cells are given"
@@ -428,6 +474,8 @@ def _build_loop_decision(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.discriminator-type",
+                    params={"where": "LOOP"},
                     message=(
                         f"data type {element.data_type.value} cannot be used "
                         "as a loop discriminator"
@@ -493,7 +541,10 @@ def insert_loop(
         raise CorrectnessError(
             [
                 ValidationFinding(
-                    rule="OP", node_id=after_node_id, message="cannot insert after END"
+                    rule="OP",
+                    node_id=after_node_id,
+                    message="cannot insert after END",
+                    code="OP.after-end",
                 )
             ]
         )
@@ -558,6 +609,8 @@ def set_loop_decision(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "loop_decision"},
                     node_id=loop_end_id,
                     message="a loop decision can only be set on a LOOP_END node",
                 )
@@ -593,6 +646,7 @@ def add_sync_edge(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.sync-self",
                     node_id=source_id,
                     message="a sync edge cannot connect a node with itself",
                 )
@@ -606,6 +660,7 @@ def add_sync_edge(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.sync-exists",
                     node_id=source_id,
                     message="this sync edge already exists",
                 )
@@ -639,6 +694,7 @@ def remove_sync_edge(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.sync-missing",
                     node_id=source_id,
                     message="no such sync edge",
                 )
@@ -714,13 +770,20 @@ def insert_between_node_sets(
     _require_editable(candidate)
     if not label.strip():
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message="the new activity needs a label")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message="the new activity needs a label",
+                    code="OP.label-missing",
+                )
+            ]
         )
     if not source_ids or not target_ids:
         raise CorrectnessError(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.sync-sets-empty",
                     message="insert_between_node_sets needs a non-empty source "
                     "and target set",
                 )
@@ -734,6 +797,8 @@ def insert_between_node_sets(
                 [
                     ValidationFinding(
                         rule="OP",
+                        code="OP.wrong-node-kind",
+                        params={"what": "sync"},
                         node_id=node_id,
                         message="source/target sets may only contain ACTIVITY nodes",
                     )
@@ -745,6 +810,7 @@ def insert_between_node_sets(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.sync-not-parallel",
                     message=(
                         "all sources and targets must lie inside one common "
                         "AND block (K4)"
@@ -786,6 +852,8 @@ def rename_node(schema: ProcessSchema, node_id: str, label: str) -> ProcessSchem
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "rename"},
                     node_id=node_id,
                     message="only ACTIVITY or SUBPROCESS nodes can be renamed",
                 )
@@ -837,6 +905,8 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "move"},
                     node_id=node_id,
                     message="only ACTIVITY or SUBPROCESS nodes can be moved",
                 )
@@ -847,6 +917,7 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.move-self",
                     node_id=node_id,
                     message="cannot move a node after itself",
                 )
@@ -857,7 +928,10 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
         raise CorrectnessError(
             [
                 ValidationFinding(
-                    rule="OP", node_id=after_node_id, message="cannot insert after END"
+                    rule="OP",
+                    node_id=after_node_id,
+                    message="cannot insert after END",
+                    code="OP.after-end",
                 )
             ]
         )
@@ -869,6 +943,7 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.not-serial",
                     node_id=node_id,
                     message=(
                         f"node '{node_id}' is not on a serial stretch (one in/one out)"
@@ -889,6 +964,7 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.sole-loop-node",
                     node_id=node_id,
                     message=(
                         "cannot move the sole node of a loop body; "
@@ -913,6 +989,7 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
                 [
                     ValidationFinding(
                         rule="OP",
+                        code="OP.sole-parallel-node",
                         node_id=node_id,
                         message=(
                             "cannot move the sole node of a parallel branch; "
@@ -928,6 +1005,7 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
                 [
                     ValidationFinding(
                         rule="OP",
+                        code="OP.last-xor-branch",
                         node_id=predecessor_id,
                         message=(
                             "an XOR split must keep at least one non-empty branch; "
@@ -980,7 +1058,14 @@ def _matching_block(schema: ProcessSchema, split_id: str) -> tuple[str, set[str]
         matching_join, branches = block_join(schema, split_id)
     except ValueError as exc:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", node_id=split_id, message=str(exc))]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=split_id,
+                    message=str(exc),
+                    code="OP.block-unclear",
+                )
+            ]
         ) from exc
     inner: set[str] = set().union(*branches) if branches else set()
     return matching_join, inner
@@ -1057,6 +1142,7 @@ def _empty_out_xor_branch(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.last-xor-branch",
                     node_id=split_id,
                     message=(
                         "an XOR split must keep at least one non-empty branch; "
@@ -1171,7 +1257,10 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
         raise CorrectnessError(
             [
                 ValidationFinding(
-                    rule="OP", node_id=node_id, message="cannot delete START or END"
+                    rule="OP",
+                    node_id=node_id,
+                    message="cannot delete START or END",
+                    code="OP.delete-start-end",
                 )
             ]
         )
@@ -1180,6 +1269,7 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.delete-split-instead",
                     node_id=node_id,
                     message="delete the opening split to remove the whole branch block",
                 )
@@ -1190,6 +1280,7 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.delete-loop-instead",
                     node_id=node_id,
                     message="delete the LOOP_START to remove the whole loop block",
                 )
@@ -1216,6 +1307,7 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
                 [
                     ValidationFinding(
                         rule="OP",
+                        code="OP.not-serial",
                         node_id=node_id,
                         message=(
                             f"node '{node_id}' is not on a serial stretch "
@@ -1299,6 +1391,8 @@ def remove_empty_branch(schema: ProcessSchema, split_id: str) -> ProcessSchema:
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "empty_branch"},
                     node_id=split_id,
                     message="only an XOR split can carry an empty branch",
                 )
@@ -1314,6 +1408,7 @@ def remove_empty_branch(schema: ProcessSchema, split_id: str) -> ProcessSchema:
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.no-empty-branch",
                     node_id=split_id,
                     message="this XOR split has no empty branch to remove",
                 )
@@ -1371,7 +1466,14 @@ def add_data_element(
     eid = element_id or _new_id("data")
     if eid in candidate.data_elements:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"data element '{eid}' already exists")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"data element '{eid}' already exists",
+                    code="OP.already-exists",
+                    params={"kind": "data_element", "name": str(eid)},
+                )
+            ]
         )
     candidate.data_elements[eid] = DataElement(id=eid, name=name, data_type=data_type)
     return raise_if_invalid(candidate)
@@ -1399,7 +1501,14 @@ def update_data_element(
     element = candidate.data_elements.get(element_id)
     if element is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"data element '{element_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"data element '{element_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(element_id)},
+                )
+            ]
         )
     if name is not None:
         element.name = name
@@ -1421,7 +1530,14 @@ def reset_data_element_source(schema: ProcessSchema, element_id: str) -> Process
     element = candidate.data_elements.get(element_id)
     if element is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"data element '{element_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"data element '{element_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(element_id)},
+                )
+            ]
         )
     element.source = DataSourceKind.INSTANCE
     element.external = None
@@ -1446,7 +1562,14 @@ def delete_data_element(schema: ProcessSchema, element_id: str) -> ProcessSchema
     _require_editable(candidate)
     if element_id not in candidate.data_elements:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"data element '{element_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"data element '{element_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(element_id)},
+                )
+            ]
         )
     del candidate.data_elements[element_id]
     candidate.data_accesses = [
@@ -1485,6 +1608,8 @@ def connect_data(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "data_access"},
                     node_id=node_id,
                     message="data access is only allowed on ACTIVITY nodes",
                 )
@@ -1492,7 +1617,14 @@ def connect_data(
         )
     if element_id not in candidate.data_elements:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"data element '{element_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"data element '{element_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(element_id)},
+                )
+            ]
         )
     candidate.data_accesses.append(
         DataAccess(
@@ -1541,6 +1673,7 @@ def disconnect_data(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.no-data-access",
                     node_id=node_id,
                     message=(
                         f"no data access for element '{element_id}' on node '{node_id}'"
@@ -1615,6 +1748,8 @@ def set_form(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "input_mask"},
                     node_id=node_id,
                     message="input masks are only allowed on ACTIVITY nodes",
                 )
@@ -1625,6 +1760,7 @@ def set_form(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.mask-empty",
                     node_id=node_id,
                     message="an input mask needs at least one field",
                 )
@@ -1639,6 +1775,8 @@ def set_form(
                 [
                     ValidationFinding(
                         rule="OP",
+                        code="OP.not-found",
+                        params={"kind": "data_element", "name": str(spec.element_id)},
                         node_id=node_id,
                         message=f"data element '{spec.element_id}' does not exist",
                     )
@@ -1649,6 +1787,7 @@ def set_form(
                 [
                     ValidationFinding(
                         rule="OP",
+                        code="OP.mask-duplicate-field",
                         node_id=node_id,
                         message=(
                             f"data element '{spec.element_id}' is bound by more than "
@@ -1694,6 +1833,7 @@ def set_form(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.mask-columns",
                     node_id=node_id,
                     message=f"a mask can have 1 to 3 columns, not {columns}",
                 )
@@ -1720,6 +1860,7 @@ def delete_form(schema: ProcessSchema, node_id: str) -> ProcessSchema:
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.no-mask",
                     node_id=node_id,
                     message=f"node '{node_id}' has no input mask",
                 )
@@ -1753,7 +1894,14 @@ def register_connector(
     cid = connector_id or _new_id("connector")
     if cid in candidate.connectors:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"connector '{cid}' already exists")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"connector '{cid}' already exists",
+                    code="OP.already-exists",
+                    params={"kind": "connector", "name": str(cid)},
+                )
+            ]
         )
     candidate.connectors[cid] = ConnectorDescriptor(id=cid, name=name, kind=kind)
     return raise_if_invalid(candidate)
@@ -1780,7 +1928,14 @@ def bind_external_data(
     element = candidate.data_elements.get(element_id)
     if element is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"data element '{element_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"data element '{element_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(element_id)},
+                )
+            ]
         )
     element.source = DataSourceKind.EXTERNAL
     element.select = None
@@ -1826,7 +1981,14 @@ def bind_sql_select(
     element = candidate.data_elements.get(element_id)
     if element is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"data element '{element_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"data element '{element_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(element_id)},
+                )
+            ]
         )
     element.source = DataSourceKind.EXTERNAL
     element.external = None
@@ -1875,7 +2037,14 @@ def bind_sql_write(
     element = candidate.data_elements.get(element_id)
     if element is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"data element '{element_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"data element '{element_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(element_id)},
+                )
+            ]
         )
     element.source = DataSourceKind.EXTERNAL
     element.external = None
@@ -1900,7 +2069,14 @@ def add_role(schema: ProcessSchema, name: str, role_id: str | None = None) -> Pr
     rid = role_id or _new_id("role")
     if rid in candidate.org_model.roles:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"role '{rid}' already exists")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"role '{rid}' already exists",
+                    code="OP.already-exists",
+                    params={"kind": "role", "name": str(rid)},
+                )
+            ]
         )
     candidate.org_model.roles[rid] = Role(id=rid, name=name)
     return raise_if_invalid(candidate)
@@ -1925,11 +2101,25 @@ def add_org_unit(
     uid = org_unit_id or _new_id("unit")
     if uid in candidate.org_model.org_units:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"org unit '{uid}' already exists")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"org unit '{uid}' already exists",
+                    code="OP.already-exists",
+                    params={"kind": "org_unit", "name": str(uid)},
+                )
+            ]
         )
     if parent_id is not None and parent_id not in candidate.org_model.org_units:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"parent org unit '{parent_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"parent org unit '{parent_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "org_unit", "name": str(parent_id)},
+                )
+            ]
         )
     candidate.org_model.org_units[uid] = OrgUnit(
         id=uid, name=name, parent_id=parent_id, manager_id=manager_id
@@ -1960,17 +2150,38 @@ def add_agent(
     aid = agent_id or _new_id("agent")
     if aid in candidate.org_model.agents:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"agent '{aid}' already exists")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"agent '{aid}' already exists",
+                    code="OP.already-exists",
+                    params={"kind": "agent", "name": str(aid)},
+                )
+            ]
         )
     roles = role_ids or []
     for role_id in roles:
         if role_id not in candidate.org_model.roles:
             raise CorrectnessError(
-                [ValidationFinding(rule="OP", message=f"role '{role_id}' does not exist")]
+                [
+                    ValidationFinding(
+                        rule="OP",
+                        message=f"role '{role_id}' does not exist",
+                        code="OP.not-found",
+                        params={"kind": "role", "name": str(role_id)},
+                    )
+                ]
             )
     if org_unit_id is not None and org_unit_id not in candidate.org_model.org_units:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"org unit '{org_unit_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"org unit '{org_unit_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "org_unit", "name": str(org_unit_id)},
+                )
+            ]
         )
     candidate.org_model.agents[aid] = Agent(
         id=aid,
@@ -1998,7 +2209,14 @@ def set_org_unit_manager(
     unit = candidate.org_model.org_units.get(org_unit_id)
     if unit is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"org unit '{org_unit_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"org unit '{org_unit_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "org_unit", "name": str(org_unit_id)},
+                )
+            ]
         )
     unit.manager_id = manager_id
     return raise_if_invalid(candidate)
@@ -2020,7 +2238,14 @@ def set_role_mailbox(
     role = candidate.org_model.roles.get(role_id)
     if role is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"role '{role_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"role '{role_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "role", "name": str(role_id)},
+                )
+            ]
         )
     role.mailbox = mailbox
     return raise_if_invalid(candidate)
@@ -2041,7 +2266,14 @@ def set_unit_mailbox(
     unit = candidate.org_model.org_units.get(org_unit_id)
     if unit is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"org unit '{org_unit_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"org unit '{org_unit_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "org_unit", "name": str(org_unit_id)},
+                )
+            ]
         )
     unit.mailbox = mailbox
     return raise_if_invalid(candidate)
@@ -2065,7 +2297,14 @@ def set_org_unit_parent(
     unit = units.get(org_unit_id)
     if unit is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"org unit '{org_unit_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"org unit '{org_unit_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "org_unit", "name": str(org_unit_id)},
+                )
+            ]
         )
     if parent_id is not None:
         if parent_id not in units:
@@ -2073,13 +2312,21 @@ def set_org_unit_parent(
                 [
                     ValidationFinding(
                         rule="OP",
+                        code="OP.not-found",
+                        params={"kind": "org_unit", "name": str(parent_id)},
                         message=f"parent org unit '{parent_id}' does not exist",
                     )
                 ]
             )
         if parent_id == org_unit_id:
             raise CorrectnessError(
-                [ValidationFinding(rule="OP", message="an org unit cannot be its own parent")]
+                [
+                    ValidationFinding(
+                        rule="OP",
+                        message="an org unit cannot be its own parent",
+                        code="OP.org-cycle",
+                    )
+                ]
             )
         # Walk up from the prospective parent; hitting the unit means a cycle.
         cursor: str | None = parent_id
@@ -2090,6 +2337,7 @@ def set_org_unit_parent(
                     [
                         ValidationFinding(
                             rule="OP",
+                            code="OP.org-cycle",
                             message="move would create a cycle in the org hierarchy",
                         )
                     ]
@@ -2115,7 +2363,14 @@ def set_agent_deputy(
     agent = candidate.org_model.agents.get(agent_id)
     if agent is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"agent '{agent_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"agent '{agent_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "agent", "name": str(agent_id)},
+                )
+            ]
         )
     agent.deputy_id = deputy_id
     return raise_if_invalid(candidate)
@@ -2191,7 +2446,14 @@ def update_agent(
     agent = candidate.org_model.agents.get(agent_id)
     if agent is None:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"agent '{agent_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"agent '{agent_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "agent", "name": str(agent_id)},
+                )
+            ]
         )
     if name is not None:
         agent.name = name
@@ -2199,13 +2461,27 @@ def update_agent(
         for role_id in role_ids:
             if role_id not in candidate.org_model.roles:
                 raise CorrectnessError(
-                    [ValidationFinding(rule="OP", message=f"role '{role_id}' does not exist")]
+                    [
+                        ValidationFinding(
+                            rule="OP",
+                            message=f"role '{role_id}' does not exist",
+                            code="OP.not-found",
+                            params={"kind": "role", "name": str(role_id)},
+                        )
+                    ]
                 )
         agent.role_ids = role_ids
     if not isinstance(org_unit_id, _KeepSentinel):
         if org_unit_id is not None and org_unit_id not in candidate.org_model.org_units:
             raise CorrectnessError(
-                [ValidationFinding(rule="OP", message=f"org unit '{org_unit_id}' does not exist")]
+                [
+                    ValidationFinding(
+                        rule="OP",
+                        message=f"org unit '{org_unit_id}' does not exist",
+                        code="OP.not-found",
+                        params={"kind": "org_unit", "name": str(org_unit_id)},
+                    )
+                ]
             )
         agent.org_unit_id = org_unit_id
     if not isinstance(email, _KeepSentinel):
@@ -2236,6 +2512,8 @@ def add_activity_template(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.already-exists",
+                    params={"kind": "activity_template", "name": str(tid)},
                     message=f"activity template '{tid}' already exists",
                 )
             ]
@@ -2276,6 +2554,8 @@ def assign_service(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "service"},
                     node_id=node_id,
                     message="service can only be bound to ACTIVITY nodes",
                 )
@@ -2288,6 +2568,8 @@ def assign_service(
                 [
                     ValidationFinding(
                         rule="OP",
+                        code="OP.not-found",
+                        params={"kind": "activity_template", "name": str(template_id)},
                         node_id=node_id,
                         message=f"unknown activity template '{template_id}'",
                     )
@@ -2325,6 +2607,7 @@ def unassign_service(schema: ProcessSchema, node_id: str) -> ProcessSchema:
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.no-service",
                     node_id=node_id,
                     message=f"node '{node_id}' has no service binding",
                 )
@@ -2353,6 +2636,8 @@ def assign_staff_rule(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "staff_rule"},
                     node_id=node_id,
                     message="staff rule can only be assigned to ACTIVITY nodes",
                 )
@@ -2382,6 +2667,7 @@ def clear_staff_rule(schema: ProcessSchema, node_id: str) -> ProcessSchema:
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.no-staff-rule",
                     node_id=node_id,
                     message=f"node '{node_id}' has no staff rule",
                 )
@@ -2571,7 +2857,14 @@ def insert_subprocess(
     anchor = _require_node(candidate, after_node_id)
     if anchor.type is NodeType.END:
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", node_id=after_node_id, message="cannot insert after END")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    node_id=after_node_id,
+                    message="cannot insert after END",
+                    code="OP.after-end",
+                )
+            ]
         )
     edge = _single_outgoing(candidate, after_node_id)
     successor_id = edge.target
@@ -2609,6 +2902,7 @@ def set_subprocess_mapping(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.no-subprocess",
                     node_id=node_id,
                     message=f"node '{node_id}' has no sub-process binding",
                 )
@@ -2651,6 +2945,8 @@ def convert_activity_to_subprocess(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "subprocess_convert"},
                     node_id=node_id,
                     message="only an ACTIVITY can be converted into a sub-process",
                 )
@@ -2697,6 +2993,8 @@ def set_subprocess_binding(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "subprocess"},
                     node_id=node_id,
                     message="node is not a SUBPROCESS",
                 )
@@ -2763,7 +3061,14 @@ def unlink_follow_up(schema: ProcessSchema, link_id: str) -> ProcessSchema:
     remaining = [link for link in candidate.follow_up_links if link.id != link_id]
     if len(remaining) == len(candidate.follow_up_links):
         raise CorrectnessError(
-            [ValidationFinding(rule="OP", message=f"follow-up link '{link_id}' does not exist")]
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"follow-up link '{link_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "follow_up", "name": str(link_id)},
+                )
+            ]
         )
     candidate.follow_up_links = remaining
     return raise_if_invalid(candidate)
@@ -2791,6 +3096,8 @@ def set_value_class(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "value_class"},
                     node_id=node_id,
                     message="only ACTIVITY or SUBPROCESS nodes carry a value class",
                 )
@@ -2831,6 +3138,8 @@ def set_automation(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "automation"},
                     node_id=node_id,
                     message="automation can only be set on ACTIVITY nodes",
                 )
@@ -2842,6 +3151,7 @@ def set_automation(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.automation-needs-service",
                     node_id=node_id,
                     message="bind a service before configuring its automation",
                 )
@@ -2882,6 +3192,8 @@ def set_node_priority(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "priority"},
                     node_id=node_id,
                     message="only ACTIVITY or SUBPROCESS nodes carry a priority",
                 )
@@ -2920,6 +3232,8 @@ def set_mail_binding(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "mail"},
                     node_id=node_id,
                     message="only ACTIVITY nodes can carry a mail notification",
                 )
@@ -2955,6 +3269,8 @@ def set_time_constraint(
             [
                 ValidationFinding(
                     rule="OP",
+                    code="OP.wrong-node-kind",
+                    params={"what": "time_constraint"},
                     node_id=node_id,
                     message="only ACTIVITY or SUBPROCESS nodes carry a time constraint",
                 )

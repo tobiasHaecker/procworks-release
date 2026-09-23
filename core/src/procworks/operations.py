@@ -89,6 +89,18 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{next(_counter)}"
 
 
+def new_schema_id() -> str:
+    """Return a fresh, unused schema id (same source as ``create_empty_schema``).
+
+    Public because one boundary path needs an id *without* building a schema
+    around it: the BPMN import takes its id from the foreign document, and a
+    document that happens to name an id already in use must land on a new model
+    instead of replacing the stored one (see ``api.post_import_bpmn``).
+    """
+
+    return _new_id("schema")
+
+
 def create_empty_schema(name: str, schema_id: str | None = None) -> ProcessSchema:
     """Create the minimal correct schema: START -> END."""
 

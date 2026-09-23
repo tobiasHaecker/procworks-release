@@ -2846,19 +2846,58 @@ def get_export_bpmn(schema_id: str) -> Response:
     dependencies=[_model],
 )
 def post_import_bpmn(req: ImportBpmnRequest) -> ProcessSchema:
-    try:
-        schema = bpmn_io.import_bpmn(
-            req.xml, schema_id=req.schema_id, name=req.name, resolver=_resolver
+    """Import a BPMN document as a **new** draft (never over an existing model).
+
+    The id is the one weak spot of this entry point: ``import_bpmn`` falls back
+    to the ``<process id>`` of the *foreign* document, and a ProcWorks export
+    carries the id of the schema it came from. Re-importing an own export
+    therefore landed on that very id -- and ``_store.put`` replaced the stored
+    model with the freshly imported draft. Found while running the demo through
+    on 2026-09-23: a re-import of the leave-request export turned the
+    **released** ``urlaubsantrag`` into an unrelated draft, with running
+    instances pointing at it. No rule was broken on the way in (the import
+    validates), but R0 -- a released schema is immutable -- was circumvented by
+    *replacing* instead of editing.
+
+    Therefore: a colliding id is not honoured. Without an explicit
+    ``schema_id`` the import moves to a fresh id (an import creates a model, it
+    does not update one); with an explicit one the request is refused (409), so
+    a deliberate choice never silently lands somewhere else. The final object is
+    the validated one -- the import runs again for the new id rather than having
+    its id patched afterwards.
+    """
+
+    if req.schema_id is not None and _store.get(req.schema_id) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    f"schema '{req.schema_id}' already exists; an import creates a "
+                    "new model and never replaces a stored one"
+                ),
+                "code": "OP.already-exists",
+                "params": {"kind": "schema", "id": req.schema_id},
+            },
         )
-    except BpmnError as exc:
-        raise HTTPException(
-            status_code=422, detail={"message": str(exc)}
-        ) from exc
-    except CorrectnessError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"findings": [f.model_dump() for f in exc.findings]},
-        ) from exc
+
+    def run(schema_id: str | None) -> ProcessSchema:
+        try:
+            return bpmn_io.import_bpmn(
+                req.xml, schema_id=schema_id, name=req.name, resolver=_resolver
+            )
+        except BpmnError as exc:
+            raise HTTPException(
+                status_code=422, detail={"message": str(exc)}
+            ) from exc
+        except CorrectnessError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"findings": [f.model_dump() for f in exc.findings]},
+            ) from exc
+
+    schema = run(req.schema_id)
+    if req.schema_id is None and _store.get(schema.id) is not None:
+        schema = run(ops.new_schema_id())
     return _store.put(schema)
 
 

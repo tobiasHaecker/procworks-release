@@ -11,6 +11,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 
 import pytest
+from staffing import staff_via_api
 
 from procworks import (
     AccessMode,
@@ -518,3 +519,66 @@ def test_round_trip_keeps_the_annotation_layers() -> None:
 
     assert restored.time_constraints == schema.time_constraints
     assert restored.node_priorities == schema.node_priorities
+
+
+# --- Import ueberschreibt nie ein gespeichertes Modell ----------------------
+
+
+def test_import_of_an_own_export_never_replaces_the_source_schema() -> None:
+    """Beim Durchtesten der Demo gefunden (2026-09-23).
+
+    ``import_bpmn`` nimmt seine Id aus dem ``<process id>`` des *fremden*
+    Dokuments -- ein ProcWorks-Export traegt dort die Id des Schemas, aus dem er
+    stammt. Der Reimport landete damit auf genau dieser Id, und ``_store.put``
+    ersetzte das gespeicherte Modell durch den frisch importierten **Entwurf**:
+    Aus dem freigegebenen „Urlaubsantrag" wurde ein unverwandter Entwurf, und
+    laufende Vorgaenge zeigten darauf. Auf dem Weg hinein war keine Regel
+    verletzt (der Import validiert) -- umgangen war R0, die Unveraenderlichkeit
+    eines freigegebenen Schemas, durch *Ersetzen* statt Bearbeiten.
+    """
+
+    from fastapi.testclient import TestClient
+
+    from procworks.api import app
+
+    client = TestClient(app)
+    sid = client.post("/schemas", json={"name": "Quelle"}).json()["id"]
+    client.post(
+        f"/schemas/{sid}/serial-insert",
+        json={"label": "Erfassen", "after_node_id": "start"},
+    )
+    staff_via_api(client, sid)
+    assert client.post(f"/schemas/{sid}/release").status_code == 200
+    xml = client.get(f"/schemas/{sid}/bpmn").text
+    assert f'id="{sid}"' in xml, "der Export traegt die Id der Quelle -- genau darum ging es"
+
+    imported = client.post("/bpmn-import", json={"xml": xml, "name": "Reimport"})
+
+    assert imported.status_code == 201
+    assert imported.json()["id"] != sid, "der Import hat die Quelle ueberschrieben"
+    # Die Quelle ist unberuehrt: derselbe Name, weiterhin freigegeben.
+    source = client.get(f"/schemas/{sid}").json()
+    assert source["name"] == "Quelle"
+    assert source["lifecycle_state"] == "RELEASED"
+    # ... und der Import ist wirklich angekommen, als eigener Entwurf.
+    reimported = client.get(f"/schemas/{imported.json()['id']}").json()
+    assert reimported["name"] == "Reimport" and reimported["lifecycle_state"] == "ENTWURF"
+
+
+def test_import_refuses_an_explicitly_taken_id_instead_of_moving_it() -> None:
+    """Eine ausdrueckliche Id darf nicht still woanders landen -- und nichts
+    ueberschreiben. Also: Absage."""
+
+    from fastapi.testclient import TestClient
+
+    from procworks.api import app
+
+    client = TestClient(app)
+    sid = client.post("/schemas", json={"name": "Belegt"}).json()["id"]
+    xml = client.get(f"/schemas/{sid}/bpmn").text
+
+    resp = client.post("/bpmn-import", json={"xml": xml, "schema_id": sid, "name": "Neu"})
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "OP.already-exists"
+    assert client.get(f"/schemas/{sid}").json()["name"] == "Belegt"

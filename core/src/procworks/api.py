@@ -2790,6 +2790,74 @@ def get_org_models() -> list[OrgModel]:
     return [org for oid in _org_store.list_ids() if (org := _org_store.get(oid)) is not None]
 
 
+class DirectoryAgent(BaseModel):
+    """One agent of the cross-model people directory (display data only).
+
+    Carries where the entry comes from so a caller can tell a shared org model
+    (``org_model_id``) from a model-local one (``schema_id``). No correctness
+    rule reads this -- staffing is always resolved against the org model of the
+    *schema in question*.
+    """
+
+    agent_id: str
+    name: str
+    email: str | None = None
+    deputy_id: str | None = None
+    org_model_id: str | None = None
+    schema_id: str | None = None
+
+
+@app.get("/directory/agents", response_model=list[DirectoryAgent], dependencies=[_read])
+def get_directory_agents() -> list[DirectoryAgent]:
+    """All known agents across shared and model-local organisations, by name.
+
+    A worklist spans **every** process model, so the people in it cannot be
+    resolved against the one model a client currently has open: doing so showed
+    a clerk internal ids (``a-erika``) whenever another process was selected,
+    and hid her tasks behind a modeller hint when that process had no agents at
+    all (Nachtest 2026-09-22, defect 3). This directory is the model-independent
+    answer: it lists the agents of the shared org registry first, then those of
+    schemas that carry their own embedded organisation.
+
+    Duplicate ids keep their first (shared) entry -- the shared registry is the
+    master data, an embedded copy only exists for unlinked schemas. The result
+    is display data; it never decides who may work a step.
+    """
+
+    seen: dict[str, DirectoryAgent] = {}
+    for org_id in _org_store.list_ids():
+        org = _org_store.get(org_id)
+        if org is None:
+            continue
+        for agent in org.agents.values():
+            seen.setdefault(
+                agent.id,
+                DirectoryAgent(
+                    agent_id=agent.id,
+                    name=agent.name,
+                    email=agent.email,
+                    deputy_id=agent.deputy_id,
+                    org_model_id=org_id,
+                ),
+            )
+    for schema_id in _store.list_ids():
+        schema = _store.get(schema_id)
+        if schema is None or schema.org_model_id is not None:
+            continue  # linked schemas resolve through the shared registry above
+        for agent in schema.org_model.agents.values():
+            seen.setdefault(
+                agent.id,
+                DirectoryAgent(
+                    agent_id=agent.id,
+                    name=agent.name,
+                    email=agent.email,
+                    deputy_id=agent.deputy_id,
+                    schema_id=schema_id,
+                ),
+            )
+    return sorted(seen.values(), key=lambda a: (a.name.casefold(), a.agent_id))
+
+
 @app.post(
     "/org-models", response_model=OrgModel, status_code=201, dependencies=[_admin]
 )
@@ -5497,6 +5565,28 @@ def v1_sample_read_connector(
     except DataAccessError as err:
         raise HTTPException(status_code=502, detail={"message": str(err)}) from err
     return [dict(row) for row in rows]
+
+
+@_v1.get("/connectors/{connector_id}/entities", response_model=list[str])
+def v1_connector_entities(
+    connector_id: str,
+    principal: Principal = Depends(
+        require_scope(SCOPE_DATA_READ, "viewer", "operator", "modeler", "admin")
+    ),
+) -> list[str]:
+    """List the entities (tables/views) a connector exposes, for the GUI offer.
+
+    Pure catalogue metadata -- no row is read and no secret is revealed. The
+    sample read and the select builder use it so a modeller picks a table
+    instead of guessing its name. A connector that cannot introspect its
+    catalogue yields an empty list (the manual entry keeps working).
+    """
+
+    _require_connector(connector_id)
+    try:
+        return _connections.entities(connector_id)
+    except DataAccessError as err:
+        raise HTTPException(status_code=502, detail={"message": str(err)}) from err
 
 
 @_v1.get("/connectors/{connector_id}/columns", response_model=list[ColumnInfo])

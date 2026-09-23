@@ -182,3 +182,61 @@ def test_org_edit_breaking_referencing_schema_is_rejected() -> None:
     r = client.patch(f"/org-models/{org_id}/agents/a1", json={"role_ids": []})
     assert r.status_code == 422
     assert client.get(f"/org-models/{org_id}").json()["agents"]["a1"]["role_ids"] == ["sb"]
+
+
+def test_directory_lists_agents_of_shared_and_local_organisations() -> None:
+    """Die persoenliche Arbeitsliste reicht ueber alle Prozesse -- die
+    Namensaufloesung muss es auch (Nachtest 2026-09-22, Mangel 3).
+
+    Vorher loeste der Client Namen nur im *oben gewaehlten* Schema auf: eine
+    Sachbearbeiterin sah interne IDs, sobald ein Prozess mit anderer
+    Organisation gewaehlt war. Das Verzeichnis ist die modellunabhaengige
+    Antwort und kennt beide Herkuenfte.
+    """
+
+    org_id = "org_dir"
+    client.post("/org-models", json={"name": "Geteilt", "org_model_id": org_id})
+    client.post(f"/org-models/{org_id}/roles", json={"name": "SB", "role_id": "sb"})
+    client.post(
+        f"/org-models/{org_id}/agents",
+        json={"name": "Erika Sander", "role_ids": ["sb"], "agent_id": "dir-erika"},
+    )
+    # A second schema with its own embedded organisation (never linked).
+    sid = client.post("/schemas", json={"name": "Eigenes Modell"}).json()["id"]
+    client.post(
+        f"/schemas/{sid}/agents", json={"name": "Nina Wolf", "agent_id": "dir-nina"}
+    )
+
+    body = client.get("/directory/agents").json()
+    by_id = {a["agent_id"]: a for a in body}
+
+    assert by_id["dir-erika"]["name"] == "Erika Sander"
+    assert by_id["dir-erika"]["org_model_id"] == org_id
+    assert by_id["dir-erika"]["schema_id"] is None
+    assert by_id["dir-nina"]["name"] == "Nina Wolf"
+    assert by_id["dir-nina"]["schema_id"] == sid
+    # sorted by name so a picker reads like a phone book
+    names = [a["name"] for a in body]
+    assert names == sorted(names, key=str.casefold)
+
+
+def test_directory_prefers_the_shared_master_over_a_linked_copy() -> None:
+    """Ein verlinktes Schema traegt nur eine hydrierte Kopie -- Herr im Haus ist
+    die Registry. Sonst haette derselbe Agent zwei Eintraege."""
+
+    org_id = "org_dir2"
+    client.post("/org-models", json={"name": "Geteilt2", "org_model_id": org_id})
+    client.post(f"/org-models/{org_id}/roles", json={"name": "SB", "role_id": "sb"})
+    client.post(
+        f"/org-models/{org_id}/agents",
+        json={"name": "Tom Berger", "role_ids": ["sb"], "agent_id": "dir-tom"},
+    )
+    sid = client.post("/schemas", json={"name": "Verlinkt"}).json()["id"]
+    assert client.post(
+        f"/schemas/{sid}/org-model", json={"org_model_id": org_id}
+    ).status_code == 200
+
+    entries = [a for a in client.get("/directory/agents").json() if a["agent_id"] == "dir-tom"]
+
+    assert len(entries) == 1
+    assert entries[0]["org_model_id"] == org_id and entries[0]["schema_id"] is None

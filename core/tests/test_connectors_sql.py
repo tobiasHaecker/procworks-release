@@ -345,3 +345,39 @@ def test_api_sample_read(registered_connector: str) -> None:
     )
     assert res.status_code == 200
     assert res.json()[0]["id"] == "K1"
+
+
+def test_api_lists_entities_so_nobody_has_to_guess_a_table(
+    registered_connector: str,
+) -> None:
+    """Der Abnahmetest musste den Tabellennamen raten (Maengelliste Nr. 1).
+
+    Die Katalogabfrage liefert die lesbaren Entitaeten, damit Testlesen und
+    Select-Assistent eine Auswahl anbieten koennen statt eines Freitextfelds.
+    """
+
+    res = client.get(f"/v1/connectors/{registered_connector}/entities")
+
+    assert res.status_code == 200
+    assert res.json() == ["Ergebnis", "Kunde"]  # sorted, views included
+
+
+def test_api_entities_of_an_unknown_connector_is_404() -> None:
+    assert client.get("/v1/connectors/ghost/entities").status_code == 404
+
+
+def test_entities_include_views(tmp_path: Path) -> None:
+    """Kundenintegrationen liegen regelmaessig als View vor, nicht als Tabelle."""
+
+    url = _sqlite_url(tmp_path)
+    _seed_customer_db(url)
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE VIEW KundeBonn AS SELECT * FROM Kunde WHERE ort = 'Bonn'"))
+    engine.dispose()
+
+    assert SqlAlchemyConnector(create_engine(url)).entities() == [
+        "Ergebnis",
+        "Kunde",
+        "KundeBonn",
+    ]

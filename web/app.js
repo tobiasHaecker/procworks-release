@@ -124,6 +124,12 @@ const state = {
   // Last connection-test outcome per connector id (ok/err/unknown), shown as a
   // status badge in the integration view. Purely a UI hint; not persisted.
   connectorStatus: {},
+  // Personenverzeichnis über ALLE Organisationsmodelle (GET /directory/agents),
+  // als { agent_id: DirectoryAgent }. Eine Arbeitsliste reicht über alle
+  // Prozesse -- die Namen darin dürfen deshalb nicht am gerade gewählten Modell
+  // hängen (sonst standen dort interne IDs, siehe agentNameOf). Reine
+  // Anzeigedaten, nie eine Zuständigkeitsentscheidung; nicht persistiert.
+  agentDirectory: {},
   // Prüfinstanz-Analyse (viewTestRun): die laufende Test-Instanz eines Entwurfs,
   // der startende Agent (Starter, oben rechts) und die beiden frei wählbaren
   // beteiligten Agenten der unteren Arbeitslisten-Quadranten. Persistiert, damit
@@ -5980,15 +5986,73 @@ function orgChartNode(unit, org, childrenOf) {
   return li;
 }
 
-function describeRule(rule) {
+/**
+ * Bearbeiterregel in einem Satz -- mit Namen statt interner IDs.
+ *
+ * Ohne ``schema`` wird das gerade gewaehlte genommen; das ist in allen
+ * Modellier-Sichten das richtige. Ist eine Referenz dort unbekannt (etwa in
+ * einer fremden Organisation), bleibt die ID stehen, statt den Satz zu
+ * verschweigen. Reine Anzeige -- keine Zustaendigkeitsentscheidung.
+ *
+ * @param {object} rule Bearbeiterregel (StaffRule) oder null
+ * @param {object} [schema] Schema, gegen das Namen aufgeloest werden
+ * @returns {string}
+ */
+function describeRule(rule, schema) {
   if (!rule) return "\u2013";
-  if (rule.kind === "ROLE") return `Rolle: ${rule.ref}`;
-  if (rule.kind === "ORG_UNIT") return `OrgEinheit: ${rule.ref}${rule.recursive ? " (inkl. Unterbereiche)" : ""}`;
-  if (rule.kind === "AGENT") return `Agent: ${rule.ref}`;
-  if (rule.kind === "NODE_PERFORMING_AGENT") return `Bearbeiter von ${rule.ref}`;
-  if (rule.kind === "NODE_PERFORMING_AGENT_SUPERVISOR") return `Vorgesetzte:r des Bearbeiters von ${rule.ref}`;
-  if (rule.operands) return `${rule.kind}(${rule.operands.map(describeRule).join(", ")})`;
+  const s = schema === undefined ? state.schema : schema;
+  const org = (s && s.org_model) || {};
+  const named = (map, id) => ((map || {})[id] || {}).name || id;
+  const stepName = (id) => {
+    const n = s && s.nodes ? s.nodes[id] : null;
+    return n && n.label ? n.label : id;
+  };
+  if (rule.kind === "ROLE") return `Rolle: ${named(org.roles, rule.ref)}`;
+  if (rule.kind === "ORG_UNIT") return `OrgEinheit: ${named(org.org_units, rule.ref)}${rule.recursive ? " (inkl. Unterbereiche)" : ""}`;
+  // Beim Agenten lohnt der Rueckfall auf agentNameOf: kennt ihn die
+  // Organisation dieses Schemas nicht, findet ihn oft das modelluebergreifende
+  // Verzeichnis.
+  if (rule.kind === "AGENT") {
+    return `Agent: ${((org.agents || {})[rule.ref] || {}).name || agentNameOf(rule.ref)}`;
+  }
+  if (rule.kind === "NODE_PERFORMING_AGENT") return `Bearbeiter von \u201e${stepName(rule.ref)}\u201c`;
+  if (rule.kind === "NODE_PERFORMING_AGENT_SUPERVISOR") return `Vorgesetzte:r des Bearbeiters von \u201e${stepName(rule.ref)}\u201c`;
+  if (rule.operands) return `${rule.kind}(${rule.operands.map((o) => describeRule(o, s)).join(", ")})`;
   return rule.kind;
+}
+
+/**
+ * Bezieht sich eine Bearbeiterregel auf die Person, die ``nodeId`` erledigt hat?
+ *
+ * Solche relativen Regeln (Vier-Augen-Prinzip: "Vorgesetzte:r des Bearbeiters
+ * von X") finden niemanden, wenn X per Aufsichtseingriff ohne Bearbeiter
+ * abgeschlossen wurde -- dann steht kein Ausfuehrer im Vorgang, auf den sie sich
+ * beziehen koennten. Rein lesend; der Client entscheidet daraus nichts, er
+ * erklaert es nur.
+ *
+ * @param {object} rule Bearbeiterregel
+ * @param {string} nodeId Knoten, auf den sich die Regel beziehen koennte
+ * @returns {boolean}
+ */
+function ruleRefersToPerformerOf(rule, nodeId) {
+  if (!rule) return false;
+  if (rule.kind === "NODE_PERFORMING_AGENT" || rule.kind === "NODE_PERFORMING_AGENT_SUPERVISOR") {
+    return rule.ref === nodeId;
+  }
+  return (rule.operands || []).some((o) => ruleRefersToPerformerOf(o, nodeId));
+}
+
+/**
+ * Enthaelt die Regel (auch verschachtelt) einen Bezug auf den Ausfuehrer eines
+ * anderen Schritts? Dann erklaert sich eine leere Bearbeitermenge oft daraus.
+ *
+ * @param {object} rule Bearbeiterregel
+ * @returns {boolean}
+ */
+function ruleIsRelative(rule) {
+  if (!rule) return false;
+  if (rule.kind === "NODE_PERFORMING_AGENT" || rule.kind === "NODE_PERFORMING_AGENT_SUPERVISOR") return true;
+  return (rule.operands || []).some(ruleIsRelative);
 }
 
 function zFindingsPanel() {
@@ -6384,7 +6448,7 @@ async function renderInstanceDetail(container, withActions) {
         : nodeDetail === "FAILED"
           ? el("span", { class: "tag" }, "gescheitert: " + ((inst.node_detail_reason || {})[nid] || "ohne Begr\u00FCndung"))
           : null;
-      const action = withActions ? completionActionFor(inst, nid, node, eligibleOf[nid]) : null;
+      const action = withActions ? completionActionFor(inst, nid, node, eligibleOf[nid], runSchema) : null;
       wlBody.appendChild(el("div", { class: "worklist-item" },
         el("span", { class: "name" }, node ? nodeCaption(node) : nid),
         owner
@@ -6392,7 +6456,7 @@ async function renderInstanceDetail(container, withActions) {
           : el("span", { class: "tag" }, "bereit"),
         eligibleOf[nid] && eligibleOf[nid].length
           ? el("span", { class: "tag muted", title: eligibleOf[nid].map(agentNameOf).join(", ") }, "zust\u00E4ndig: " + responsibleSummary(eligibleOf[nid]))
-          : null,
+          : unstaffedTag(runSchema, nid),
         detailTag,
         action));
     });
@@ -6585,6 +6649,31 @@ function openAdhocDelete(schema, inst, targets) {
 }
 
 /**
+ * Warnzeichen fuer einen bereiten Schritt, dessen Bearbeiterregel niemanden
+ * findet (Nachtest 2026-09-22, Mangel 2).
+ *
+ * Bis dahin sah dieser Fall aus wie ein Schritt ganz ohne Bearbeiterregel: kein
+ * „zustaendig"-Eintrag, ein gruenes „Abschliessen" -- und der Schritt tauchte in
+ * keiner persoenlichen Arbeitsliste auf, ohne dass irgendwo stand, warum. Der
+ * haeufigste Grund ist eine relative Regel (Vier-Augen), deren Bezugsschritt per
+ * Aufsichtseingriff ohne Bearbeiter erledigt wurde; der Hinweistext nennt genau
+ * das, wenn er zutrifft.
+ *
+ * @param {object} schema Schema der Instanz
+ * @param {string} nid Knoten-ID des bereiten Schritts
+ * @returns {HTMLElement|null} das Zeichen, oder null ohne Bearbeiterregel
+ */
+function unstaffedTag(schema, nid) {
+  const rule = ((schema || {}).staff_rules || {})[nid];
+  if (!rule) return null;  // Automatik-/unbesetzter Schritt: kein Widerspruch
+  const why = ruleIsRelative(rule)
+    ? " Sie bezieht sich auf die Person eines früheren Schritts – wurde dieser als Aufsichtseingriff ohne Bearbeiter abgeschlossen, gibt es diese Person nicht."
+    : " Keiner der in Frage kommenden Bearbeiter ist derzeit im Organisationsmodell zu finden.";
+  return el("span", { class: "tag warn", title: `Bearbeiterregel: ${describeRule(rule, schema)}.${why} Nur eine Aufsicht kann den Schritt abschließen.` },
+    "niemand zuständig");
+}
+
+/**
  * Kurzform der Zustaendigen: bis zu zwei Namen, sonst „Name, Name +N“.
  * @param {string[]} agentIds zustaendige Agenten
  * @returns {string}
@@ -6608,17 +6697,33 @@ function responsibleSummary(agentIds) {
  *
  * Der Client entscheidet nichts endgueltig -- er waehlt nur die passende Form.
  *
+ * Sonderfall **Regel ohne Zustaendige** (Nachtest 2026-09-22, Mangel 2): Traegt
+ * der Schritt eine Bearbeiterregel, loest sie aber gerade niemanden auf -- etwa
+ * eine Vier-Augen-Regel, deren Vorschritt per Aufsichtseingriff ohne Bearbeiter
+ * erledigt wurde --, dann stand hier bisher das gruene "Abschliessen", als waere
+ * alles in Ordnung. Jetzt heisst es auch dort "Als Aufsicht abschliessen"; einer
+ * gebundenen Person wird kein Knopf angeboten, den der Kern mit 409 abweisen
+ * wuerde.
+ *
  * @param {object} inst die Instanz
  * @param {string} nid Knoten-ID
  * @param {object} node der Knoten
  * @param {string[]|undefined} eligible zustaendige Agenten (undefined = unbekannt)
+ * @param {object} [schema] Schema der Instanz (fuer die Bearbeiterregel)
  * @returns {HTMLElement}
  */
-function completionActionFor(inst, nid, node, eligible) {
+function completionActionFor(inst, nid, node, eligible, schema) {
   const me = state.principal && state.principal.agent_id;
   const staffed = eligible && eligible.length > 0;
+  const ruled = !!((schema || {}).staff_rules || {})[nid];
   if (me && staffed && !eligible.includes(me)) {
     return el("span", { class: "tag muted" }, "nicht deine Aufgabe");
+  }
+  if (ruled && !staffed && !inst.is_test) {
+    if (me) return el("span", { class: "tag muted" }, "nur per Aufsicht abschlie\u00DFbar");
+    return el("button", { class: "btn small",
+      title: "Die Bearbeiterregel dieses Schritts findet aktuell niemanden \u2013 der Abschluss wird als Aufsichtseingriff mit Begr\u00FCndung protokolliert",
+      onClick: () => completeActivity(nid, node) }, "Als Aufsicht abschlie\u00DFen");
   }
   if (!me && staffed && !inst.is_test) {
     return el("button", { class: "btn small",
@@ -6697,14 +6802,36 @@ function isSupervisionRequired(err) {
 /**
  * Fragt die Pflichtbegruendung eines Aufsichtseingriffs ab. Der Dialog erklaert,
  * warum (kein Bearbeiter hinter dem Login) und dass die Angabe im Audit steht.
+ *
+ * Er warnt ausserdem **vorher**, wenn spaetere Schritte ihre Bearbeiter relativ
+ * zu diesem hier bestimmen (Vier-Augen-Prinzip): Ein Aufsichtseingriff
+ * hinterlaesst keinen Ausfuehrer, an dem eine solche Regel ansetzen koennte --
+ * der Folgeschritt landet dann in keiner Arbeitsliste. Das war im Nachtest
+ * 2026-09-22 (Mangel 2) erst hinterher zu bemerken.
+ *
  * @param {string} label Bezeichnung des Schritts
  * @param {(reason: string) => Promise<unknown>} onConfirm sendet den Abschluss mit Begruendung
+ * @param {object} [schema] Schema der Instanz (fuer die Folgewirkungs-Warnung)
+ * @param {string} [nodeId] Knoten-ID des Schritts
  */
-function askSupervisionReason(label, onConfirm) {
+function askSupervisionReason(label, onConfirm, schema, nodeId) {
   const reason = el("textarea", { rows: "3", placeholder: "z. B. Bearbeiterin krank, Frist l\u00E4uft ab" });
+  const dependants = Object.entries(((schema || {}).staff_rules) || {})
+    .filter(([nid, rule]) => nid !== nodeId && ruleRefersToPerformerOf(rule, nodeId))
+    .map(([nid]) => {
+      const n = (schema.nodes || {})[nid];
+      return n && n.label ? n.label : nid;
+    });
   const body = el("div", { class: "form-grid" },
     el("div", { class: "card-hint" },
       "Dieser Login ist keinem Bearbeiter zugeordnet. Der Schritt wird an der Bearbeiterregel vorbei abgeschlossen (Aufsichtseingriff). Die Begr\u00FCndung wird im Audit-Verlauf festgehalten."),
+    dependants.length
+      ? el("div", { class: "warn-banner" },
+          "\u26A0 Achtung: " + (dependants.length === 1 ? "Der Schritt " : "Die Schritte ")
+          + dependants.map((n) => "\u201E" + n + "\u201C").join(", ")
+          + (dependants.length === 1 ? " bestimmt" : " bestimmen")
+          + " den Bearbeiter aus der Person, die diesen Schritt erledigt. Nach einem Aufsichtseingriff gibt es diese Person nicht \u2013 dort ist dann niemand zust\u00E4ndig, und auch das geht nur per Aufsicht weiter.")
+      : null,
     el("label", { class: "field" }, "Begr\u00FCndung *", reason));
   openModal(`Aufsichtseingriff: ${label}`, body, async () => {
     const text = reason.value.trim();
@@ -6808,7 +6935,7 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       toast("ok", "Schritt abgeschlossen");
       if (onDone) await onDone();
     } catch (err) {
-      if (isSupervisionRequired(err)) { askSupervisionReason(label, (reason) => submitCompletion(data, reason)); return false; }
+      if (isSupervisionRequired(err)) { askSupervisionReason(label, (reason) => submitCompletion(data, reason), schema, nodeId); return false; }
       const d = describeError(err); toast("err", d.title, d.lines); return false;
     }
   };
@@ -7439,10 +7566,44 @@ function fmtDuration(sec) {
 // View: Meine Aufgaben (Bearbeiter-Aufgabenliste)
 // --------------------------------------------------------------------------
 
+/**
+ * Anzeigename eines Agenten, unabhaengig vom oben gewaehlten Prozess.
+ *
+ * Erst das Organisationsmodell des gewaehlten Schemas (dort ist der Name
+ * sicher der des Vorgangs), dann das modelluebergreifende Verzeichnis
+ * (`state.agentDirectory`, gefuellt aus ``GET /directory/agents``), zuletzt die
+ * ID. Ohne den zweiten Schritt zeigte "Meine Aufgaben" interne IDs, sobald oben
+ * ein Prozess mit einer anderen Organisation gewaehlt war -- die Aufgabenliste
+ * reicht ueber alle Prozesse, die Namensaufloesung darf es also auch.
+ *
+ * @param {string} id Agenten-ID
+ * @returns {string} Name oder, wenn unbekannt, die ID
+ */
 function agentNameOf(id) {
   const org = state.schema && state.schema.org_model;
   const a = org && org.agents ? org.agents[id] : null;
-  return a ? a.name : id;
+  if (a) return a.name;
+  const known = state.agentDirectory[id];
+  return known ? known.name : id;
+}
+
+/**
+ * Laedt das modelluebergreifende Personenverzeichnis in `state.agentDirectory`.
+ *
+ * Best effort: schlaegt der Abruf fehl (fehlende Leserechte, alter Server),
+ * bleibt das Verzeichnis leer und die Anzeige faellt auf das bisherige
+ * Verhalten zurueck. Wird vor den Sichten aufgerufen, die Personen ueber
+ * Prozessgrenzen hinweg zeigen.
+ *
+ * @returns {Promise<void>}
+ */
+async function loadAgentDirectory() {
+  try {
+    const entries = await api.get("/directory/agents");
+    const dir = {};
+    entries.forEach((a) => { dir[a.agent_id] = a; });
+    state.agentDirectory = dir;
+  } catch (e) { /* best effort -- ohne Verzeichnis bleibt es bei den IDs */ }
 }
 
 // Track the agent whose task list is on screen plus the keys of the tasks last
@@ -7471,14 +7632,24 @@ function announceNewTasks(agentId, tasks) {
 async function viewTasks() {
   const content = byId("content");
   clear(content);
-  if (!state.schema) { content.appendChild(emptyState("Kein Schema ausgew\u00E4hlt.")); return; }
-  const org = state.schema.org_model || { agents: {} };
-  const agents = Object.values(org.agents || {});
-  if (!agents.length) { content.appendChild(emptyState("Keine Agenten im Organisationsmodell. Lege zuerst Agenten in der Ressourcensicht an.")); return; }
+  // Die persoenliche Aufgabenliste haengt bewusst NICHT am oben gewaehlten
+  // Prozess: sie reicht ueber alle Prozesse (/me/tasks, /agents/{id}/tasks).
+  // Vorher brach sie genau daran -- war oben ein Prozess ohne eigene Agenten
+  // gewaehlt, sah eine Sachbearbeiterin statt ihrer Aufgaben einen Hinweis fuer
+  // Modellierer (Nachtest 2026-09-22, Mangel 3). Das Personenverzeichnis kommt
+  // deshalb modelluebergreifend aus /directory/agents.
+  await loadAgentDirectory();
+  const agents = Object.values(state.agentDirectory).map((a) => ({ id: a.agent_id, name: a.name }));
 
   // A bound principal (token login) is tied to one agent: no picker, the
   // worklist comes from /me/tasks. In open dev mode we keep the agent picker.
   const bound = state.principal && state.principal.agent_id;
+  if (!bound && !agents.length) {
+    content.appendChild(emptyState(hasRole("modeler", "admin")
+      ? "Keine Agenten in den Organisationsmodellen. Lege zuerst Agenten in der Ressourcensicht an."
+      : "Dieser Login ist keinem Bearbeiter zugeordnet \u2013 wende dich an die Administration."));
+    return;
+  }
   let agentId;
   let picker;
   if (bound) {
@@ -7604,8 +7775,12 @@ async function viewTasks() {
 // also beim Agenten und die Instanz steht nie still). Die eigentliche Aufloesung
 // passiert im Kern; dieser Client ruft nur die Endpunkte /agents/{id}/absences.
 async function absencePanel(agentId) {
-  const org = state.schema.org_model || { agents: {} };
-  const agent = (org.agents || {})[agentId] || {};
+  // Wie die Aufgabenliste selbst: die Person wird modelluebergreifend gesucht
+  // (Verzeichnis), nicht im gerade gewaehlten Schema -- sonst haette ein
+  // Bearbeiter je nach Prozessauswahl "keine Vertretung hinterlegt" gelesen,
+  // obwohl eine eingetragen ist.
+  const org = (state.schema && state.schema.org_model) || { agents: {} };
+  const agent = (org.agents || {})[agentId] || state.agentDirectory[agentId] || {};
   const deputyId = agent.deputy_id || null;
 
   // Vertretungs-Status: ohne Vertreter ein deutlicher Hinweis, dass die
@@ -8351,24 +8526,109 @@ async function testConnector(id) {
   render();
 }
 
+/**
+ * Fuellt eine Datalist mit den Entitaeten (Tabellen/Sichten) eines Connectors.
+ *
+ * Der Katalog kommt aus ``GET /v1/connectors/{id}/entities`` (reine Metadaten,
+ * keine Zeile wird gelesen). Schlaegt der Abruf fehl oder kennt der Connector
+ * keinen Katalog, bleibt das zugehoerige Feld ein gewoehnliches Freitextfeld --
+ * die Vorschlagsliste ist eine Hilfe, nie eine Voraussetzung.
+ *
+ * @param {HTMLElement} datalistEl die zu fuellende <datalist>
+ * @param {string} connectorId Connector, dessen Katalog gelesen wird
+ * @returns {Promise<string[]>} die angebotenen Namen (leer, wenn keine)
+ */
+async function fillEntitySuggestions(datalistEl, connectorId) {
+  clear(datalistEl);
+  if (!connectorId) return [];
+  let names = [];
+  try { names = await api.get(`/v1/connectors/${connectorId}/entities`); }
+  catch (e) { return []; }  // best effort: ohne Katalog bleibt das Freitextfeld
+  names.forEach((n) => datalistEl.appendChild(el("option", { value: n })));
+  return names;
+}
+
+/**
+ * Haengt an ein Entitaets-Feld die Tabellenliste seines Connectors.
+ *
+ * Gibt die zu ergaenzende <datalist> zurueck (sie muss im Dialog haengen, damit
+ * der Browser sie findet). Wechselt die Connector-Auswahl, wird der Katalog neu
+ * geladen. Bietet der Connector genau eine Tabelle an, wird sie in ein noch
+ * leeres Feld eingetragen -- das war der haeufigste Fall im Abnahmetest, in dem
+ * der Name geraten werden musste.
+ *
+ * @param {HTMLInputElement} entityInput das Freitextfeld der Entitaet
+ * @param {string} listId eindeutige Id der Datalist (pro Dialog eine)
+ * @param {() => string} getConnectorId liefert die aktuelle Connector-Id
+ * @param {HTMLSelectElement} [connSelect] Auswahlfeld, das den Katalog wechselt
+ * @returns {HTMLElement} die <datalist>
+ */
+function wireEntitySuggestions(entityInput, listId, getConnectorId, connSelect) {
+  const list = el("datalist", { id: listId });
+  entityInput.setAttribute("list", listId);
+  const reload = () => fillEntitySuggestions(list, getConnectorId()).then((names) => {
+    if (names.length === 1 && !entityInput.value) entityInput.value = names[0];
+  });
+  if (connSelect) connSelect.addEventListener("change", reload);
+  reload();
+  return list;
+}
+
+/**
+ * Testlesen eines Connectors: Entitaet waehlen, Ergebnis IM Dialog anzeigen.
+ *
+ * Das Ergebnis bleibt bewusst im selben Dialog. Vorher oeffnete der Rueckruf
+ * ein zweites Fenster im selben Modal-Container, das ``openModal`` unmittelbar
+ * danach wieder leerte (der Rueckruf gab nicht ``false`` zurueck) -- der
+ * Abnahmetest sah deshalb nie einen Datensatz, obwohl der Server sie lieferte.
+ * Mit ``return false`` bleibt der Dialog stehen, und man kann eine andere
+ * Tabelle lesen, ohne ihn neu zu oeffnen.
+ *
+ * @param {string} id Connector-Id aus der Registry
+ */
 function sampleReadConnector(id) {
   const entity = el("input", { type: "text", placeholder: "z. B. Kunde" });
-  const limit = el("input", { type: "number", value: "1", min: "1", max: "100" });
+  const list = wireEntitySuggestions(entity, "pw-sample-entities", () => id);
+  const limit = el("input", { type: "number", value: "5", min: "1", max: "100" });
+  const out = el("div", { class: "sample-out" });
   openModal("Testlesen \u2013 " + id, el("div", { class: "form-grid" },
-    el("label", { class: "field" }, "Entit\u00E4t/Tabelle", entity),
-    el("label", { class: "field" }, "Anzahl", limit)), async () => {
-    if (!entity.value.trim()) return false;
+    el("label", { class: "field wide" }, "Entit\u00E4t/Tabelle", entity, list,
+      el("span", { class: "field-help" }, "Tabellen des Connectors werden vorgeschlagen, sobald der Katalog gelesen ist.")),
+    el("label", { class: "field" }, "Anzahl", limit),
+    out), async () => {
+    if (!entity.value.trim()) { toast("info", "Bitte eine Entit\u00E4t/Tabelle angeben"); return false; }
     try {
       const rows = await api.post(`/v1/connectors/${id}/sample-read`,
         { entity: entity.value.trim(), limit: Number(limit.value) || 1 });
-      showSampleRecords(entity.value.trim(), rows);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      renderSampleRecords(out, entity.value.trim(), rows);
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+    return false;  // Ergebnis steht im Dialog -- er darf sich nicht schliessen
   }, "Lesen");
 }
 
-function showSampleRecords(entity, rows) {
-  const pre = el("pre", { class: "code-block" }, JSON.stringify(rows, null, 2));
-  openModal(`Beispieldatensatz: ${entity} (${rows.length})`, pre, async () => true, "Schlie\u00DFen");
+/**
+ * Zeichnet die gelesenen Beispieldatensaetze als Tabelle in einen Bereich.
+ *
+ * Spalten sind die Vereinigung aller Schluessel (ein Datensatz kann ein Feld
+ * ausgelassen haben), Werte werden als Text dargestellt; ``null`` erscheint als
+ * Gedankenstrich statt als "null".
+ *
+ * @param {HTMLElement} target Zielbereich (wird geleert)
+ * @param {string} entity gelesene Entitaet, fuer die Ueberschrift
+ * @param {object[]} rows Datensaetze der API
+ */
+function renderSampleRecords(target, entity, rows) {
+  clear(target);
+  target.appendChild(el("div", { class: "sub-h" },
+    el("h3", null, `Beispieldatens\u00E4tze: ${entity} (${rows.length})`)));
+  if (!rows.length) {
+    target.appendChild(emptyState("Keine Datens\u00E4tze gefunden."));
+    return;
+  }
+  const cols = [];
+  rows.forEach((r) => Object.keys(r || {}).forEach((k) => { if (!cols.includes(k)) cols.push(k); }));
+  target.appendChild(table(cols, rows.map((r) =>
+    cols.map((c) => (r[c] === null || r[c] === undefined ? "\u2013" : String(r[c]))))));
 }
 
 // --- 11.2 Datenanbindungs-Assistent ---------------------------------------
@@ -8452,11 +8712,12 @@ function bindExternalElement(element) {
   const conn = el("select", null, ...Object.values(schema.connectors || {}).map((c) =>
     el("option", { value: c.id }, `${c.name} (${c.id})`)));
   const entity = el("input", { type: "text", placeholder: "z. B. Kunde" });
+  const entityList = wireEntitySuggestions(entity, "pw-ext-entities", () => conn.value, conn);
   const keyElems = Object.values(schema.data_elements).filter((d) => d.source !== "EXTERNAL" && d.id !== element.id);
   const key = el("select", null, ...keyElems.map((d) => el("option", { value: d.id }, d.name)));
   const body = el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Connector", conn),
-    el("label", { class: "field" }, "Entit\u00E4t/Tabelle", entity),
+    el("label", { class: "field wide" }, "Entit\u00E4t/Tabelle", entity, entityList),
     el("label", { class: "field" }, "Schl\u00FCssel-Datenelement", keyElems.length
       ? key
       : el("span", { class: "muted" }, "Erst ein Instanz-Datenelement anlegen.")));
@@ -8500,6 +8761,7 @@ function bindSqlSelect(element) {
 
   const conn = el("select", null, ...conns.map((c) => el("option", { value: c.id }, `${c.name} (${c.id})`)));
   const entity = el("input", { type: "text", placeholder: "z. B. Kunde" });
+  const entityList = wireEntitySuggestions(entity, "pw-sql-entities", () => conn.value, conn);
   const colInput = el("input", { type: "text", placeholder: "z. B. name", list: "pw-sql-cols" });
   const colDatalist = el("datalist", { id: "pw-sql-cols" });
   const colType = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t }, t)));
@@ -8604,7 +8866,7 @@ function bindSqlSelect(element) {
     el("div", { class: "check-row" }, orderCol, el("label", { class: "check-inline" }, orderDesc, " absteigend")));
   const body = el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Connector", conns.length ? conn : el("span", { class: "muted" }, "Erst einen Connector registrieren.")),
-    el("label", { class: "field" }, "Entit\u00E4t/Tabelle", el("div", { class: "check-row" }, entity, el("button", { class: "btn small", type: "button", onClick: loadColumns }, "Spalten laden"))),
+    el("label", { class: "field wide" }, "Entit\u00E4t/Tabelle", el("div", { class: "check-row" }, entity, el("button", { class: "btn small", type: "button", onClick: loadColumns }, "Spalten laden")), entityList),
     el("label", { class: "field" }, "Ergebnis-Spalte", colInput),
     el("label", { class: "field" }, "Spaltentyp", colType),
     el("label", { class: "field" }, "Aggregat", agg),
@@ -8644,6 +8906,7 @@ function bindSqlWrite(element) {
 
   const conn = el("select", null, ...conns.map((c) => el("option", { value: c.id }, `${c.name} (${c.id})`)));
   const entity = el("input", { type: "text", placeholder: "z. B. Kunde" });
+  const entityList = wireEntitySuggestions(entity, "pw-sqlw-entities", () => conn.value, conn);
   const colInput = el("input", { type: "text", placeholder: "z. B. status", list: "pw-sqlw-cols" });
   const colDatalist = el("datalist", { id: "pw-sqlw-cols" });
   const colType = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t }, t)));
@@ -8720,7 +8983,7 @@ function bindSqlWrite(element) {
 
   const body = el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Connector", conns.length ? conn : el("span", { class: "muted" }, "Erst einen Connector registrieren.")),
-    el("label", { class: "field" }, "Entit\u00E4t/Tabelle", el("div", { class: "check-row" }, entity, el("button", { class: "btn small", type: "button", onClick: loadColumns }, "Spalten laden"))),
+    el("label", { class: "field wide" }, "Entit\u00E4t/Tabelle", el("div", { class: "check-row" }, entity, el("button", { class: "btn small", type: "button", onClick: loadColumns }, "Spalten laden")), entityList),
     el("label", { class: "field" }, "Ziel-Spalte", colInput),
     el("label", { class: "field" }, "Spaltentyp", colType),
     el("label", { class: "field" }, "Eindeutige Spalte (Schl\u00FCssel)", uniqueCol),
@@ -10096,6 +10359,10 @@ async function boot() {
     if (state.demo) mountDemoBanner();
     await loadSchemas();
     await refreshSchema();
+    // Personenverzeichnis ueber alle Organisationen: Namen in Aufgaben-,
+    // Audit- und Monitoring-Sichten sollen nicht davon abhaengen, welcher
+    // Prozess oben gewaehlt ist ("Meine Aufgaben" zeigte sonst interne IDs).
+    await loadAgentDirectory();
     // Baseline the live-update revision to "now" so the first poll only fires on
     // genuinely new progress, then start the background auto-refresh.
     try {

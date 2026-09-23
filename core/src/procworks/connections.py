@@ -185,6 +185,23 @@ class ConnectionRegistry:
         rows = self.connector(connector_id).query(entity, {})
         return rows[: max(0, limit)]
 
+    def entities(self, connector_id: str) -> list[str]:
+        """List the entities (tables/views, entity sets) a connector exposes.
+
+        Pure metadata for the GUI: the sample read and the select builder offer
+        these names instead of asking for a guessed table name. Connectors that
+        cannot introspect their catalogue return an empty list rather than an
+        error -- a missing offer must never block the manual entry that worked
+        before.
+        """
+
+        connector = self.connector(connector_id)
+        method = getattr(connector, "entities", None)
+        if not callable(method):
+            return []
+        result: list[str] = method()
+        return result
+
     def columns(self, connector_id: str, entity: str) -> list[dict[str, object]]:
         """Reflect a connector entity's columns for the GUI mapping assistant."""
 

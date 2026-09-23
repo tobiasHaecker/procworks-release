@@ -272,6 +272,31 @@ def test_columns_infer_types_from_sample_row() -> None:
     assert mapped["active"] is DataType.BOOLEAN
 
 
+def test_entities_lists_the_service_documents_entity_sets() -> None:
+    """Der Katalog speist die Tabellenauswahl der Oberflaeche (Maengelliste Nr. 1).
+
+    Das Servicedokument der Wurzel nennt jede angebotene Sammlung; Singletons
+    und Funktionsimporte gehoeren nicht in die Auswahl, weil sie nicht als
+    Entitaet gelesen werden koennen.
+    """
+
+    transport = _FakeTransport()
+    transport.push(
+        json.dumps(
+            {
+                "value": [
+                    {"name": "accounts", "kind": "EntitySet", "url": "accounts"},
+                    {"name": "contacts", "url": "contacts"},
+                    {"name": "Me", "kind": "Singleton", "url": "Me"},
+                ]
+            }
+        )
+    )
+
+    assert _connector(transport).entities() == ["accounts", "contacts"]
+    assert transport.calls[0]["url"] == _BASE
+
+
 def test_bearer_token_is_sent() -> None:
     transport = _FakeTransport()
     transport.push(json.dumps({"value": []}))

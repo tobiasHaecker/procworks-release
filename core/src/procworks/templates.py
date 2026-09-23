@@ -30,6 +30,7 @@ from procworks.model import (
     StaffRule,
     StaffRuleKind,
     TemplateOrigin,
+    staff_rule_text,
 )
 
 
@@ -516,7 +517,7 @@ def template_roles(schema: ProcessSchema) -> list[tuple[str, list[str]]]:
         node = schema.nodes.get(node_id)
         if node is None:
             continue
-        grouped.setdefault(_rule_text(rule, schema, org), []).append(node.label or node_id)
+        grouped.setdefault(staff_rule_text(rule, schema, org), []).append(node.label or node_id)
     return list(grouped.items())
 
 
@@ -532,28 +533,6 @@ def _step_order(schema: ProcessSchema) -> list[Node]:
         seen.append(current)
         queue.extend(e.target for e in schema.outgoing(current))
     return [schema.nodes[n] for n in seen if n in schema.nodes]
-
-
-def _rule_text(rule: StaffRule, schema: ProcessSchema, org: object) -> str:
-    """German one-liner for a staff rule (gallery text, not a correctness rule)."""
-
-    roles = getattr(org, "roles", {}) or {}
-    units = getattr(org, "org_units", {}) or {}
-    agents = getattr(org, "agents", {}) or {}
-    ref = rule.ref or ""
-    if rule.kind is StaffRuleKind.ROLE:
-        return roles[ref].name if ref in roles else ref
-    if rule.kind is StaffRuleKind.ORG_UNIT:
-        return f"Abteilung {units[ref].name}" if ref in units else ref
-    if rule.kind is StaffRuleKind.AGENT:
-        return agents[ref].name if ref in agents else ref
-    step = schema.nodes.get(ref)
-    step_name = step.label if step is not None and step.label else ref
-    if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR:
-        return f"Vorgesetzte:r von „{step_name}“"
-    if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT:
-        return f"wer „{step_name}“ bearbeitet hat"
-    return rule.kind.value
 
 
 #: Builder functions for the built-in library, invoked lazily by

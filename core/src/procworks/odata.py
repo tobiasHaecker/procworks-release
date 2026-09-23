@@ -297,6 +297,26 @@ class ODataConnector:
             url += "?$filter=" + quote(clauses)
         return list(self._rows(url))
 
+    def entities(self) -> list[str]:
+        """List the service's entity sets (GUI offer instead of guesswork).
+
+        Reads the OData *service document* (the service root), whose ``value``
+        array names every exposed collection. Entries without a usable ``name``
+        and singletons/function imports are skipped, so only addressable entity
+        sets are offered. Returns a sorted list; a transport or HTTP error
+        surfaces as :class:`DataAccessError` like every other read.
+        """
+
+        names = set()
+        for row in self._rows(self._base):
+            kind = row.get("kind")
+            if kind is not None and kind != "EntitySet":
+                continue
+            name = row.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+        return sorted(names)
+
     def columns(self, entity: str) -> list[dict[str, object]]:
         rows = self._rows(f"{self._base}/{_safe_identifier(entity)}?$top=1")
         if not rows:

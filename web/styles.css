@@ -268,6 +268,13 @@ textarea { resize: vertical; min-height: 90px; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: end; }
 .field-help { font-size: 11px; color: var(--txt-dim); opacity: .8; }
+/* Ein Feld ueber die volle Dialogbreite: Tabellennamen und andere lange
+   Eingaben waren im halbierten Raster zu schmal, um sie lesen zu koennen. */
+.form-grid .field.wide { grid-column: 1 / -1; }
+/* Ergebnisbereich des Testlesens -- er liegt IM Dialog (siehe app.js) und darf
+   ihn nicht sprengen: er scrollt fuer sich. */
+.sample-out { grid-column: 1 / -1; max-height: 320px; overflow: auto; }
+.sample-out:empty { display: none; }
 .hr { height: 1px; background: var(--line); margin: 12px 0; }
 .mask-title { font-size: 14px; font-weight: 600; color: var(--txt); grid-column: 1 / -1; }
 
@@ -426,6 +433,9 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .warn-banner { color: var(--amber); background: var(--amber-soft); font-size: 13px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; }
 
 .tag { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: var(--gray-soft); color: var(--txt-dim); }
+/* Warnendes Zeichen an einem Arbeitslisten-Eintrag (z. B. "niemand zuständig"):
+   dieselbe Form wie .tag, nur in der Warnfarbe der Oberfläche. */
+.tag.warn { background: var(--amber-soft); color: var(--amber); }
 
 /* Zeitbasierte Arbeitslisten-Priorisierung: Kritikalitäts-Badges (Ampel). */
 .due-cell { display: inline-flex; align-items: center; gap: 8px; }

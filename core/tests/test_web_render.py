@@ -1443,7 +1443,8 @@ def test_run_view_names_the_responsible_and_offers_completion_accordingly() -> N
 
     src = APP_JS.read_text(encoding="utf-8")
     detail = _function_body(src, "async function renderInstanceDetail(")
-    assert "/tasks`" in detail and "completionActionFor(inst, nid, node, eligibleOf[nid])" in detail
+    assert "/tasks`" in detail
+    assert "completionActionFor(inst, nid, node, eligibleOf[nid], runSchema)" in detail
     action = _function_body(src, "function completionActionFor(")
     assert '"nicht deine Aufgabe"' in action
     assert "Als Aufsicht abschlie" in action and "!inst.is_test" in action
@@ -1509,3 +1510,69 @@ def test_every_operation_precondition_carries_a_code_the_client_can_word() -> No
     what_map = app[app.index("const OP_WRONG_KIND = {"): app.index("const FINDING_TEXTS = {")]
     assert not {k for k in kinds if f"{k}:" not in kind_map}, "Objektart ohne deutschen Namen"
     assert not {w for w in whats if f"{w}:" not in what_map}, "Knotenart ohne deutschen Text"
+
+
+# ---------------------------------------------------------------------------
+# Nachtest 2026-09-22: die vier Maengel, die den Alltag der Sachbearbeitung
+# betreffen. Diese Waechter halten fest, woran sie lagen -- jeder von ihnen
+# scheitert, wenn die Ursache zurueckkehrt.
+# ---------------------------------------------------------------------------
+
+
+def test_sample_read_shows_its_result_instead_of_closing_over_it() -> None:
+    """Mangel 1: Der Server lieferte die Datensaetze, die Oberflaeche nicht.
+
+    Das Ergebnis wurde in demselben Modal-Container geoeffnet, den ``openModal``
+    unmittelbar danach leerte, weil der Rueckruf nicht ``false`` zurueckgab. Das
+    Ergebnis bleibt deshalb jetzt IM Dialog, und der Rueckruf haelt ihn offen.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = _function_body(src, "function sampleReadConnector(")
+    assert "renderSampleRecords(out" in body
+    assert "showSampleRecords" not in src  # kein zweiter Dialog mehr
+    # Der Rueckruf endet auf `return false` -- nur so bleibt der Dialog stehen.
+    # (Das fruehe `return false` der leeren Eingabe allein genuegt nicht.)
+    assert re.search(r"\n\s*return false;[^\n]*\n\s*\}, \"Lesen\"\);", body), body[-400:]
+    assert "openModal(" not in _function_body(src, "function renderSampleRecords(")
+    # und die Tabelle muss nicht mehr geraten werden
+    assert "wireEntitySuggestions(entity" in body
+    assert "/entities`" in _function_body(src, "async function fillEntitySuggestions(")
+
+
+def test_unstaffed_ready_step_is_named_as_such() -> None:
+    """Mangel 2: Nach einem Aufsichtseingriff fand die Vier-Augen-Regel
+    niemanden -- die Sicht sah aber aus wie ein Schritt ohne Regel."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    detail = _function_body(src, "async function renderInstanceDetail(")
+    assert "unstaffedTag(runSchema, nid)" in detail
+    tag = _function_body(src, "function unstaffedTag(")
+    assert "niemand zust" in tag and "staff_rules" in tag
+    assert "ruleIsRelative(rule)" in tag  # nennt den haeufigsten Grund
+    action = _function_body(src, "function completionActionFor(")
+    assert "ruled && !staffed" in action
+    # Und der Eingriff warnt vorher, wenn er genau diese Luecke reissen wuerde.
+    ask = _function_body(src, "function askSupervisionReason(")
+    assert "ruleRefersToPerformerOf(rule, nodeId)" in ask
+    assert "warn-banner" in ask
+
+
+def test_personal_worklist_does_not_depend_on_the_selected_process() -> None:
+    """Mangel 3: „Meine Aufgaben" haengt nicht am oben gewaehlten Prozess.
+
+    Die Liste reicht ueber alle Prozesse; sie darf weder an dessen
+    Organisationsmodell scheitern noch Namen daraus aufloesen."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    tasks = _function_body(src, "async function viewTasks(")
+    assert "loadAgentDirectory()" in tasks
+    assert "state.agentDirectory" in tasks
+    # kein Abbruch mehr wegen des gewaehlten Schemas
+    assert "Kein Schema ausgew" not in tasks
+    assert "Lege zuerst Agenten in der Ressourcensicht an." in tasks  # nur fuer Modellierer
+    assert "hasRole(\"modeler\", \"admin\")" in tasks
+    name = _function_body(src, "function agentNameOf(")
+    assert "state.agentDirectory[id]" in name
+    loader = _function_body(src, "async function loadAgentDirectory(")
+    assert "/directory/agents" in loader

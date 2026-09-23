@@ -450,6 +450,30 @@ class SqlAlchemyConnector:
             result = conn.execute(stmt, bind_params)
         return result.rowcount
 
+    def entities(self) -> list[str]:
+        """List the readable entities (tables and views) of the connection.
+
+        Pure schema introspection for the GUI: the mapping assistant and the
+        sample read offer these names instead of asking a modeller to guess a
+        table name. No row data is read. Views are included because a customer
+        integration is regularly exposed as one; both lists are merged and
+        sorted so the offer is deterministic.
+
+        Returns an empty list when the dialect cannot reflect names; a genuine
+        connection failure surfaces as :class:`DataAccessError`.
+        """
+
+        from sqlalchemy import inspect as sa_inspect
+        from sqlalchemy.exc import SQLAlchemyError
+
+        try:
+            inspector = sa_inspect(self._engine)
+            names = set(inspector.get_table_names())
+            names |= set(inspector.get_view_names())
+        except SQLAlchemyError as exc:
+            raise DataAccessError(f"cannot list entities: {exc}") from exc
+        return sorted(names)
+
     def columns(self, entity: str) -> list[dict[str, object]]:
         """Reflect the columns of ``entity`` for GUI mapping help (§5.2).
 

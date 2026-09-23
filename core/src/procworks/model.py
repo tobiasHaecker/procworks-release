@@ -615,6 +615,61 @@ class StaffRule(BaseModel):
     operands: list[StaffRule] = Field(default_factory=list)
 
 
+#: Joining word per combinator kind for :func:`staff_rule_text`.
+_STAFF_COMBINATOR_WORDS = {
+    StaffRuleKind.AND: " und ",
+    StaffRuleKind.OR: " oder ",
+    StaffRuleKind.EXCEPT: " außer ",
+}
+
+
+def staff_rule_text(
+    rule: StaffRule,
+    schema: ProcessSchema | None = None,
+    org: OrgModel | None = None,
+) -> str:
+    """Render a staff rule as one German line, with names instead of ids.
+
+    Display only -- like :func:`loop_condition_text` this derives a caption from
+    the structured rule and never decides anything. Used by the template
+    gallery ("wer erledigt was"), by the BPMN export (lane names) and wherever a
+    rule has to be readable.
+
+    ``org`` defaults to the schema's embedded organisation; it can be passed
+    separately for a rule that is not (yet) attached to a schema. An id that
+    cannot be resolved stays visible as an id -- a half-known rule is still more
+    useful than a blank.
+
+    :param rule: the structured rule
+    :param schema: schema whose nodes name the referenced steps
+    :param org: organisation the role/unit/agent ids resolve against
+    :returns: a single line, e.g. ``Vorgesetzte:r von „Antrag erfassen"``
+    """
+
+    organisation = org if org is not None else (schema.org_model if schema else None)
+    roles = organisation.roles if organisation else {}
+    units = organisation.org_units if organisation else {}
+    agents = organisation.agents if organisation else {}
+    ref = rule.ref or ""
+    if rule.kind is StaffRuleKind.ROLE:
+        return roles[ref].name if ref in roles else ref
+    if rule.kind is StaffRuleKind.ORG_UNIT:
+        name = units[ref].name if ref in units else ref
+        return f"Abteilung {name}" + (" (inkl. Unterbereiche)" if rule.recursive else "")
+    if rule.kind is StaffRuleKind.AGENT:
+        return agents[ref].name if ref in agents else ref
+    if rule.kind in STAFF_NODE_REF_KINDS:
+        node = schema.nodes.get(ref) if schema is not None else None
+        step = node.label if node is not None and node.label else ref
+        if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR:
+            return f"Vorgesetzte:r von „{step}“"
+        return f"wer „{step}“ bearbeitet hat"
+    word = _STAFF_COMBINATOR_WORDS.get(rule.kind)
+    if word is not None and rule.operands:
+        return word.join(staff_rule_text(op, schema, organisation) for op in rule.operands)
+    return rule.kind.value
+
+
 # --- modelled e-mail notification (rule group N) -------------------------
 
 

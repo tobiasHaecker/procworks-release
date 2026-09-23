@@ -339,9 +339,14 @@ internen Netz liegen, werden aber ebenfalls an die geprüfte Adresse gebunden.
 ```bash
 curl https://host/v1/connectors -H "Authorization: Bearer $TOKEN"          # nur Metadaten
 curl -X POST https://host/v1/connectors/erp/test -H "Authorization: Bearer $TOKEN"
+curl https://host/v1/connectors/erp/entities -H "Authorization: Bearer $TOKEN"  # Tabellenkatalog
 curl -X POST https://host/v1/connectors/erp/sample-read \
      -H "Authorization: Bearer $TOKEN" -d '{"entity": "Kunde", "limit": 5}'
 ```
+
+`entities` und `columns` lesen ausschließlich den **Katalog** des Systems (keine Zeile) und
+speisen die Auswahllisten der Oberfläche. Ein Treiber ohne Katalog-Auskunft liefert eine leere
+Liste — die Eingabe von Hand bleibt immer möglich.
 
 Konfiguration über `PROCWORKS_CONNECTIONS` (Dateipfad oder Inline-JSON-Array). Secrets stehen
 als `${ENV}`-Platzhalter darin und werden serverseitig aufgelöst — **nie** im Schema.
@@ -374,6 +379,8 @@ geprüft (kein Injection-Risiko).
 | `GET /v1/connectors` | `data:read` | Connector-Metadaten |
 | `POST /v1/connectors/{id}/test` | `data:read` | Verbindungstest |
 | `POST /v1/connectors/{id}/sample-read` | `data:read` | Beispieldatensätze |
+| `GET /v1/connectors/{id}/entities` | `data:read` | Lesbare Tabellen/Sichten (Katalog, keine Zeilen) |
+| `GET /v1/connectors/{id}/columns?entity=…` | `data:read` | Spalten einer Tabelle mit Datentyp |
 | `GET · POST /v1/webhooks` | `events:subscribe` | Abonnements auflisten/anlegen |
 | `DELETE /v1/webhooks/{id}` | `events:subscribe` | Abonnement löschen |
 | `POST /v1/webhooks/{id}/test` | `events:subscribe` | Testzustellung |

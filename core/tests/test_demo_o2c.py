@@ -708,3 +708,32 @@ def test_both_data_sets_can_be_loaded_side_by_side(clean_api: None) -> None:
     }
     orgs = {entry["id"] for entry in client.get("/org-models").json()}
     assert orgs == {demo.ORG_ID, demo_o2c.ORG_ID}
+
+
+def test_demo_data_shows_its_subprocesses_as_executed() -> None:
+    """Das Schaufenster darf keinen Fehlalarm zeigen (Nachtest 2026-09-22, Mangel 6).
+
+    Der Seeder schreibt sein Audit selbst und kommt an der API-Boundary nicht
+    vorbei -- der Rueckfluss eines Teilprozesses fehlte darin genauso wie dort.
+    Sichtbar wurde das in der Soll/Ist-Karte der Demo: drei Teilprozesse „nie
+    ausgefuehrt", und beide gemeldeten Abweichungen waren nur der Uebergang
+    ueber einen davon hinweg.
+    """
+
+    from procworks.audit import conformance
+
+    world = _World()
+    main = world.main()
+
+    report = conformance(main, world.audit.list_all())
+    executed = {
+        st.label: st.completed
+        for st in report.steps
+        if st.node_id in main.sub_process_bindings
+    }
+
+    assert executed, "Der Datensatz hat keine Teilprozesse mehr -- Waechter angleichen"
+    assert all(count > 0 for count in executed.values()), executed
+    assert report.deviations == [], [
+        (d.source_label, d.target_label, d.frequency) for d in report.deviations
+    ]

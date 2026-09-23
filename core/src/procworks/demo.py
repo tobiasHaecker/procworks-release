@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from procworks import execution as exe
 from procworks import operations as ops
 from procworks import org as org_ops
-from procworks.audit import AuditLog, EventType
+from procworks.audit import AuditEvent, AuditLog, EventType
 from procworks.auth_password import (
     PasswordAuthBackend,
     User,
@@ -509,6 +509,109 @@ def _build_beschaffung(org: OrgModel) -> ProcessSchema:
     return s  # left in ENTWURF on purpose: shows a draft / test-instance state
 
 
+class BackdatedAudit:
+    """Legt geseedete Ereignisse mit einem **plausiblen Zeitverlauf** ab.
+
+    Ein Seed schreibt seine ganze Historie in Millisekunden. Damit standen alle
+    Ereignisse praktisch auf derselben Sekunde, und die Auswertung zeigte, was
+    sie ehrlicherweise zeigen musste: „Ø Durchlaufzeit 0.0 s" und in der
+    Engpass-Tabelle durchweg „keine Zeitdaten" (Nachtest 2026-09-22, Mangel 8).
+    Der Datensatz ist aber ein **Schaufenster** -- ohne Zeitachse laesst sich
+    die Zeitauswertung daran nicht zeigen.
+
+    Diese Huelle liegt vor dem echten Log und stempelt jedes Ereignis rueckwaerts
+    von „jetzt" aus: Sie beginnt ``days_back`` Tage in der Vergangenheit und
+    rueckt je Ereignis um eine Spanne vor, die zwischen den Schritten variiert.
+    Der Verlauf ist **deterministisch** (kein Zufall) -- derselbe Seed erzeugt
+    dieselben Zeiten, wie es sich fuer einen reproduzierbaren Datensatz gehoert.
+
+    Bewusst nur eine Huelle: Der Aufrufer merkt nichts, es gibt keine zweite
+    Stelle, die Zeitstempel erzeugt, und ausserhalb des Seeds ist nichts
+    betroffen. Alles andere (Reihenfolge, Hash-Kette, Inhalte) bleibt unberuehrt
+    -- die Kette rechnet ueber den Zeitstempel, den sie bekommt.
+
+    :param inner: das echte Log, an das weitergereicht wird
+    :param days_back: wie weit vor „jetzt" die Historie beginnt
+    """
+
+    #: Spannen (Minuten), die der Reihe nach durchlaufen werden. Teilerfremd zur
+    #: Schrittzahl der Prozesse, damit nicht jeder Vorgang dasselbe Muster zeigt.
+    _STEPS_MINUTES = (23, 47, 11, 96, 34, 7, 61, 18, 142, 29, 53, 13)
+
+    def __init__(self, inner: AuditLog, *, days_back: float = 21.0) -> None:
+        self._inner = inner
+        self._now = datetime.now(UTC) - timedelta(days=days_back)
+        self._tick = 0
+        self._last_per_instance: dict[str, datetime] = {}
+
+    def _next(self) -> datetime:
+        """Naechster Zeitpunkt; ruecken tut die Uhr vor dem Stempeln."""
+
+        minutes = self._STEPS_MINUTES[self._tick % len(self._STEPS_MINUTES)]
+        self._tick += 1
+        self._now += timedelta(minutes=minutes)
+        return self._now
+
+    def append(
+        self,
+        event_type: EventType,
+        instance_id: str,
+        schema_id: str,
+        *,
+        schema_version: int = 1,
+        node_id: str | None = None,
+        label: str | None = None,
+        agent_id: str | None = None,
+        detail: dict[str, str] | None = None,
+        at: datetime | None = None,
+    ) -> AuditEvent:
+        stamp = at or self._next()
+        previous = self._last_per_instance.get(instance_id)
+        self._last_per_instance[instance_id] = stamp
+        # Die Dauer eines Schritts misst die Auswertung von "bereit" bis
+        # "erledigt" und liest "bereit" aus ``detail.ready_at`` (das die API
+        # sonst aus ihrer Aktivierungs-Uhr mitgibt). Im Seed ist dieser Zeitpunkt
+        # nicht erfunden, sondern bekannt: Es ist das vorangegangene Ereignis
+        # desselben Vorgangs -- da wurde der Schritt bereit. Ohne diese Angabe
+        # blieb die Engpass-Tabelle durchweg bei "keine Zeitdaten".
+        if (
+            event_type is EventType.ACTIVITY_COMPLETED
+            and previous is not None
+            and not (detail or {}).get("ready_at")
+        ):
+            detail = {**(detail or {}), "ready_at": previous.isoformat()}
+        return self._inner.append(
+            event_type,
+            instance_id,
+            schema_id,
+            schema_version=schema_version,
+            node_id=node_id,
+            label=label,
+            agent_id=agent_id,
+            detail=detail,
+            at=stamp,
+        )
+
+    # -- unveraendert durchgereicht ---------------------------------------
+    def list_all(self) -> list[AuditEvent]:
+        return self._inner.list_all()
+
+    def for_instance(self, instance_id: str) -> list[AuditEvent]:
+        return self._inner.for_instance(instance_id)
+
+    def revision(self) -> int:
+        return self._inner.revision()
+
+    def head_hash(self) -> str:
+        return self._inner.head_hash()
+
+    def max_event_time(self) -> float:
+        return self._inner.max_event_time()
+
+    def clear(self) -> None:
+        self._inner.clear()
+
+
 def _emit(
     audit: AuditLog,
     event_type: EventType,
@@ -705,6 +808,10 @@ def load_demo(
     ``absence_store`` is given, one active absence is seeded as well so the
     deputy substitution is visible out of the box (see :func:`_seed_absences`).
     """
+
+    # Geseedete Historie mit plausiblem Zeitverlauf (siehe BackdatedAudit) --
+    # ohne sie zeigt die Auswertung "0.0 s" und "keine Zeitdaten".
+    audit_log = BackdatedAudit(audit_log)
 
     org = _build_org()
     org_store.put(org)

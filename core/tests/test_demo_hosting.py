@@ -411,6 +411,29 @@ def test_demo_image_seeds_both_cosmoses() -> None:
     assert "PROCWORKS_LOAD_O2C=1" in dockerfile
 
 
+def test_demo_image_has_the_secret_the_webhook_dialog_suggests() -> None:
+    """Die zugesagte Signatur muss in der Demo auch zu sehen sein.
+
+    Der Probelauf signiert nur, wenn die angegebene Secret-Referenz auf dem
+    Server gesetzt ist. In der Demo war keine gesetzt: Wer die vom Dialog
+    vorgeschlagene Referenz eintippte, las „Nicht signiert" -- und die auf der
+    Website beworbene Signatur war nirgends belegbar (Nachtest 2026-09-22,
+    Mangel 9). Der Wert selbst ist bedeutungslos, die Demo stellt nichts zu.
+    """
+
+    path = Path(__file__).resolve().parents[2] / "deploy" / "demo" / "Dockerfile"
+    if not path.exists():
+        pytest.skip("deploy/demo/ is not part of this checkout")
+    dockerfile = path.read_text(encoding="utf-8")
+    app_js = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert "WEBHOOK_SECRET=" in dockerfile
+    # ... und der Dialog schlaegt genau diesen Namen vor.
+    assert "z. B. WEBHOOK_SECRET (optional)" in app_js
+    # Die Egress-Sperre bleibt: signiert wird ein Beispielrumpf, gesendet nichts.
+    assert "PROCWORKS_EGRESS_DENY=1" in dockerfile
+
+
 def test_full_stack_compose_passes_the_seed_switches_through_defaulting_to_off() -> None:
     """Guard: the self-hosted stack can seed example data without editing files.
 

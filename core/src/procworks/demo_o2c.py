@@ -49,7 +49,7 @@ from procworks import operations as ops
 from procworks import org as org_ops
 from procworks.audit import AuditLog, EventType
 from procworks.auth_password import PasswordAuthBackend, User, hash_password
-from procworks.demo import DEMO_PASSWORD
+from procworks.demo import DEMO_PASSWORD, BackdatedAudit
 from procworks.model import (
     AbsenceEntry,
     AccessMode,
@@ -60,6 +60,7 @@ from procworks.model import (
     InstanceState,
     MailBinding,
     MailRecipientMode,
+    NodeState,
     OrgModel,
     ProcessInstance,
     ProcessSchema,
@@ -2208,6 +2209,7 @@ class _Seeder:
         if after.state is InstanceState.COMPLETED:
             _emit(self.audit, EventType.INSTANCE_COMPLETED, after)
         self._track_new()
+        self._track_joins(after)
         return after
 
     def _track_new(self) -> None:
@@ -2224,6 +2226,53 @@ class _Seeder:
                 continue
             self._known.add(instance_id)
             _emit(self.audit, EventType.INSTANCE_CREATED, self.get(instance_id))
+
+    def _track_joins(self, finished: ProcessInstance) -> None:
+        """Traegt nach, was der Abschluss einer Kind-Instanz im Eltern-Vorgang bewirkt.
+
+        Geschwister von :meth:`_track_new` und aus demselben Grund noetig: Der
+        Rueckfluss eines Teilprozesses passiert in der Engine, nicht durch einen
+        Aufruf von aussen. Ohne diesen Nachtrag fehlten im Eltern-Vorgang der
+        **Abschluss des Teilprozess-Schritts** und -- wenn der Teilprozess sein
+        letzter Schritt war -- der **Abschluss des Vorgangs selbst**. Folge im
+        Schaufenster: Die Soll/Ist-Karte hielt jeden Teilprozess fuer „nie
+        ausgefuehrt" und meldete den Uebergang darueber hinweg als Abweichung
+        (Nachtest 2026-09-22, Mangel 6) -- beide gemeldeten Abweichungen des
+        Order-to-Cash-Datensatzes waren genau dieser Fehlalarm.
+
+        Laeuft die Elternkette hoch und haelt an der ersten Stelle an, an der der
+        Rueckfluss nachweislich nicht stattgefunden hat (veraltete Kind-Instanz
+        einer frueheren Schleifenrunde, oder der Elternschritt wartet noch).
+        Spiegelt ``api._record_subprocess_joins``; der Seeder schreibt sein Audit
+        selbst und kommt an der API-Boundary nicht vorbei.
+
+        :param finished: die gerade abgeschlossene Instanz
+        """
+
+        if finished.state is not InstanceState.COMPLETED:
+            return
+        child = finished
+        while child.parent_instance_id and child.parent_node_id:
+            parent = self.ctx.instances.get(child.parent_instance_id)
+            if parent is None:
+                return
+            node_id = child.parent_node_id
+            if parent.child_instances.get(node_id) != child.id:
+                return  # veraltete Kind-Instanz: kein Rueckfluss
+            if parent.node_states.get(node_id) is not NodeState.COMPLETED:
+                return  # Elternschritt wartet noch
+            node = self.schema_of(parent).nodes.get(node_id)
+            _emit(
+                self.audit,
+                EventType.ACTIVITY_COMPLETED,
+                parent,
+                node_id=node_id,
+                label=node.label if node is not None else node_id,
+            )
+            if parent.state is not InstanceState.COMPLETED:
+                return
+            _emit(self.audit, EventType.INSTANCE_COMPLETED, parent)
+            child = parent
 
 
 def _run_bonitaet(seeder: _Seeder, instance_id: str, score: int, limit: float) -> None:
@@ -2769,6 +2818,11 @@ def load_o2c(
     (die Bearbeiterpruefung beim Abschluss braucht die Organisation); in den
     Store wandern sie danach dehydriert, wie ueberall im Kern.
     """
+
+    # Wie im Basis-Demo: die geseedete Historie bekommt einen plausiblen
+    # Zeitverlauf, sonst stehen alle Ereignisse auf derselben Sekunde und die
+    # Zeitauswertung ist am Datensatz nicht vorfuehrbar (siehe BackdatedAudit).
+    audit_log = BackdatedAudit(audit_log)
 
     org = _build_org()
     org_store.put(org)

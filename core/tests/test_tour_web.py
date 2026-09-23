@@ -529,3 +529,77 @@ def test_tour_rejection_matches_the_shape_the_client_renders() -> None:
         "the tour's rejection is not wrapped as {findings: ...}; the client "
         "would render a bare 'Fehler' instead of the rule and its message"
     )
+
+
+def test_cutouts_never_cancel_each_other_out() -> None:
+    """Nachtest 2026-09-22, Mangel 5: Schritt 5 und 7 waren nicht ausfuehrbar.
+
+    ``cutoutStyle`` schneidet die freien Bereiche als Loecher in EIN Polygon.
+    Bei der nonzero-Fuellregel zaehlt jedes Loch einmal gegen die Umlaufzahl des
+    Aussenrechtecks -- zwei einander ueberdeckende Loecher heben sich also auf,
+    und die Flaeche bleibt abgedunkelt UND klickdicht. Genau das lag vor: Anker
+    ist der Abschnittskopf *innerhalb* der Schritt-Karte, ``also`` gibt die ganze
+    Karte zusaetzlich frei -- das innere Rechteck lag im aeusseren.
+
+    Der Waechter nagelt die Ursache fest, nicht das Symptom: Die Rechtecke
+    muessen vor dem Zeichnen ueberschneidungsfrei gemacht werden.
+    """
+
+    engine = _read(TOUR / "engine.js")
+
+    assert "function disjointRects(" in engine, "Die Entflechtung der Loecher fehlt"
+    cutout = engine[engine.index("function cutoutStyle("): engine.index("function disjointRects(")]
+    assert "disjointRects(padded)" in cutout, (
+        "cutoutStyle zeichnet die Rechtecke ungefiltert -- verschachtelte "
+        "Bereiche heben sich wieder auf"
+    )
+    # Die beiden Schritte, an denen es hing, geben weiterhin Karte UND Graph frei
+    # (sonst waere das Problem nur wegdefiniert statt geloest).
+    tours = _read(TOUR / "tours.js")
+    both = 'also: [\'[data-tour="model.graph"]\', \'[data-tour="model.palette"]\']'
+    assert tours.count(both) == 2
+
+
+def test_auto_scroll_respects_the_sticky_header() -> None:
+    """Die Tour rollte ihr Ziel unter die klebende Kopfleiste.
+
+    ``.topbar`` klebt INNERHALB des rollbaren ``.main``; wer bis an dessen
+    Oberkante rollt, schiebt sein Ziel darunter. Beim Anlegen oben und beim
+    Zentrieren muss die Kopfleiste deshalb als Rand zaehlen -- wie der
+    Demo-Banner unten.
+    """
+
+    engine = _read(TOUR / "engine.js")
+    css = _read(WEB / "styles.css")
+
+    assert re.search(r"\.topbar \{\s*\n?\s*position: sticky", css), (
+        "Die Kopfleiste klebt nicht mehr -- topInset() ueberdenken"
+    )
+    assert "function topInset(" in engine
+    body = engine[engine.index("function scrollTargetsIntoView("):]
+    body = body[: body.index("\n  /**")]
+    assert "topInset()" in body, "Das Rollen rechnet die Kopfleiste nicht ein"
+    assert "usableTop + pad" in body and "delta = top - usableTop - pad" in body
+
+
+def test_overlay_follows_a_scroll_without_scrolling_again() -> None:
+    """Der Ring stand nach dem selbsttaetigen Rollen an der alten Stelle.
+
+    Nachgefuehrt wurde nur im 300-ms-Takt. Jetzt zusaetzlich am Rollereignis --
+    aber ausdruecklich OHNE erneutes Rollen, sonst koennte sich eine weiche
+    Rollbewegung selbst weitertreiben.
+    """
+
+    engine = _read(TOUR / "engine.js")
+
+    assert 'document.addEventListener("scroll", onScroll, true)' in engine
+    assert 'document.removeEventListener("scroll", onScroll, true)' in engine, (
+        "Der Rollhorcher wird beim Beenden der Tour nicht abgeraeumt"
+    )
+    handler = engine[engine.index("function onScroll()"):]
+    handler = handler[: handler.index("\n  }") + 4]
+    assert "requestAnimationFrame" in handler, "Ungedrosselt feuert das je Rollschritt"
+    assert "paint({ noScroll: true })" in handler, (
+        "Der Aufruf aus dem Rollereignis darf nicht erneut rollen"
+    )
+    assert "if (!(opts && opts.noScroll)) scrollTargetsIntoView(rects);" in engine

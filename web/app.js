@@ -485,7 +485,7 @@ const FINDING_TEXTS = {
   "M2.step-changed": (p) => ({ text: `Der bereits bearbeitete Schritt „${p.step}“ ist in der neuen Version kein Schritt derselben Art mehr.` }),
   "M2.path-changed": (p) => ({
     text: `Die neue Version ändert den bereits durchlaufenen Weg zwischen „${p.from}“ und „${p.to}“.`,
-    hint: "Änderungen sind nur vor der aktuellen Position der Instanz möglich.",
+    hint: "Eine laufende Instanz kann nur in den Teil wechseln, der noch vor ihr liegt – der bereits durchlaufene Weg muss gleich bleiben.",
   }),
   "M3.rewired": (p) => ({
     text: `Nach dem erledigten Schritt „${p.step}“ ginge es in der neuen Version anders weiter.`,
@@ -496,6 +496,34 @@ const FINDING_TEXTS = {
     text: `„${p.step}“ braucht „${p.element}“, aber die Instanz hat dafür keinen Wert, und kein späterer Schritt liefert ihn.`,
     hint: `Einen Startwert für „${p.element}“ angeben.`,
   }),
+  // --- Ziel-Pruefung der Webhooks (Regel I6, SSRF) -----------------------
+  // Der Kern bleibt sprachneutral; formuliert wird hier, wie bei jedem Befund.
+  "WH.egress-locked": () => ({
+    text: "Auf dieser Instanz sind ausgehende Verbindungen gesperrt.",
+    hint: "Der Probelauf zeigt trotzdem, was gesendet würde.",
+  }),
+  "WH.scheme": (p) => ({
+    text: `Die Adresse beginnt mit „${p.scheme}“ – erlaubt sind nur http und https.`,
+  }),
+  "WH.no-host": () => ({ text: "Die Adresse nennt keinen Server." }),
+  "WH.credentials": () => ({
+    text: "Die Adresse darf keine Zugangsdaten enthalten.",
+    hint: "Ein Secret wird serverseitig hinterlegt und als Referenz angegeben.",
+  }),
+  "WH.port": () => ({ text: "Die Adresse hat keinen gültigen Port." }),
+  "WH.not-allow-listed": (p) => ({
+    text: `„${p.host}“ steht nicht auf der Freigabeliste dieser Instanz.`,
+    hint: "Die Liste pflegt die Administration (PROCWORKS_WEBHOOK_ALLOWLIST).",
+  }),
+  "WH.no-resolve": (p) => ({
+    text: `Der Name „${p.host}“ lässt sich nicht auflösen.`,
+    hint: "Tippfehler, oder der Name existiert nur im internen Netz.",
+  }),
+  "WH.internal-address": (p) => ({
+    text: `„${p.host}“ zeigt auf eine interne Adresse – solche Ziele sind nicht zulässig.`,
+    hint: "Das verhindert, dass ein Modell nach innen telefoniert (SSRF-Schutz).",
+  }),
+
   // --- Vorbedingungen der Operationen (Regel OP) -------------------------
   "OP.not-found": (p) => ({
     text: `${OP_KIND_NAMES[p.kind] || "Das Element"} „${p.name}“ gibt es nicht (mehr).`,
@@ -636,6 +664,10 @@ function describeError(err) {
       lines: d.findings.map((f) => findingLine(f, { withHint: true })),
     };
   }
+  // Ein Boundary-Befund mit Code (z. B. die SSRF-Pruefung der Webhooks) wird im
+  // selben Katalog formuliert wie ein Regelbefund -- sonst stuende hier wieder
+  // ein englischer Satz (Nachtest 2026-09-22, Mangel 9).
+  if (d.code) return { title: findingText(d, { withHint: true }), lines: [] };
   if (d.message) return { title: d.message, lines: [] };
   return { title: "Fehler", lines: [] };
 }
@@ -1444,7 +1476,35 @@ function renderGraph(schema, opts) {
   // kennt (das Einpassen passiert erst nach dem Einhaengen ins Dokument).
   wrap._provBounds = provBounds;
   attachPanZoom(wrap, root);
+  if (opts.fitOnShow) fitWhenVisible(wrap);
   return wrap;
+}
+
+/**
+ * Passt eine Zeichenflaeche ein, sobald sie im Dokument haengt und Groesse hat.
+ *
+ * ``fitToView`` braucht die tatsaechliche Groesse des Rahmens -- die gibt es
+ * erst nach dem Einhaengen. Eine Sicht, die ihren Graphen loesgeloest baut und
+ * erst danach anhaengt (Soll/Ist-Karte im Monitoring), stand deshalb beim
+ * ersten Oeffnen leer da: das Modell lag ausserhalb des Ausschnitts, und man
+ * musste selbst "Einpassen" druecken (Nachtest 2026-09-22, Mangel 13).
+ *
+ * Wartet hoechstens ein halbe Sekunde (30 Bilder) -- danach ist die Flaeche
+ * entweder da oder die Sicht wurde laengst wieder verlassen; ein ewiger
+ * Ruecksprung waere ein Leck.
+ *
+ * @param {HTMLElement} wrap die Zeichenflaeche aus renderGraph
+ */
+function fitWhenVisible(wrap) {
+  let tries = 0;
+  const attempt = () => {
+    if (!wrap.isConnected || !wrap.clientWidth || !wrap.clientHeight) {
+      if (++tries < 30) requestAnimationFrame(attempt);
+      return;
+    }
+    if (wrap._panzoom) wrap._panzoom.fitToView();
+  };
+  requestAnimationFrame(attempt);
 }
 
 // Zeichnet die Knoten-Badges (Datenbindungen + Bearbeiter) als **vertikalen
@@ -3554,23 +3614,42 @@ function bindStaffDialog(nodeId) {
       const [kind, ref] = [picked.slice(0, picked.indexOf(":")), picked.slice(picked.indexOf(":") + 1)];
       const rule = { kind, ref };
       if (kind === "ORG_UNIT") rule.recursive = recBox.checked;
-      try {
-        await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId, rule });
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
-      // Weitere Schritte: jede Zuordnung ist eine eigene Operation mit eigener
-      // Pruefung im Kern -- keine Sammel-Abkuerzung. Scheitert eine, bleiben die
-      // anderen bestehen, und die Meldung nennt, welche nicht ging.
-      const extra = others.selected();
-      const failed = [];
-      for (const other of extra) {
-        try { await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: other, rule }); }
-        catch (err) { const d = describeError(err); failed.push(`${nodeLabelOf(other)}: ${d.lines.join(" ") || d.title}`); }
-      }
-      await refreshSchema(); render();
-      const done = 1 + extra.length - failed.length;
-      if (failed.length) toast("err", `${done} Schritt(e) zugeordnet, ${failed.length} nicht`, failed);
-      else toast("ok", done > 1 ? `${done} Schritten zugeordnet` : "Bearbeiter zugeordnet", [describeRule(rule)]);
+      return applyStaffRuleTo(nodeId, others.selected(), rule);
     }, "Zuordnen");
+}
+
+/**
+ * Setzt eine Bearbeiterregel auf einen Schritt und optional auf weitere.
+ *
+ * Die **eine** Stelle, an der eine Zuordnung geschrieben wird -- beide Dialoge
+ * (Schritt-Karte und Ressourcensicht) rufen sie auf. Bis zum Nachtest
+ * 2026-09-22 (Mangel 10) konnte nur der Karten-Dialog mehrere Schritte auf
+ * einmal, und wer die Zuordnung in der Ressourcensicht suchte, fand die
+ * Möglichkeit dort nicht.
+ *
+ * Jede Zuordnung bleibt eine **eigene** Kern-Operation mit eigener Prüfung --
+ * keine Sammel-Abkürzung. Scheitert eine, bleiben die anderen bestehen, und die
+ * Meldung nennt, welche nicht ging.
+ *
+ * @param {string} nodeId der Schritt des Dialogs
+ * @param {string[]} extra weitere Schritte aus „Auch weiteren Schritten zuordnen"
+ * @param {object} rule die Bearbeiterregel (StaffRule)
+ * @returns {Promise<boolean|undefined>} false, wenn schon der erste Schritt scheiterte
+ *   (dann bleibt der Dialog offen)
+ */
+async function applyStaffRuleTo(nodeId, extra, rule) {
+  try {
+    await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId, rule });
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+  const failed = [];
+  for (const other of extra) {
+    try { await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: other, rule }); }
+    catch (err) { const d = describeError(err); failed.push(`${nodeLabelOf(other)}: ${d.lines.join(" ") || d.title}`); }
+  }
+  await refreshSchema(); render();
+  const done = 1 + extra.length - failed.length;
+  if (failed.length) toast("err", `${done} Schritt(e) zugeordnet, ${failed.length} nicht`, failed);
+  else toast("ok", done > 1 ? `${done} Schritten zugeordnet` : "Bearbeiter zugeordnet", [describeRule(rule)]);
 }
 
 /**
@@ -6349,20 +6428,30 @@ function addStaffRule(fixedNodeId) {
     recField.style.display = kindSel.value === "ORG_UNIT" ? "" : "none";
   }
   kindSel.addEventListener("change", syncKind); syncKind();
+  // Mehrfachzuordnung wie im Dialog der Schritt-Karte -- dieselbe Auswahl,
+  // derselbe Schreibweg (Nachtest 2026-09-22, Mangel 10). Wechselt hier der
+  // Schritt, wird die Liste neu gebaut: der gewaehlte Schritt darf nicht
+  // zusaetzlich in ihr stehen.
+  let others = otherStepsBox(schema, nodeId || (nodeSel ? nodeSel.value : null));
+  const othersHost = el("div", null, others.node);
+  if (nodeSel) {
+    nodeSel.addEventListener("change", () => {
+      clear(othersHost);
+      others = otherStepsBox(schema, nodeSel.value);
+      if (others.node) othersHost.appendChild(others.node);
+    });
+  }
   openModal("Bearbeiterregel", el("div", { class: "form-grid" },
     nodeId
       ? el("div", { class: "field" }, "Schritt: ", el("strong", null, nodeCaption(schema.nodes[nodeId])))
       : el("label", { class: "field" }, "Schritt", nodeSel),
     el("label", { class: "field" }, "Art", kindSel),
     el("label", { class: "field" }, "Referenz", refSel),
-    recField), async () => {
+    recField, othersHost), async () => {
     if (!refSel.value) { toast("err", "Keine Referenz verf\u00FCgbar"); return false; }
     const rule = { kind: kindSel.value, ref: refSel.value };
     if (kindSel.value === "ORG_UNIT") rule.recursive = recBox.checked;
-    try {
-      await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId || nodeSel.value, rule });
-      await refreshSchema(); render(); toast("ok", "Zuordnung gesetzt");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return applyStaffRuleTo(nodeId || nodeSel.value, others.selected(), rule);
   }, "Zuordnen");
 }
 
@@ -7001,7 +7090,9 @@ async function conformancePanel(instances, pmap) {
 
   const observed = {};
   report.steps.forEach((st) => { observed[st.node_id] = st; });
-  body.appendChild(renderGraph(schema, { observed }));
+  // fitOnShow: die Karte wird losgeloest gebaut und erst danach angehaengt --
+  // ohne Einpassen lag das Modell beim ersten Oeffnen ausserhalb des Bildes.
+  body.appendChild(renderGraph(schema, { observed, fitOnShow: true }));
   const never = report.steps.filter((st) => !st.completed);
   const facts = el("div", { class: "conf-facts" },
     el("span", null, `${report.instances} Instanz(en) ausgewertet`),
@@ -7557,6 +7648,12 @@ function fmtTimestamp(iso) {
 
 function fmtDuration(sec) {
   if (sec == null) return "\u2013";
+  // „0.0 s" sah aus wie eine kaputte Kachel, war aber die ehrliche Auskunft
+  // ueber Vorgaenge, die in derselben Sekunde entstanden und endeten
+  // (Nachtest 2026-09-22, Mangel 8). Die Demo-Daten haben inzwischen einen
+  // Zeitverlauf; bleibt der Wert dennoch unter einer Sekunde, sagt die Kachel
+  // das jetzt, statt eine Null zu zeigen.
+  if (sec < 1) return "< 1 s";
   if (sec < 60) return sec.toFixed(1) + " s";
   if (sec < 3600) return (sec / 60).toFixed(1) + " min";
   return (sec / 3600).toFixed(1) + " h";
@@ -9110,7 +9207,9 @@ async function webhookPanel() {
 }
 
 function addWebhook() {
-  const url = el("input", { type: "url", placeholder: "https://hooks.example.com/procworks" });
+  // Auflösbares Beispiel: „hooks.example.com" existiert nicht, der eigene
+  // Vorschlag scheiterte deshalb an der Zielprüfung (Nachtest, Mangel 9).
+  const url = el("input", { type: "url", placeholder: "https://example.com/procworks" });
   const secret = el("input", { type: "text", placeholder: "z. B. WEBHOOK_SECRET (optional)" });
   const checks = WEBHOOK_EVENT_TYPES.map((ev) => {
     const cb = el("input", { type: "checkbox", value: ev });
@@ -9157,13 +9256,18 @@ function renderWebhookPreview(box, p) {
   clear(box);
   box.appendChild(p.allowed
     ? el("div", { class: "ok-banner" }, `\u2713 Ziel zulässig${p.resolved_address ? ` (Adresse ${p.resolved_address})` : ""}.`)
-    : el("div", { class: "warn-banner" }, `Ziel abgelehnt: ${p.reason}`));
+    : el("div", { class: "warn-banner" }, "Ziel abgelehnt: " + findingText(
+        { code: p.reason_code, params: p.reason_params, message: p.reason }, { withHint: true })));
   if (p.egress_locked) {
     box.appendChild(el("div", { class: "warn-banner", style: "margin-top:6px" },
       "Auf dieser Instanz sind ausgehende Verbindungen gesperrt – gesendet würde trotzdem nichts."));
   }
   box.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-top:8px" },
-    p.signed ? "Signiert (X-ProcWorks-Signature, HMAC-SHA256 über den Rumpf)." : "Nicht signiert – keine Secret-Referenz oder sie ist auf dem Server nicht gesetzt."));
+    p.signed
+      ? "Signiert (X-ProcWorks-Signature, HMAC-SHA256 über den Rumpf)."
+      : !p.secret_ref
+        ? "Nicht signiert – es wurde keine Secret-Referenz angegeben."
+        : `Nicht signiert – die Secret-Referenz „${p.secret_ref}“ ist auf diesem Server nicht hinterlegt. Das Secret selbst wird serverseitig gesetzt und verlässt ihn nie.`));
   const headerText = Object.entries(p.headers).map(([k, v]) => `${k}: ${v}`).join("\n");
   box.appendChild(el("pre", { class: "wh-preview-code" }, headerText + "\n\n" + p.body));
 }

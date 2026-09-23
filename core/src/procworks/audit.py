@@ -150,6 +150,7 @@ class AuditLog(Protocol):
         label: str | None = None,
         agent_id: str | None = None,
         detail: dict[str, str] | None = None,
+        at: datetime | None = None,
     ) -> AuditEvent: ...
 
     def list_all(self) -> list[AuditEvent]: ...
@@ -184,9 +185,10 @@ class InMemoryAuditLog:
         label: str | None = None,
         agent_id: str | None = None,
         detail: dict[str, str] | None = None,
+        at: datetime | None = None,
     ) -> AuditEvent:
         self._seq += 1
-        timestamp = datetime.now(UTC)
+        timestamp = at or datetime.now(UTC)
         detail = detail or {}
         entry_hash = chain_hash(
             self._head,

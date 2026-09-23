@@ -705,3 +705,81 @@ def test_transport_reads_only_a_bounded_part_of_the_response() -> None:
         listener.close()
     assert sent["bytes"] < 50 * 1024 * 1024, "the whole body was consumed"
     assert _MAX_RESPONSE_BYTES <= 1024 * 1024
+
+
+# --- sprachneutrale Absagen + erklaerte Signatur (Nachtest 2026-09-22, Mangel 9)
+
+
+def test_refusals_carry_a_code_and_parameters_for_the_client() -> None:
+    """Der Kern bleibt englisch, der Client formuliert -- dafuer braucht er Code
+    und Parameter.
+
+    Die Zielpruefung war die letzte Stelle, an der ein englischer Satz
+    ungefiltert in einer deutschen Oberflaeche landete („webhook host
+    'hooks.example.com' does not resolve").
+    """
+
+    from procworks.outbox import WebhookError, assert_url_allowed
+
+    cases = {
+        "ftp://example.net/x": ("WH.scheme", {"scheme": "ftp"}),
+        "https://user:pw@example.net/x": ("WH.credentials", {}),
+        "http://10.0.0.5/hook": ("WH.internal-address", {"host": "10.0.0.5"}),
+    }
+    for url, (code, params) in cases.items():
+        with pytest.raises(WebhookError) as exc:
+            assert_url_allowed(url)
+        assert exc.value.code == code, url
+        assert exc.value.params == params, url
+        assert exc.value.message, "die technische Meldung bleibt die Basis"
+
+
+def test_api_rejection_hands_the_code_to_the_client(webhook_api: None) -> None:
+    """Die Absage eines Abonnements reist mit Code und Parametern zum Client.
+
+    Die Fixture pflegt eine Freigabeliste, hier greift also ``not-allow-listed``
+    -- der Punkt ist die Form der Antwort, nicht die konkrete Regel.
+    """
+
+    resp = client.post(
+        "/v1/webhooks", json={"url": "http://10.0.0.5/hook", "events": ["task.completed"]}
+    )
+
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["code"] == "WH.not-allow-listed"
+    assert detail["params"] == {"host": "10.0.0.5"}
+    assert "allow-list" in detail["message"]  # unveraendert fuer Logs/Tests
+
+
+def test_preview_says_whether_the_named_secret_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """„Nicht signiert" war eine Sackgasse.
+
+    Wer die vorgeschlagene Referenz eintippte, sah kein Ergebnis und konnte ein
+    nicht hinterlegtes Secret nicht von einer kaputten Funktion unterscheiden.
+    """
+
+    from procworks.outbox import preview_delivery
+
+    monkeypatch.delenv("FEHLT_HIER", raising=False)
+    unknown = preview_delivery("https://hooks.example.net/in", "task.completed", "FEHLT_HIER")
+    assert unknown.signed is False
+    assert unknown.secret_ref == "FEHLT_HIER" and unknown.secret_known is False
+
+    monkeypatch.setenv("IST_DA", "s3kr3t")
+    known = preview_delivery("https://hooks.example.net/in", "task.completed", "IST_DA")
+    assert known.signed is True and known.secret_known is True
+
+    none_asked = preview_delivery("https://hooks.example.net/in", "task.completed", "")
+    assert none_asked.secret_ref == "" and none_asked.secret_known is False
+
+
+def test_preview_refusal_is_language_neutral_too() -> None:
+    from procworks.outbox import preview_delivery
+
+    p = preview_delivery("http://169.254.169.254/latest/meta-data/", "task.completed", "")
+
+    assert p.reason_code == "WH.internal-address"
+    assert p.reason_params == {"host": "169.254.169.254"}

@@ -227,6 +227,21 @@ const Tour = (() => {
     render();
     t.timer = setInterval(tick, TICK_MS);
     document.addEventListener("keydown", onKey, true);
+    // Rollen bewegt Anker, Ring und Aussparung gemeinsam -- nur der 300-ms-Takt
+    // zieht sie nach, und das sieht man (im Nachtest 2026-09-22 stand der Ring
+    // nach dem selbsttaetigen Rollen sichtbar an der alten Stelle). Deshalb
+    // zusaetzlich am Rollereignis nachfuehren, gedrosselt auf ein Bild.
+    document.addEventListener("scroll", onScroll, true);
+  }
+
+  /** Auf ein Bild gedrosseltes Nachfuehren des Overlays beim Rollen. */
+  let scrollFrame = 0;
+  function onScroll() {
+    if (!t.tour || scrollFrame) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      try { paint({ noScroll: true }); } catch (_e) { /* Nachfuehren ist Kuer */ }
+    });
   }
 
   /**
@@ -250,7 +265,9 @@ const Tour = (() => {
 
     if (t.timer) clearInterval(t.timer);
     t.timer = null;
+    if (scrollFrame) { cancelAnimationFrame(scrollFrame); scrollFrame = 0; }
     document.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("scroll", onScroll, true);
     t.tour = null;
     t.index = 0;
     t.painted = null;
@@ -568,8 +585,13 @@ const Tour = (() => {
    * „Weiter“/„Zurück“ lösten dadurch oft gar kein ``click`` aus. Ein Neubau
    * findet nur statt, wenn sich Schritt, Anker-Verfügbarkeit oder
    * Blockier-Modus ändern (:func:`paintKey`).
+   *
+   * @param {{noScroll?: boolean}} [opts] ``noScroll`` unterdrückt das
+   *   selbsttätige Rollen. Der Aufruf aus dem Rollereignis setzt es: Er soll
+   *   das Overlay nachführen, nicht erneut rollen -- sonst könnte ein Neubau
+   *   während einer weichen Rollbewegung sich selbst weitertreiben.
    */
-  function paint() {
+  function paint(opts) {
     const step = current();
     const root = byId("tour-root");
     if (!step || !root) return;
@@ -652,7 +674,7 @@ const Tour = (() => {
       ring = el("div", { class: "tour-ring", style: ringStyle });
       root.appendChild(ring);
     }
-    scrollTargetsIntoView(rects);
+    if (!(opts && opts.noScroll)) scrollTargetsIntoView(rects);
     const pop = popup(step, rect, missing);
     root.appendChild(pop);
     t.painted = { key, scrim, ring, pop };
@@ -745,15 +767,64 @@ const Tour = (() => {
    */
   function cutoutStyle(rects) {
     const pad = 6;
-    const holes = rects.map((r) => {
-      const x1 = Math.max(0, r.left - pad), y1 = Math.max(0, r.top - pad);
-      const x2 = r.right + pad, y2 = r.bottom + pad;
+    const padded = rects.map((r) => ({
+      x1: Math.max(0, r.left - pad), y1: Math.max(0, r.top - pad),
+      x2: r.right + pad, y2: r.bottom + pad,
+    }));
+    const holes = disjointRects(padded).map(({ x1, y1, x2, y2 }) =>
       // Gegen den Uhrzeigersinn, das Außenrechteck läuft im Uhrzeigersinn.
-      return `${x1}px ${y1}px, ${x1}px ${y2}px, ${x2}px ${y2}px, ` +
-             `${x2}px ${y1}px, ${x1}px ${y1}px, 0 0`;
-    });
+      `${x1}px ${y1}px, ${x1}px ${y2}px, ${x2}px ${y2}px, ` +
+      `${x2}px ${y1}px, ${x1}px ${y1}px, 0 0`);
     return "clip-path: polygon(" +
       "0 0, 100% 0, 100% 100%, 0 100%, 0 0, " + holes.join(", ") + ")";
+  }
+
+  /**
+   * Zerlegt eine Menge Rechtecke in **überschneidungsfreie** Rechtecke gleicher
+   * Vereinigungsfläche.
+   *
+   * Das ist keine Schönheitsarbeit, sondern die Voraussetzung dafür, dass
+   * :func:`cutoutStyle` überhaupt funktioniert: Bei der nonzero-Füllregel zählt
+   * jedes Loch einmal gegen die Umlaufzahl des Außenrechtecks. Zwei Löcher, die
+   * einander überdecken, zählen dort **zweimal** -- die Fläche wird wieder
+   * gefüllt, und genau dieser Teil der Abdunkelung blockt dann Klicks.
+   *
+   * Im Nachtest 2026-09-22 (Mangel 5) war das der Grund, warum die Tour-Schritte
+   * 5 und 7 bei Laptop-Höhe nicht ausführbar waren: Anker ist dort der
+   * Abschnittskopf **innerhalb** der Schritt-Karte, und ``also`` gibt die ganze
+   * Karte zusätzlich frei. Das innere Rechteck lag vollständig im äusseren --
+   * beide hoben sich auf, und der gesamte Bildschirm blieb abgedunkelt und
+   * klickdicht, auch im Ring.
+   *
+   * Verfahren: Streifen entlang aller vorkommenden x-Kanten; je Streifen die
+   * y-Intervalle der dort liegenden Rechtecke vereinigen. Das Ergebnis deckt
+   * dieselbe Fläche, überschneidet sich aber nirgends. Bei den ein bis drei
+   * Bereichen eines Tour-Schritts ist der Aufwand bedeutungslos.
+   *
+   * @param {{x1:number,y1:number,x2:number,y2:number}[]} rects Eingabe-Rechtecke.
+   * @returns {{x1:number,y1:number,x2:number,y2:number}[]} Überschneidungsfrei.
+   */
+  function disjointRects(rects) {
+    const valid = rects.filter((r) => r.x2 > r.x1 && r.y2 > r.y1);
+    if (valid.length < 2) return valid;
+    const xs = [...new Set(valid.flatMap((r) => [r.x1, r.x2]))].sort((a, b) => a - b);
+    const out = [];
+    for (let i = 0; i < xs.length - 1; i++) {
+      const x1 = xs[i], x2 = xs[i + 1];
+      if (x2 <= x1) continue;
+      const spans = valid
+        .filter((r) => r.x1 <= x1 && r.x2 >= x2)
+        .map((r) => [r.y1, r.y2])
+        .sort((a, b) => a[0] - b[0]);
+      const merged = [];
+      for (const [y1, y2] of spans) {
+        const last = merged[merged.length - 1];
+        if (last && y1 <= last[1]) last[1] = Math.max(last[1], y2);
+        else merged.push([y1, y2]);
+      }
+      merged.forEach(([y1, y2]) => out.push({ x1, y1, x2, y2 }));
+    }
+    return out;
   }
 
   /**
@@ -780,14 +851,15 @@ const Tour = (() => {
     const pad = 16;
     const top = Math.min(...rects.map((r) => r.top));
     const bottom = Math.max(...rects.map((r) => r.bottom));
+    const usableTop = topInset();
     const usableBottom = window.innerHeight - bottomInset();
-    if (top >= pad && bottom <= usableBottom - pad) return;   // passt schon
+    if (top >= usableTop + pad && bottom <= usableBottom - pad) return;  // passt schon
 
     let delta;
-    if (bottom - top <= usableBottom - 2 * pad) {
-      delta = (top + bottom) / 2 - usableBottom / 2;          // mittig
+    if (bottom - top <= usableBottom - usableTop - 2 * pad) {
+      delta = (top + bottom) / 2 - (usableTop + usableBottom) / 2;  // mittig
     } else {
-      delta = top - pad;                                      // oben anlegen
+      delta = top - usableTop - pad;                          // oben anlegen
     }
     const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     try {
@@ -880,6 +952,25 @@ const Tour = (() => {
    *
    * @returns {number} Belegte Höhe am unteren Rand in Pixeln, inkl. Abstand.
    */
+  /**
+   * Vom oberen Rand belegter Platz (die klebende Kopfleiste).
+   *
+   * ``.topbar`` ist ``position: sticky`` **innerhalb** des rollbaren ``.main``
+   * -- sie bleibt also am oberen Rand stehen, während der Inhalt darunter
+   * durchrollt. Wer bis an die Oberkante rollt, schiebt sein Ziel damit
+   * **unter** die Kopfleiste. Genau das passierte im Nachtest 2026-09-22
+   * (Mangel 5) bei Laptop-Höhe: Die Tour rollte den Knoten sauber an den
+   * oberen Rand -- und dort verdeckte ihn die Kopfleiste.
+   *
+   * @returns {number} Unterkante der Kopfleiste in Bildschirmkoordinaten.
+   */
+  function topInset() {
+    const bar = document.querySelector(".topbar");
+    if (!bar) return 0;
+    const r = bar.getBoundingClientRect();
+    return r.height ? Math.max(0, r.bottom) : 0;
+  }
+
   function bottomInset() {
     const banner = byId("demo-banner");
     if (!banner) return 0;

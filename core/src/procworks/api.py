@@ -1605,6 +1605,86 @@ def _after_advance(
     _drive_pushes()
     _notify_ready(schema, before_states, after)
     _instances.put(after)
+    _record_subprocess_joins(schema, before_states, after)
+
+
+def _record_subprocess_joins(
+    schema: ProcessSchema,
+    before_states: dict[str, NodeState] | None,
+    after: ProcessInstance,
+) -> None:
+    """Audit what a finished child instance did to its parent (and beyond).
+
+    A SUBPROCESS node completes **inside the engine**, in a different instance
+    than the request advanced: the child finishes, ``_propagate_completion``
+    joins it into the parent, marks the parent's node COMPLETED and may finish
+    the parent in turn. The boundary never saw any of it, so two entries were
+    missing from the parent's history (Nachtest 2026-09-22, defect 6):
+
+    * the **completion of the SUBPROCESS step**. Without it the Soll/Ist map
+      called every sub-process "never executed" and reported the transition
+      *across* it as a deviation from the model -- in the Order-to-Cash demo
+      two of two reported deviations were exactly this false alarm.
+    * the **completion of the parent instance**, whenever the sub-process was
+      its last step. The parent was COMPLETED but its log did not say so, which
+      silently cost the KPIs a finished instance and the webhook subscribers
+      their ``instance.completed``.
+
+    Runs from :func:`_after_advance`, so every path is covered (human
+    completion, external task, ad-hoc change, migration). It fires only for the
+    advance that actually finished the instance -- an instance that was already
+    COMPLETED before this advance has nothing to join -- and it stops at the
+    first ancestor where the join demonstrably did not happen: a stale child of
+    an earlier loop iteration (``child_instances`` no longer points at it) or a
+    parent node that is still waiting.
+
+    :param schema: schema of the advanced instance (to find its END node)
+    :param before_states: its node states before the advance (``None`` on a
+        fresh instance)
+    :param after: the advanced instance
+    """
+
+    if after.state is not InstanceState.COMPLETED:
+        return
+    end_id = schema.end_node().id
+    if before_states is not None and before_states.get(end_id) is NodeState.COMPLETED:
+        return  # was already finished -- this advance joined nothing
+    child = after
+    while child.parent_instance_id and child.parent_node_id:
+        parent = _instances.get(child.parent_instance_id)
+        if parent is None:
+            return
+        node_id = child.parent_node_id
+        if parent.child_instances.get(node_id) != child.id:
+            return  # stale child of an earlier loop round: no join happened
+        if parent.node_states.get(node_id) is not NodeState.COMPLETED:
+            return  # the parent step is still open (or waiting on siblings)
+        if not parent.is_test:
+            parent_schema = _effective_schema_for(parent)
+            ready = parent.node_activated_at.get(node_id)
+            detail = {"child_instance": child.id}
+            if ready is not None:
+                detail["ready_at"] = ready.isoformat()
+            _audit.append(
+                EventType.ACTIVITY_COMPLETED,
+                parent.id,
+                parent.schema_id,
+                schema_version=parent.schema_version,
+                node_id=node_id,
+                label=_label_of(parent_schema, node_id),
+                detail=detail,
+            )
+            if parent.state is InstanceState.COMPLETED:
+                _audit.append(
+                    EventType.INSTANCE_COMPLETED,
+                    parent.id,
+                    parent.schema_id,
+                    schema_version=parent.schema_version,
+                )
+                _emit_event("instance.completed", _instance_event_payload(parent))
+        if parent.state is not InstanceState.COMPLETED:
+            return
+        child = parent
 
 
 def _stamp_activations(
@@ -4658,17 +4738,22 @@ def post_migration_check(
     return MigrationReport(migratable=not findings, findings=findings)
 
 
-@app.post("/instances/{instance_id}/migrate", response_model=ProcessInstance, dependencies=[_run])
-def post_migrate(instance_id: str, req: MigrateRequest) -> ProcessInstance:
+@app.post("/instances/{instance_id}/migrate", response_model=ProcessInstance)
+def post_migrate(
+    instance_id: str,
+    req: MigrateRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> ProcessInstance:
     instance = _get_instance_or_404(instance_id)
     target = _get_or_404(req.target_schema_id)
-    return _migrate_and_record(instance, target, req.data_mapping or None)
+    return _migrate_and_record(instance, target, req.data_mapping or None, principal)
 
 
 def _migrate_and_record(
     instance: ProcessInstance,
     target: ProcessSchema,
     data_mapping: dict[str, object] | None,
+    principal: Principal | None = None,
 ) -> ProcessInstance:
     """Migrate one instance (M1-M5 via the core) and do the boundary follow-ups.
 
@@ -4690,15 +4775,24 @@ def _migrate_and_record(
             resolver=_resolver,
         )
     )
+    # Wer hat migriert? Eine Migration ist eine Entscheidung, kein
+    # Maschinenereignis -- der Verlauf zeigte bis zum Nachtest 2026-09-22
+    # (Mangel 7) "System". Gebundener Login: der Agent (der Verlauf loest ihn zum
+    # Namen auf); ungebundener: der Login in ``detail.actor``, dieselbe
+    # Schreibweise wie beim Abschluss (:func:`_completion_detail`).
+    detail: dict[str, str] = {
+        "source_schema_id": instance.schema_id,
+        "target_schema_id": target.id,
+    }
+    if principal is not None and principal.agent_id is None:
+        detail["actor"] = principal.subject
     _audit.append(
         EventType.INSTANCE_MIGRATED,
         after.id,
         after.schema_id,
         schema_version=after.schema_version,
-        detail={
-            "source_schema_id": instance.schema_id,
-            "target_schema_id": target.id,
-        },
+        agent_id=principal.agent_id if principal is not None else None,
+        detail=detail,
     )
     if not instance.is_test:
         # Migration can activate mail-bound nodes on the *target* schema (a step
@@ -4851,9 +4945,12 @@ def get_migration_report(schema_id: str) -> MigrationAssistantReport:
 @app.post(
     "/schemas/{schema_id}/migrate-instances",
     response_model=BulkMigrateReport,
-    dependencies=[_run],
 )
-def post_migrate_instances(schema_id: str, req: BulkMigrateRequest) -> BulkMigrateReport:
+def post_migrate_instances(
+    schema_id: str,
+    req: BulkMigrateRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> BulkMigrateReport:
     """Bulk migration onto ``schema_id`` -- a dry run unless ``execute`` is set.
 
     Every instance goes through the same core check and the same
@@ -4902,7 +4999,7 @@ def post_migrate_instances(schema_id: str, req: BulkMigrateRequest) -> BulkMigra
             )
             continue
         try:
-            _migrate_and_record(inst, target, mapping)
+            _migrate_and_record(inst, target, mapping, principal)
         except HTTPException as exc:
             # A race with a concurrent change: report it, keep going.
             detail: dict[str, object] = exc.detail if isinstance(exc.detail, dict) else {}
@@ -5624,9 +5721,14 @@ def _run_webhook(action: Callable[[], object]) -> object:
     try:
         return action()
     except WebhookError as err:
-        raise HTTPException(
-            status_code=err.status, detail={"message": err.message}
-        ) from err
+        # Code und Parameter reisen mit, damit der Client den Befund in seiner
+        # Sprache formulieren kann (Meldungskatalog); ``message`` bleibt die
+        # unveraenderte technische Basis.
+        detail: dict[str, object] = {"message": err.message}
+        if err.code:
+            detail["code"] = err.code
+            detail["params"] = err.params
+        raise HTTPException(status_code=err.status, detail=detail) from err
 
 
 @_v1.get("/webhooks", response_model=list[WebhookSubscription])
@@ -5673,6 +5775,14 @@ class WebhookPreviewResponse(BaseModel):
     signed: bool
     headers: dict[str, str]
     body: str
+    #: Ablehnungsgrund sprachneutral (Code + Parameter), damit der Client ihn
+    #: formulieren kann; ``reason`` bleibt der technische Satz.
+    reason_code: str = ""
+    reason_params: dict[str, str] = Field(default_factory=dict)
+    #: Angefragte Secret-Referenz und ob der Server sie kennt -- ohne beides war
+    #: "nicht signiert" eine Sackgasse (siehe ``DeliveryPreview``).
+    secret_ref: str = ""
+    secret_known: bool = False
 
 
 @_v1.post("/webhooks/preview", response_model=WebhookPreviewResponse)

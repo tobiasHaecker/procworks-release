@@ -109,3 +109,90 @@ def test_api_reports_history_of_a_real_run() -> None:
     assert report["instances"] == 1 and report["deviations"] == []
     steps = {st["label"]: st for st in report["steps"]}
     assert steps["A"]["completed"] == 1 and steps["A"]["avg_total_seconds"] is not None
+
+
+# --- Teilprozesse im Soll/Ist (Nachtest 2026-09-22, Mangel 6) --------------
+
+
+def _parent_with_subprocess(name: str, *, subprocess_last: bool) -> tuple[str, str, str]:
+    """Eltern-Schema mit Teilprozess; gibt (Eltern-Id, Kind-Id, Teilprozess-Knoten)."""
+
+    kid = client.post("/schemas", json={"name": f"{name}-Kind"}).json()["id"]
+    client.post(
+        f"/schemas/{kid}/serial-insert",
+        json={"label": "Kindschritt", "after_node_id": "start"},
+    )
+    staff_via_api(client, kid)
+    assert client.post(f"/schemas/{kid}/release").status_code == 200
+
+    pid = client.post("/schemas", json={"name": name}).json()["id"]
+    client.post(f"/schemas/{pid}/serial-insert", json={"label": "Vorher", "after_node_id": "start"})
+    vorher = _node_id(pid, "Vorher")
+    assert client.post(f"/schemas/{pid}/subprocess", json={
+        "label": "Teilprozess", "after_node_id": vorher,
+        "target_schema_id": kid, "target_version": 1}).status_code == 200
+    sub = _node_id(pid, "Teilprozess")
+    if not subprocess_last:
+        client.post(
+            f"/schemas/{pid}/serial-insert",
+            json={"label": "Nachher", "after_node_id": sub},
+        )
+    staff_via_api(client, pid)
+    assert client.post(f"/schemas/{pid}/release").status_code == 200
+    return pid, kid, sub
+
+
+def _node_id(schema_id: str, label: str) -> str:
+    nodes = client.get(f"/schemas/{schema_id}").json()["nodes"]
+    return next(n["id"] for n in nodes.values() if n["label"] == label)
+
+
+def test_subprocess_step_counts_as_executed_and_is_no_deviation() -> None:
+    """Der Teilprozess galt als „nie ausgefuehrt", der Uebergang darueber als
+    Abweichung.
+
+    Ein SUBPROCESS-Knoten wird **in der Engine** abgeschlossen, in einer anderen
+    Instanz als der, die der Aufruf vorangetrieben hat -- die Boundary sah das
+    nie. Die Historie des Elternvorgangs sprang deshalb vom Schritt davor zu dem
+    danach: Der Teilprozess zaehlte 0x, und die Soll/Ist-Karte meldete den
+    Sprung als Abweichung vom Modell (im Order-to-Cash-Datensatz waren BEIDE
+    gemeldeten Abweichungen genau dieser Fehlalarm).
+    """
+
+    pid, kid, sub = _parent_with_subprocess("Teilprozess mittig", subprocess_last=False)
+    iid = client.post(f"/schemas/{pid}/instances").json()["id"]
+    client.post(f"/instances/{iid}/complete", json={"node_id": _node_id(pid, "Vorher")})
+    child = list(client.get(f"/instances/{iid}").json()["child_instances"].values())[0]
+    client.post(f"/instances/{child}/complete", json={"node_id": _node_id(kid, "Kindschritt")})
+    client.post(f"/instances/{iid}/complete", json={"node_id": _node_id(pid, "Nachher")})
+
+    report = client.get(f"/schemas/{pid}/conformance").json()
+    steps = {st["label"]: st["completed"] for st in report["steps"]}
+
+    assert steps == {"Vorher": 1, "Teilprozess": 1, "Nachher": 1}
+    assert report["deviations"] == []
+    # Das Ereignis haengt am ELTERN-Vorgang, mit dem Knoten des Teilprozesses.
+    events = client.get(f"/instances/{iid}/audit").json()
+    joined = [e for e in events if e["node_id"] == sub]
+    assert len(joined) == 1
+    assert joined[0]["event_type"] == EventType.ACTIVITY_COMPLETED
+    assert joined[0]["detail"]["child_instance"] == child
+
+
+def test_parent_finished_by_its_subprocess_reports_its_completion() -> None:
+    """Endet der Vorgang MIT dem Teilprozess, fehlte sein Abschluss ganz.
+
+    Die Instanz war COMPLETED, ihr Verlauf sagte es aber nicht -- das kostete
+    die KPIs lautlos einen abgeschlossenen Vorgang. Genau einmal, nicht doppelt.
+    """
+
+    pid, kid, _sub = _parent_with_subprocess("Teilprozess am Ende", subprocess_last=True)
+    iid = client.post(f"/schemas/{pid}/instances").json()["id"]
+    client.post(f"/instances/{iid}/complete", json={"node_id": _node_id(pid, "Vorher")})
+    child = list(client.get(f"/instances/{iid}").json()["child_instances"].values())[0]
+    client.post(f"/instances/{child}/complete", json={"node_id": _node_id(kid, "Kindschritt")})
+
+    assert client.get(f"/instances/{iid}").json()["state"] == "COMPLETED"
+    types = [e["event_type"] for e in client.get(f"/instances/{iid}/audit").json()]
+    assert types.count(EventType.INSTANCE_COMPLETED) == 1
+    assert types.count(EventType.ACTIVITY_COMPLETED) == 2  # Vorher + Teilprozess

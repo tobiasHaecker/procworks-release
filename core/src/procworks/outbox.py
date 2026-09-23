@@ -38,7 +38,7 @@ import ssl
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import urlparse
 
@@ -85,11 +85,27 @@ _BACKOFF_CAP_MS = 300_000
 
 
 class WebhookError(Exception):
-    """A boundary error in the webhook layer, carrying an HTTP status."""
+    """A boundary error in the webhook layer, carrying an HTTP status.
 
-    def __init__(self, message: str, status: int = 422) -> None:
+    Like :class:`~procworks.validator.ValidationFinding` it stays **language
+    neutral**: ``message`` is the unchanged technical basis for logs, tests and
+    API users, while ``code`` plus ``params`` let a client word the same fact in
+    its own language. The webhook preview was the last place where an English
+    sentence reached a German user interface (Nachtest 2026-09-22, Mangel 9).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status: int = 422,
+        *,
+        code: str = "",
+        params: dict[str, str] | None = None,
+    ) -> None:
         self.message = message
         self.status = status
+        self.code = code
+        self.params = params or {}
         super().__init__(message)
 
 
@@ -200,19 +216,32 @@ def resolve_target(
     """
 
     if honour_lockdown and _egress_denied():
-        raise WebhookError("outbound webhook/push delivery is disabled on this instance", 403)
+        raise WebhookError(
+            "outbound webhook/push delivery is disabled on this instance",
+            403,
+            code="WH.egress-locked",
+        )
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        raise WebhookError(f"webhook url scheme '{parsed.scheme}' is not allowed", 422)
+        raise WebhookError(
+            f"webhook url scheme '{parsed.scheme}' is not allowed",
+            422,
+            code="WH.scheme",
+            params={"scheme": parsed.scheme},
+        )
     host = parsed.hostname
     if not host:
-        raise WebhookError("webhook url has no host", 422)
+        raise WebhookError("webhook url has no host", 422, code="WH.no-host")
     if parsed.username or parsed.password:
-        raise WebhookError("webhook url must not carry credentials", 422)
+        raise WebhookError(
+            "webhook url must not carry credentials", 422, code="WH.credentials"
+        )
     try:
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError as exc:
-        raise WebhookError(f"webhook url has an invalid port: {exc}", 422) from exc
+        raise WebhookError(
+            f"webhook url has an invalid port: {exc}", 422, code="WH.port"
+        ) from exc
     path = parsed.path or "/"
     if parsed.query:
         path += "?" + parsed.query
@@ -220,17 +249,37 @@ def resolve_target(
     allow = _allowed_hosts()
     trusted = allow_internal or host in allow
     if not trusted and allow:
-        raise WebhookError(f"webhook host '{host}' is not in the allow-list", 422)
+        raise WebhookError(
+            f"webhook host '{host}' is not in the allow-list",
+            422,
+            code="WH.not-allow-listed",
+            params={"host": host},
+        )
     if trusted and not pin:
         return PinnedTarget(scheme=parsed.scheme, host=host, port=port, path=path, ip="")
     try:
         addresses = _lookup(host)
     except OSError as exc:
-        raise WebhookError(f"webhook host '{host}' does not resolve", 422) from exc
+        raise WebhookError(
+            f"webhook host '{host}' does not resolve",
+            422,
+            code="WH.no-resolve",
+            params={"host": host},
+        ) from exc
     if not addresses:
-        raise WebhookError(f"webhook host '{host}' does not resolve", 422)
+        raise WebhookError(
+            f"webhook host '{host}' does not resolve",
+            422,
+            code="WH.no-resolve",
+            params={"host": host},
+        )
     if not trusted and not all(_is_public(a) for a in addresses):
-        raise WebhookError(f"webhook host '{host}' resolves to an internal address", 422)
+        raise WebhookError(
+            f"webhook host '{host}' resolves to an internal address",
+            422,
+            code="WH.internal-address",
+            params={"host": host},
+        )
     return PinnedTarget(scheme=parsed.scheme, host=host, port=port, path=path, ip=addresses[0])
 
 
@@ -287,6 +336,17 @@ class DeliveryPreview:
     ``egress_locked`` reports ``PROCWORKS_EGRESS_DENY`` separately: in a locked
     instance (public demo) the verdict is still shown, but ``would_send`` is
     False. ``signed`` tells whether the secret reference resolved.
+
+    ``reason_code``/``reason_params`` carry the same refusal in the language
+    neutral form (see :class:`WebhookError`), so a client can word it itself;
+    ``reason`` stays the unchanged technical sentence.
+
+    ``secret_ref`` echoes the requested reference and ``secret_known`` says
+    whether the server has it. Without those two, "not signed" was a dead end:
+    a modeller typed the suggested name, saw no signature and could not tell an
+    unset server-side secret from a feature that does not work (Nachtest
+    2026-09-22, Mangel 9). An empty ``secret_ref`` simply means none was asked
+    for -- then ``secret_known`` is False without anything being wrong.
     """
 
     allowed: bool
@@ -297,6 +357,10 @@ class DeliveryPreview:
     signed: bool
     headers: dict[str, str]
     body: str
+    reason_code: str = ""
+    reason_params: dict[str, str] = field(default_factory=dict)
+    secret_ref: str = ""
+    secret_known: bool = False
 
 
 #: Example payloads per event for the preview (same shape as the real events).
@@ -326,11 +390,13 @@ def preview_delivery(
     connection is opened.
     """
 
+    code, params = "", {}
     try:
         target = resolve_target(url, honour_lockdown=False)
         allowed, reason, address = True, "", target.ip
     except WebhookError as exc:
         allowed, reason, address = False, exc.message, ""
+        code, params = exc.code, exc.params
     locked = _egress_denied()
     secret = _resolve_secret(secret_ref)
     payload = _PREVIEW_PAYLOADS.get(event_type, {"message": "ProcWorks webhook test"})
@@ -346,6 +412,10 @@ def preview_delivery(
         signed=bool(secret),
         headers=headers,
         body=body.decode("utf-8"),
+        reason_code=code,
+        reason_params=params,
+        secret_ref=secret_ref,
+        secret_known=secret is not None,
     )
 
 

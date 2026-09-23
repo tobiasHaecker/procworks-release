@@ -297,9 +297,10 @@ class SqlAlchemyAuditLog:
         label: str | None = None,
         agent_id: str | None = None,
         detail: dict[str, str] | None = None,
+        at: datetime | None = None,
     ) -> AuditEvent:
         with Session(self._engine) as session:
-            timestamp = datetime.now(UTC)
+            timestamp = at or datetime.now(UTC)
             detail = detail or {}
             prev_hash = self._head_hash(session)
             row = AuditEventRow(

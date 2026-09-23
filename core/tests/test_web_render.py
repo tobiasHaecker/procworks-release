@@ -1425,7 +1425,10 @@ def test_process_map_is_drawn_over_the_model_with_deviations() -> None:
 
     src = APP_JS.read_text(encoding="utf-8")
     panel = _function_body(src, "async function conformancePanel(")
-    assert "/conformance`" in panel and "renderGraph(schema, { observed })" in panel
+    assert "/conformance`" in panel and "renderGraph(schema, { observed" in panel
+    # Beim ersten Oeffnen lag das Modell ausserhalb des Ausschnitts
+    # (Nachtest 2026-09-22, Mangel 13) -- die Karte passt sich jetzt selbst ein.
+    assert "fitOnShow: true" in panel
     assert "report.deviations" in panel and "report.foreign_steps" in panel
     graph = _function_body(src, "function renderGraph(")
     assert "const obs = opts.observed && opts.observed[id];" in graph
@@ -1452,12 +1455,23 @@ def test_run_view_names_the_responsible_and_offers_completion_accordingly() -> N
 
 def test_staff_rule_can_be_applied_to_several_steps_in_both_surfaces() -> None:
     """Zuordnung ging nur einzeln je Schritt. ``bindStaffDialog`` ist beiden
-    Oberflaechen gemeinsam; jede Zuordnung bleibt eine eigene Kern-Operation."""
+    Oberflaechen gemeinsam; jede Zuordnung bleibt eine eigene Kern-Operation.
+
+    Seit dem Nachtest 2026-09-22 (Mangel 10) bietet **auch** der Dialog der
+    Ressourcensicht die Mehrfachzuordnung an -- wer sie dort suchte, fand sie
+    vorher nicht. Beide schreiben ueber dieselbe Funktion, damit sie nicht
+    wieder auseinanderlaufen.
+    """
 
     src = APP_JS.read_text(encoding="utf-8")
     dialog = _function_body(src, "function bindStaffDialog(")
-    assert "otherStepsBox(schema, nodeId)" in dialog and "others.selected()" in dialog
-    assert "for (const other of extra)" in dialog  # one request per step, no bulk shortcut
+    assert "otherStepsBox(schema, nodeId)" in dialog
+    assert "applyStaffRuleTo(nodeId, others.selected(), rule)" in dialog
+    resource = _function_body(src, "function addStaffRule(")
+    assert "otherStepsBox(schema, " in resource and "othersHost" in resource
+    assert "applyStaffRuleTo(nodeId || nodeSel.value, others.selected(), rule)" in resource
+    apply = _function_body(src, "async function applyStaffRuleTo(")
+    assert "for (const other of extra)" in apply  # one request per step, no bulk shortcut
     box = _function_body(src, "function otherStepsBox(")
     assert "Alle ohne Bearbeiter" in box and "automatic" in box
 
@@ -1576,3 +1590,28 @@ def test_personal_worklist_does_not_depend_on_the_selected_process() -> None:
     assert "state.agentDirectory[id]" in name
     loader = _function_body(src, "async function loadAgentDirectory(")
     assert "/directory/agents" in loader
+
+
+def test_webhook_messages_are_worded_in_the_one_catalogue() -> None:
+    """Mangel 9: Der Probelauf zeigte englische Saetze und ein Beispielziel,
+    das an der eigenen Pruefung scheitert.
+
+    Die Zielpruefung ist ein Boundary-Befund, kein Regelbefund -- sie lief
+    deshalb am Katalog vorbei und landete ungefiltert in der Oberflaeche.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    described = _function_body(src, "function describeError(")
+    assert "if (d.code) return { title: findingText(d" in described
+
+    # Das vorgeschlagene Beispielziel muss aufloesbar sein. Kommentare zaehlen
+    # nicht mit -- einer von ihnen nennt den alten Namen als Begruendung.
+    # (nur ganze Kommentarzeilen entfernen -- "//" steckt auch in jeder URL)
+    add = re.sub(r"(?m)^\s*//.*$", "", _function_body(src, "function addWebhook("))
+    assert "hooks.example.com" not in add
+    assert 'placeholder: "https://example.com/procworks"' in add
+
+    # „Nicht signiert" sagt jetzt, woran es liegt.
+    preview = _function_body(src, "function renderWebhookPreview(")
+    assert "p.secret_ref" in preview and "nicht hinterlegt" in preview
+    assert "p.reason_code" in preview  # auch die Absage wird formuliert

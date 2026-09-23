@@ -300,3 +300,60 @@ def test_completion_carries_the_ready_stamp_into_the_kpis() -> None:
     assert "ready_at" in done["detail"]
     stats = {s["node_id"]: s for s in client.get("/monitoring/kpis").json()["activity_stats"]}
     assert stats[ids["W"]]["avg_total_seconds"] is not None
+
+
+def test_migration_names_the_login_that_triggered_it() -> None:
+    """Der Verlauf zeigte „Instanz migriert - System" (Nachtest 2026-09-22, Mangel 7).
+
+    Eine Migration ist eine Entscheidung, kein Maschinenereignis. Ein Login ohne
+    Agentenbindung (Modellierer) erscheint deshalb als ``detail.actor``, genau
+    wie beim Abschluss an der Bearbeiterregel vorbei; ein gebundener Login
+    erscheint als ``agent_id`` und wird im Verlauf zum Namen aufgeloest.
+
+    Geprueft werden **beide** Wege in den Kern: der einzelne Endpunkt und der
+    Assistent.
+    """
+
+    from procworks.auth_password import (
+        InMemoryCredentialStore,
+        PasswordAuthBackend,
+        hash_password,
+    )
+
+    sid, ids = _released_v1("Assistent-Akteur")
+    einzeln, gesammelt = _start(sid), _start(sid)
+    v2 = _revision(sid)
+    _release(v2)
+
+    original = api_module._auth_backend
+    backend = PasswordAuthBackend(InMemoryCredentialStore())
+    api_module._auth_backend = backend
+    try:
+        backend.create_user(subject="mara", login="mara", roles=["modeler"])
+        user = backend.store.get_user("mara")
+        assert user is not None
+        backend.store.put_user(
+            user.model_copy(
+                update={"password_hash": hash_password("secret-pw1"), "must_change": False}
+            )
+        )
+        token = backend.login("mara", "secret-pw1").token
+        headers = {"Authorization": f"Bearer {token}"}
+
+        assert client.post(
+            f"/instances/{einzeln}/migrate", json={"target_schema_id": v2}, headers=headers
+        ).status_code == 200
+        assert client.post(
+            f"/schemas/{v2}/migrate-instances",
+            json={"execute": True, "instance_ids": [gesammelt]},
+            headers=headers,
+        ).status_code == 200
+
+        for iid in (einzeln, gesammelt):
+            events = client.get(f"/instances/{iid}/audit", headers=headers).json()
+            moved = [e for e in events if e["event_type"] == "INSTANCE_MIGRATED"]
+            assert len(moved) == 1, iid
+            assert moved[0]["detail"]["actor"] == "mara", iid
+            assert moved[0]["detail"]["target_schema_id"] == v2
+    finally:
+        api_module._auth_backend = original

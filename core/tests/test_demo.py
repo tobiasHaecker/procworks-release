@@ -662,3 +662,46 @@ def test_every_demo_staff_rule_has_a_seeded_login(
                 unreachable.append(f"{schema_id}/{label}: {sorted(possible)}")
 
     assert not unreachable, "Schritte ohne bedienbaren Login: " + "; ".join(unreachable)
+
+
+def test_seeded_history_has_a_time_course_the_kpis_can_show() -> None:
+    """Der Datensatz schrieb seine ganze Historie in Millisekunden.
+
+    Folge: „Ø Durchlaufzeit 0.0 s" und in der Engpass-Tabelle durchweg „keine
+    Zeitdaten" -- die Zeitauswertung war am Schaufenster nicht vorfuehrbar
+    (Nachtest 2026-09-22, Mangel 8). Jetzt liegt die Historie rueckdatiert in
+    der Vergangenheit, und jeder abgeschlossene Schritt bringt seinen
+    Bereit-Zeitpunkt mit.
+    """
+
+    from procworks.audit import EventType, compute_kpis
+
+    schemas = InMemorySchemaStore()
+    instances = InMemoryInstanceStore()
+    orgs = InMemoryOrgStore()
+    audit = InMemoryAuditLog()
+    demo.load_demo(
+        schema_store=schemas,
+        instance_store=instances,
+        org_store=orgs,
+        audit_log=audit,
+    )
+    events = audit.list_all()
+
+    stamps = [e.timestamp for e in events]
+    assert stamps == sorted(stamps), "die Historie laeuft nicht vorwaerts"
+    assert (stamps[-1] - stamps[0]).total_seconds() > 3600, (
+        "die ganze Historie liegt wieder auf derselben Stunde"
+    )
+    assert stamps[-1] < datetime.now(UTC), "die Historie liegt in der Zukunft"
+
+    # Jeder Abschluss traegt seinen Bereit-Zeitpunkt -- daraus entsteht die
+    # Schritt-Dauer der Engpass-Tabelle.
+    done = [e for e in events if e.event_type is EventType.ACTIVITY_COMPLETED]
+    assert done, "keine Abschluesse geseedet -- Waechter angleichen"
+    assert all(e.detail.get("ready_at") for e in done)
+
+    kpis = compute_kpis(events)
+    assert kpis.avg_cycle_seconds and kpis.avg_cycle_seconds > 60
+    assert kpis.activity_stats
+    assert all(s.avg_total_seconds is not None for s in kpis.activity_stats)

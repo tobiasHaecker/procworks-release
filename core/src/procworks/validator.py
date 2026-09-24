@@ -455,6 +455,7 @@ def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
         fail(f"unbalanced loops: {len(starts)} x LOOP_START vs {len(ends)} x LOOP_END")
 
     claimed: dict[str, str] = {}
+    blocks: list[tuple[str, str, set[str]]] = []
     for start_id in starts:
         try:
             end_id, body = loop_block(schema, start_id)
@@ -469,11 +470,80 @@ def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
             )
             continue
         claimed[end_id] = start_id
+        blocks.append((start_id, end_id, body))
         findings += _check_single_loop(schema, start_id, end_id, body)
 
     for end_id in ends - set(claimed):
         fail("LOOP_END has no matching LOOP_START", end_id)
 
+    if not findings and not _check_k1_gateways(schema):
+        findings += _check_loop_branch_nesting(schema, blocks)
+    return findings
+
+
+def _check_loop_branch_nesting(
+    schema: ProcessSchema, loops: list[tuple[str, str, set[str]]]
+) -> list[ValidationFinding]:
+    """K6a (mutual nesting): loop blocks and split/join blocks never cross.
+
+    K1 pairs splits with joins and K6a pairs LOOP_START with LOOP_END -- but
+    each pairing only looks at its own node kinds, because for the other walk a
+    node of the other kind is an ordinary serial node. So neither notices a
+    loop that *straddles* a branch block: a LOOP_START inside one branch whose
+    LOOP_END sits behind the join (or before the split, or the reverse). Both
+    pairings succeed, yet the structure is not block-structured.
+
+    Found on 2026-09-24 via ``POST /bpmn-import`` -- the operations never build
+    this (``insert_loop`` wraps a serial position, a branch block is always
+    inserted whole). The damage is the K1 kind again, only worse: when the
+    instance takes the *other* branch, the loop start is skipped, the join
+    still activates from the other branch, and the LOOP_END is reached with no
+    iteration having run. Its decision then either fails on an unwritten
+    discriminator (the instance can never complete) or says "repeat" on a stale
+    value -- the reset re-skips the body, the join re-activates and the engine
+    spins in ``_advance`` forever (a request that never returns).
+
+    The check: for every paired loop and every paired split, the loop body must
+    contain either both gateways of the block or neither, and every branch of
+    the block must contain either both loop delimiters or neither. Runs only on
+    a graph K1 and the rest of K6 already accept -- on a broken structure the
+    pairings it relies on are not defined.
+    """
+
+    findings: list[ValidationFinding] = []
+    gateway_blocks: list[tuple[str, str, list[set[str]]]] = []
+    for node in schema.nodes.values():
+        if node.type not in SPLIT_TYPES:
+            continue
+        try:
+            join_id, branches = block_join(schema, node.id)
+        except ValueError:  # pragma: no cover - K1 is clean when this runs
+            continue
+        gateway_blocks.append((node.id, join_id, branches))
+
+    for start_id, end_id, body in loops:
+        for split_id, join_id, branches in gateway_blocks:
+            crosses = (split_id in body) != (join_id in body) or any(
+                (start_id in members) != (end_id in members) for members in branches
+            )
+            if not crosses:
+                continue
+            findings.append(
+                ValidationFinding(
+                    rule="K6",
+                    node_id=start_id,
+                    message=(
+                        f"loop '{start_id}'..'{end_id}' crosses the block "
+                        f"'{split_id}'..'{join_id}' -- a loop must lie entirely "
+                        "inside one branch or enclose the whole block (K6a)"
+                    ),
+                    code="K6.crosses-branch",
+                    params={
+                        "loop": node_name(schema, start_id),
+                        "split": node_name(schema, split_id),
+                    },
+                )
+            )
     return findings
 
 

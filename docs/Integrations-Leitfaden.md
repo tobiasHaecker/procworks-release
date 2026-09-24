@@ -116,7 +116,12 @@ curl -X POST https://host/v1/instances/instance_42/nodes/act_pruefen/complete \
 **Wer schließt ab?** Ein Token, das an einen Bearbeiter gebunden ist, schließt
 als dieser Bearbeiter ab; ein ungebundenes Token nennt ihn über `agent_id`, und
 die Bearbeiterregel des Schritts wird geprüft (`409`, wenn er nicht zuständig
-ist). Ein ungebundenes Token **ohne** `agent_id` an einem Schritt mit
+ist). Das Audit hält dann beides fest: den genannten Bearbeiter und den
+Absender des Tokens (`detail.actor`). Im Namen einer Person handeln dürfen nur
+Maschinen-Identitäten: statische Token (`PROCWORKS_AUTH=token`) und Identitäten
+mit der Rolle `integration`, etwa ein Dienstkonto beim Firmen-Login (JWT).
+Persönliche Logins (Passwort, Firmenkonto ohne diese Rolle) erhalten `403`,
+wenn sie eine andere Person nennen. Ein ungebundenes Token **ohne** `agent_id` an einem Schritt mit
 Bearbeiterregel ist ein **Aufsichtseingriff**: Er braucht eine Begründung im
 Feld `supervision_reason` (sonst `422`) und wird mit ihr im Audit festgehalten.
 Bei aktiver Lizenzierung ist er nicht zulässig (`403`) — dann immer mit einem

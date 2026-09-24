@@ -573,13 +573,54 @@ def _find_agent_name(agent_id: str) -> str | None:
 
 
 
-def _resolve_acting_agent(principal: Principal, requested: str | None) -> str | None:
+def _may_act_for_others(principal: Principal, instance: ProcessInstance | None) -> bool:
+    """May an *unbound* caller name the agent it acts for (delegation)?
+
+    Naming an agent means "this person did it": the core then checks the
+    staff rule against that agent and records them as performer. That is a
+    legitimate capability of a **machine** identity -- an integration that has
+    authenticated its own user and completes the task for them (documented in
+    the Integrations-Leitfaden) -- and of the open dev mode, which has no
+    identity at all. It is not one of a **personal** login: a modeller or
+    administrator without an agent binding could otherwise work any step in
+    anybody's name, past the four-eyes principle, with the audit showing the
+    named person instead of the login (found 2026-09-24; the web client even
+    offered a person picker for it in "Meine Aufgaben").
+
+    Allowed, therefore:
+
+    * the open dev mode (no identity exists);
+    * the static-token mode (tokens are the documented integration path);
+    * any principal holding the ``integration`` role (e.g. a JWT service
+      account);
+    * throw-away test instances (no audit, no productive work -- the draft
+      test view deliberately switches between the people of a model).
+
+    Everything else -- password logins and personal JWT logins -- acts only as
+    itself; without an agent binding the supervision path with a mandatory
+    reason remains (:func:`_require_supervision_reason`).
+    """
+
+    if _auth_mode() in ("open", "token") or INTEGRATION in principal.roles:
+        return True
+    return instance is not None and instance.is_test
+
+
+def _resolve_acting_agent(
+    principal: Principal,
+    requested: str | None,
+    instance: ProcessInstance | None = None,
+) -> str | None:
     """Pick the acting agent id, never trusting the request body over identity.
 
-    A *bound* principal (token/JWT) acts only as itself: a divergent
-    ``req.agent_id`` is rejected (403). An *unbound* principal (open dev mode)
-    falls back to the requested id so the quickstart keeps working -- the core
-    BZR check still rejects an ineligible agent with 409.
+    A *bound* principal acts only as itself: a divergent ``req.agent_id`` is
+    rejected (403). An *unbound* principal may name an agent only where
+    :func:`_may_act_for_others` allows delegation (403 otherwise); the core BZR
+    check then still rejects an ineligible agent with 409. Without a named
+    agent the result is ``None`` -- the supervision path for completions.
+
+    ``instance`` is the instance the call acts on; it only matters for the
+    test-instance exemption.
     """
 
     if principal.is_bound:
@@ -588,7 +629,34 @@ def _resolve_acting_agent(principal: Principal, requested: str | None) -> str | 
                 status_code=403, detail="cannot act on behalf of another agent"
             )
         return principal.agent_id
+    if requested is not None and not _may_act_for_others(principal, instance):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Dieser Login ist keinem Bearbeiter zugeordnet und kann nicht im "
+                "Namen einer Person handeln. Einen Schritt kann er nur als "
+                "Aufsichtseingriff mit Begründung abschließen."
+            ),
+        )
     return requested
+
+
+def _delegation_detail(
+    principal: Principal, acting: str | None
+) -> dict[str, str] | None:
+    """Audit detail for an act done *in the name of* an agent by another caller.
+
+    When an unbound machine identity names the agent (see
+    :func:`_may_act_for_others`), the event's ``agent_id`` is the person, and
+    ``detail.actor`` records who actually sent the request -- so the audit
+    shows both and stays complete. ``None`` for a bound caller (it *is* the
+    agent), for no named agent, and in the open dev mode (no identity to
+    record). ``detail`` is part of the hash chain already, so this is additive.
+    """
+
+    if acting is None or principal.is_bound or _auth_mode() == "open":
+        return None
+    return {"actor": principal.subject}
 
 
 def _require_supervision_reason(
@@ -658,7 +726,9 @@ def _completion_detail(
 ) -> dict[str, str] | None:
     """Detail of an ``ACTIVITY_COMPLETED`` event.
 
-    * ``actor`` -- the login, when no agent stands behind the completion.
+    * ``actor`` -- the login, when no agent stands behind the completion, or
+      the sender, when a machine identity completed in an agent's name
+      (:func:`_delegation_detail`).
     * ``ready_at`` -- when the step became ready (the activation stamp the
       boundary already keeps for the worklist clock). It lets the KPI report
       measure a step's lead time even when it was completed without being
@@ -668,6 +738,8 @@ def _completion_detail(
     detail: dict[str, str] = {}
     if acting_agent is None:
         detail["actor"] = principal.subject
+    else:
+        detail.update(_delegation_detail(principal, acting_agent) or {})
     ready = before.node_activated_at.get(node_id)
     if ready is not None:
         detail["ready_at"] = ready.isoformat()
@@ -4296,7 +4368,9 @@ def delete_agent_absence(
     return Response(status_code=204)
 
 
-def _require_acting_agent(principal: Principal, requested: str | None) -> str:
+def _require_acting_agent(
+    principal: Principal, requested: str | None, instance: ProcessInstance
+) -> str:
     """Resolve the acting agent for ownership operations; 422 when unknown.
 
     Claim/start need a concrete owner (W1/W4) -- unlike completion there is no
@@ -4304,7 +4378,7 @@ def _require_acting_agent(principal: Principal, requested: str | None) -> str:
     is a request error, not a permission problem.
     """
 
-    acting = _resolve_acting_agent(principal, requested)
+    acting = _resolve_acting_agent(principal, requested, instance)
     if acting is None:
         raise HTTPException(
             status_code=422, detail="agent_id is required for this operation"
@@ -4329,7 +4403,7 @@ def post_claim_activity(
 
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    acting = _require_acting_agent(principal, req.agent_id)
+    acting = _require_acting_agent(principal, req.agent_id, instance)
 
     def _claim_and_stamp() -> ProcessInstance:
         after = exe.claim_activity(
@@ -4352,6 +4426,7 @@ def post_claim_activity(
             node_id=req.node_id,
             label=_label_of(schema, req.node_id),
             agent_id=acting,
+            detail=_delegation_detail(principal, acting),
         )
     return after
 
@@ -4372,7 +4447,7 @@ def post_return_activity(
 
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    acting = _resolve_acting_agent(principal, req.agent_id)
+    acting = _resolve_acting_agent(principal, req.agent_id, instance)
     holder = instance.claimed_by.get(req.node_id)
     if holder is not None and acting != holder:
         _require_agent_self_or_supervisor(principal, holder)
@@ -4393,6 +4468,7 @@ def post_return_activity(
             node_id=req.node_id,
             label=_label_of(schema, req.node_id),
             agent_id=acting,
+            detail=_delegation_detail(principal, acting),
         )
     return after
 
@@ -4405,11 +4481,20 @@ def _detail_audit(
     node_id: str,
     agent_id: str | None,
     detail: dict[str, str] | None = None,
+    principal: Principal | None = None,
 ) -> None:
-    """Append one E2 detail-state audit event (skipped for test instances)."""
+    """Append one E2 detail-state audit event (skipped for test instances).
+
+    With ``principal`` the delegating sender is recorded as ``detail.actor``
+    when the act was done in an agent's name (:func:`_delegation_detail`).
+    """
 
     if instance.is_test:
         return
+    if principal is not None:
+        delegation = _delegation_detail(principal, agent_id)
+        if delegation:
+            detail = {**(detail or {}), **delegation}
     _audit.append(
         event,
         after.id,
@@ -4436,7 +4521,7 @@ def post_suspend_activity(
 
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    acting = _require_acting_agent(principal, req.agent_id)
+    acting = _require_acting_agent(principal, req.agent_id, instance)
 
     def _suspend_and_stamp() -> ProcessInstance:
         after = exe.suspend_activity(
@@ -4453,7 +4538,15 @@ def post_suspend_activity(
         return after
 
     after = _run_or_409(_suspend_and_stamp)
-    _detail_audit(EventType.ACTIVITY_SUSPENDED, instance, after, schema, req.node_id, acting)
+    _detail_audit(
+        EventType.ACTIVITY_SUSPENDED,
+        instance,
+        after,
+        schema,
+        req.node_id,
+        acting,
+        principal=principal,
+    )
     return after
 
 
@@ -4467,7 +4560,7 @@ def post_resume_activity(
 
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    acting = _require_acting_agent(principal, req.agent_id)
+    acting = _require_acting_agent(principal, req.agent_id, instance)
 
     def _resume_and_book() -> ProcessInstance:
         after = exe.resume_activity(instance, schema, req.node_id, acting)
@@ -4485,7 +4578,15 @@ def post_resume_activity(
         return after
 
     after = _run_or_409(_resume_and_book)
-    _detail_audit(EventType.ACTIVITY_RESUMED, instance, after, schema, req.node_id, acting)
+    _detail_audit(
+        EventType.ACTIVITY_RESUMED,
+        instance,
+        after,
+        schema,
+        req.node_id,
+        acting,
+        principal=principal,
+    )
     return after
 
 
@@ -4503,7 +4604,7 @@ def post_fail_activity(
 
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    acting = _require_acting_agent(principal, req.agent_id)
+    acting = _require_acting_agent(principal, req.agent_id, instance)
     after = _run_or_409(
         lambda: exe.fail_activity(
             instance,
@@ -4522,6 +4623,7 @@ def post_fail_activity(
         req.node_id,
         acting,
         detail={"reason": req.reason.strip()},
+        principal=principal,
     )
     return after
 
@@ -4542,7 +4644,7 @@ def post_reset_activity(
 
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    acting = _resolve_acting_agent(principal, req.agent_id)
+    acting = _resolve_acting_agent(principal, req.agent_id, instance)
     holder = instance.claimed_by.get(req.node_id)
     if holder is not None and acting != holder:
         _require_agent_self_or_supervisor(principal, holder)
@@ -4558,7 +4660,15 @@ def post_reset_activity(
         return after
 
     after = _run_or_409(_reset_and_stamp)
-    _detail_audit(EventType.ACTIVITY_RESET, instance, after, schema, req.node_id, acting)
+    _detail_audit(
+        EventType.ACTIVITY_RESET,
+        instance,
+        after,
+        schema,
+        req.node_id,
+        acting,
+        principal=principal,
+    )
     return after
 
 
@@ -4576,7 +4686,7 @@ def post_start_activity(
 
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
-    acting = _require_acting_agent(principal, req.agent_id)
+    acting = _require_acting_agent(principal, req.agent_id, instance)
 
     def _start_and_stamp() -> ProcessInstance:
         after = exe.start_activity(
@@ -4601,6 +4711,7 @@ def post_start_activity(
             node_id=req.node_id,
             label=_label_of(schema, req.node_id),
             agent_id=acting,
+            detail=_delegation_detail(principal, acting),
         )
     return after
 
@@ -4614,7 +4725,7 @@ def post_complete_activity(
     before = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(before)
     before_states = dict(before.node_states)
-    acting_agent = _resolve_acting_agent(principal, req.agent_id)
+    acting_agent = _resolve_acting_agent(principal, req.agent_id, before)
     supervision = _require_supervision_reason(
         principal, acting_agent, before, schema, req.node_id, req.supervision_reason
     )

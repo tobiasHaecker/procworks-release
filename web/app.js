@@ -433,6 +433,10 @@ const FINDING_TEXTS = {
     text: `Zu „${p.step}“ gibt es keine eindeutig passende Zusammenführung.`,
     hint: "Das Modell ist nicht sauber blockstrukturiert (typisch bei importiertem BPMN).",
   }),
+  "K6.crosses-branch": (p) => ({
+    text: `Die Schleife ab „${p.loop}“ überkreuzt die Verzweigung „${p.split}“: Anfang und Ende liegen nicht im selben Zweig.`,
+    hint: "Eine Schleife muss ganz innerhalb eines Zweigs liegen oder die ganze Verzweigung umschließen (typisch bei importiertem BPMN).",
+  }),
   "K3.unreachable": (p) => ({
     text: `„${p.step}“ ist vom Start aus nicht erreichbar.`,
     hint: "Typisch bei importiertem BPMN: der Schritt hängt an keiner Verbindung vom Start.",
@@ -7740,7 +7744,13 @@ async function viewTasks() {
 
   // A bound principal (token login) is tied to one agent: no picker, the
   // worklist comes from /me/tasks. In open dev mode we keep the agent picker.
+  // A *personal* login without an agent binding (password, company account)
+  // gets the picker only to look at someone's list (supervision): it may not
+  // act in that person's name -- the core answers 403 since 2026-09-24 --, so
+  // the rows offer just the supervision completion and the recovery actions
+  // that work without an owner (see supervisionTaskActions).
   const bound = state.principal && state.principal.agent_id;
+  const supervise = !bound && !mayActForOthers();
   if (!bound && !agents.length) {
     content.appendChild(emptyState(hasRole("modeler", "admin")
       ? "Keine Agenten in den Organisationsmodellen. Lege zuerst Agenten in der Ressourcensicht an."
@@ -7761,9 +7771,17 @@ async function viewTasks() {
     const sel = el("select", null, ...agents.map((a) => el("option", { value: a.id }, a.name)));
     sel.value = agentId;
     sel.addEventListener("change", () => { localStorage.setItem("agentId", sel.value); render(); });
-    picker = el("div", { class: "panel" },
-      el("div", { class: "panel-h" }, el("h2", null, "Bearbeiter"), el("span", { class: "sub" }, "Aufgaben f\u00FCr eine Person, inkl. Vertretung")),
-      el("div", { class: "panel-b" }, el("label", { class: "field" }, "Angemeldet als", sel)));
+    picker = supervise
+      ? el("div", { class: "panel" },
+          el("div", { class: "panel-h" }, el("h2", null, "Aufsicht"), el("span", { class: "sub" }, "Aufgaben einer Person ansehen, inkl. Vertretung")),
+          el("div", { class: "panel-b" },
+            el("label", { class: "field" }, "Aufgaben ansehen von", sel),
+            el("div", { class: "warn-banner", style: "margin-top:8px" },
+              "Dein Login ist keinem Bearbeiter zugeordnet. Du kannst deshalb nicht im Namen dieser Person arbeiten. " +
+              "Einen Schritt kannst du als Aufsichtseingriff mit Begr\u00FCndung abschlie\u00DFen; er wird unter deinem Login protokolliert.")))
+      : el("div", { class: "panel" },
+          el("div", { class: "panel-h" }, el("h2", null, "Bearbeiter"), el("span", { class: "sub" }, "Aufgaben f\u00FCr eine Person, inkl. Vertretung")),
+          el("div", { class: "panel-b" }, el("label", { class: "field" }, "Angemeldet als", sel)));
   }
   content.appendChild(picker);
 
@@ -7825,7 +7843,9 @@ async function viewTasks() {
       // angehalten → Weiterarbeiten/Zurücklegen; sonst wie gehabt, für den
       // Inhaber ergänzt um Anhalten und Problem melden.
       let actions;
-      if (t.detail === "FAILED") {
+      if (supervise) {
+        actions = supervisionTaskActions(t);
+      } else if (t.detail === "FAILED") {
         actions = el("div", { class: "row", style: "gap:6px" },
           el("button", { class: "btn small", onClick: () => resetTask(t, agentId) }, "Wiederanlauf"));
       } else if (t.detail === "SUSPENDED") {
@@ -7943,6 +7963,42 @@ async function absencePanel(agentId) {
         el("label", { class: "field", style: "flex:1;min-width:180px" }, "Notiz", noteInp),
         addBtn)),
     listBody);
+}
+
+// Darf dieser Login im Namen einer anderen Person handeln (agent_id nennen)?
+// Spiegelt nur die Regel des Kerns (api._may_act_for_others), damit die
+// Oberfläche keine Knöpfe anbietet, die mit 403 enden -- entschieden wird im
+// Kern. Ja nur im offenen Entwicklungsmodus, im Token-Modus (Integrationen)
+// und für Integrations-Identitäten. Persönliche Logins (Passwort,
+// Firmenkonto) handeln nur als sie selbst.
+function mayActForOthers() {
+  if (state.authMode === "open" || state.authMode === "token") return true;
+  const roles = (state.principal && state.principal.roles) || [];
+  return roles.includes("integration");
+}
+
+// Aktionen einer Aufgabe in der Aufsichtssicht von „Meine Aufgaben" (Login ohne
+// Bearbeiterzuordnung). Keine davon nennt eine Person: Abschließen läuft als
+// Aufsichtseingriff (der Kern verlangt die Begründung, promptComplete fragt
+// danach), Zurücklegen und Wiederanlauf einer fremd übernommenen Aufgabe sind
+// die Eingriffe, die der Kern der Aufsicht ohnehin erlaubt.
+//   t: Eintrag der Aufgabenliste (OpenTask) -- Rückgabe: Knopfzeile (Element).
+function supervisionTaskActions(t) {
+  if (t.detail === "FAILED") {
+    return el("div", { class: "row", style: "gap:6px" },
+      el("button", { class: "btn small", onClick: () => resetTask(t, null) }, "Wiederanlauf"));
+  }
+  if (t.detail === "SUSPENDED") {
+    return el("div", { class: "row", style: "gap:6px" },
+      el("button", { class: "btn small ghost", onClick: () => returnTask(t, null) }, "Zurücklegen"));
+  }
+  return el("div", { class: "row", style: "gap:6px" },
+    el("button", { class: "btn small",
+      title: "Der Abschluss wird als Aufsichtseingriff mit Begründung unter deinem Login protokolliert",
+      onClick: () => completeTask(t, null) }, "Als Aufsicht abschließen"),
+    t.claimed_by
+      ? el("button", { class: "btn small ghost", onClick: () => returnTask(t, null) }, "Zurücklegen")
+      : null);
 }
 
 // E1 (Zustandsmaschine): Aufgabe übernehmen bzw. zurücklegen. Geteilte

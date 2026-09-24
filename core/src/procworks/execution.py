@@ -535,8 +535,22 @@ def _advance(
     context: ExecutionContext | None = None,
 ) -> None:
     """Drive the markings to a fixpoint: auto-complete gateways, then signal
-    and (de)activate their targets until nothing changes."""
+    and (de)activate their targets until nothing changes.
 
+    Loop safety net: within **one** advance a LOOP_END may say "repeat" at most
+    once. On a K6-valid model a second repeat is impossible -- K6c puts a
+    writing ACTIVITY on every path through the body, and an activity always
+    waits for work, so after a reset the fixpoint stops inside the body. If it
+    happens anyway, the model is not block-structured (a loop straddling a
+    branch block, stored before K6a checked that on 2026-09-24): the reset
+    re-skips the body and the same LOOP_END repeats forever -- a request that
+    never returns. Raising :class:`ExecutionError` instead turns the hang into
+    a 409; on the usual path -- completing the step before the loop end --
+    :func:`complete_activity` works on a copy, so the instance stays where it
+    was.
+    """
+
+    repeated: set[str] = set()
     progress = True
     while progress:
         progress = False
@@ -561,7 +575,14 @@ def _advance(
                 progress = True
                 continue
             if node.type is NodeType.LOOP_END:
-                _resolve_loop_end(instance, schema, node)
+                if _resolve_loop_end(instance, schema, node):
+                    if node.id in repeated:
+                        raise ExecutionError(
+                            f"LOOP_END '{node.id}' repeated without any work in "
+                            "between -- the loop is not properly nested with a "
+                            "branch block (K6a); the model must be corrected"
+                        )
+                    repeated.add(node.id)
                 progress = True
                 continue
             _complete_node(instance, schema, node)
@@ -602,8 +623,11 @@ def _resolve_xor_branch(
 
 def _resolve_loop_end(
     instance: ProcessInstance, schema: ProcessSchema, node: Node
-) -> None:
+) -> bool:
     """Decide a REPEAT-UNTIL loop at its LOOP_END (K6, Schleifen-Konzept §6).
+
+    Returns ``True`` when the loop repeats (block reset), ``False`` when it
+    exits -- :func:`_advance` uses that for its loop safety net.
 
     Evaluates the structured ``LoopDecision`` against the instance data via
     :func:`procworks.model.resolve_loop_repeat` (boolean shorthand or S3
@@ -653,8 +677,9 @@ def _resolve_loop_end(
         instance.loop_iterations[node.id] = (
             instance.loop_iterations.get(node.id, 0) + 1
         )
-        return
+        return True
     _complete_node(instance, schema, node)
+    return False
 
 
 def _reset_loop_block(

@@ -53,6 +53,17 @@ class DataAccessError(RuntimeError):
     """Raised when an external data access cannot be resolved or executed."""
 
 
+class UnsafeIdentifierError(DataAccessError):
+    """An entity/column name failed the identifier whitelist.
+
+    A subclass of :class:`DataAccessError`, so every existing handler keeps
+    catching it; the boundary can tell it apart, because it is the *caller's*
+    input that is wrong (HTTP 422), not the external system (HTTP 502).
+    Found by the Validierung 2026-09-25 (VAL-08): an unsafe entity name in the
+    sample read came back as 502 "Bad Gateway".
+    """
+
+
 class Connector(Protocol):
     """The narrow SPI every data connector implements.
 
@@ -110,7 +121,7 @@ def _safe_identifier(name: str) -> str:
     """
 
     if not _IDENTIFIER.match(name):
-        raise DataAccessError(f"unsafe SQL identifier '{name}'")
+        raise UnsafeIdentifierError(f"unsafe SQL identifier '{name}'")
     return name
 
 
@@ -118,7 +129,7 @@ def _safe_entity(name: str) -> str:
     """Return ``name`` if it is a safe (optionally schema-qualified) entity."""
 
     if not _ENTITY.match(name):
-        raise DataAccessError(f"unsafe SQL entity '{name}'")
+        raise UnsafeIdentifierError(f"unsafe SQL entity '{name}'")
     return name
 
 

@@ -925,7 +925,7 @@ def test_task_mask_is_prefilled_from_the_instance_data() -> None:
     assert "maskControl(elem, f.widget, f.options, values[f.element_id])" in code, (
         "Die gestaltete Maske wird nicht aus den Instanzdaten vorbelegt"
     )
-    assert "maskControl(elem, widget, null, values[a.element_id])" in code, (
+    assert "maskControl(elem, fallbackWidget(elem), null, values[a.element_id])" in code, (
         "Der generische Rueckfall wird nicht aus den Instanzdaten vorbelegt"
     )
 
@@ -1615,3 +1615,98 @@ def test_webhook_messages_are_worded_in_the_one_catalogue() -> None:
     preview = _function_body(src, "function renderWebhookPreview(")
     assert "p.secret_ref" in preview and "nicht hinterlegt" in preview
     assert "p.reason_code" in preview  # auch die Absage wird formuliert
+
+
+def test_typed_inputs_are_never_guessed_into_false() -> None:
+    """VAL-04 (Validierung 2026-09-25): „vielleicht" im Ja/Nein-Feld wurde still
+    zu ``false`` gespeichert, der Vorgang lief weiter.
+
+    Ursache war dasselbe Muster an zwei Stellen -- ``val === "true" || val ===
+    "1"`` im Abschliessen-Dialog und im Dialog „Instanzdaten eingeben". Beide
+    bauen ihre Felder jetzt ueber **eine** Widget-Factory (``maskControl`` mit
+    ``fallbackWidget``), und typisiert wird nur, was eindeutig ist
+    (``coerceTypedInput``); alles andere geht roh an den Kern (D3-Meldung).
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    code = re.sub(r"(?m)^\s*//.*$", "", src)
+    # Zuweisung eines Vergleichs, z. B. ``val = raw === "true" || raw === "1"``
+    assert not re.search(r'=\s*\w+\s*===\s*"true"\s*\|\|', code), (
+        "Eine stille Ja/Nein-Umwandlung ist zurueck -- ueber coerceTypedInput gehen"
+    )
+
+    coerce = _function_body(src, "function coerceTypedInput(")
+    assert "return raw;" in coerce  # Unklares bleibt roh, der Kern entscheidet
+
+    fallback = _function_body(src, "function fallbackWidget(")
+    assert '"YESNO"' in fallback  # Ja/Nein ohne Vorbelegung, kein Ankreuzfeld
+
+    form = _function_body(src, "function openInstanceDataForm(")
+    assert "maskControl(elem, fallbackWidget(elem)" in form
+    assert "parseInt" not in form and "parseFloat" not in form
+
+    mask = _function_body(src, "function maskControl(")
+    assert "coerceTypedInput(dtype, raw)" in mask
+    assert 'widget === "YESNO"' in mask
+    assert 'attrs.step = dtype === "INTEGER" ? "1" : "any"' in mask
+
+
+def test_instance_data_form_asks_for_a_reason_and_the_audit_shows_the_change() -> None:
+    """VAL-01: Datenkorrekturen ausserhalb des eigenen Schritts sind ein
+    Aufsichtseingriff. Die Regel entscheidet der Kern; der Dialog reagiert nur
+    auf dessen 422 und fragt nach der Begruendung. Der Verlauf zeigt jede
+    Aenderung mit altem und neuem Wert.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    form = _function_body(src, "function openInstanceDataForm(")
+    assert "isSupervisionRequired(err)" in form
+    assert "askDataCorrectionReason(" in form
+    assert "payload.reason = reason" in form
+
+    assert 'INSTANCE_DATA_SET: "Daten ge' in src
+    detail = _function_body(src, "function auditDetailText(")
+    assert 'ev.event_type === "INSTANCE_DATA_SET"' in detail
+    assert "detail.old" in detail and "detail.new" in detail
+
+
+def test_adhoc_insert_dialog_names_who_works_the_new_step() -> None:
+    """VAL-03: Ein ad hoc eingefuegter Schritt hatte nie einen Bearbeiter und
+    stand in keiner Arbeitsliste. Der Kern verlangt die Regel jetzt (B2 fuer den
+    neuen Schritt); der Dialog fragt sie ab, schlaegt die des Schritts davor vor
+    und schickt sie mit. Kein Pflichtfeld ohne Rueckmeldung: ohne Auswahl bleibt
+    der Dialog offen.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    dialog = _function_body(src, "function openAdhocInsert(")
+    assert "adhocSuggestedRule(schema, anchorSel.value)" in dialog
+    assert "staff_rule: rule" in dialog
+    assert "Bearbeiter *" in dialog
+    assert (
+        'toast("err", "Bitte festlegen, wer den neuen Schritt bearbeitet."); return false;'
+        in dialog
+    )
+    suggest = _function_body(src, "function adhocSuggestedRule(")
+    assert "controlEdges(schema)" in suggest  # Sync-Kanten sind kein Vorgaenger
+
+
+def test_binding_dialog_names_d1_for_reading_without_writing() -> None:
+    """VAL-35: „Lesen ohne vorheriges Schreiben" ist D1, nicht D2."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "sonst weist der Kern die Bindung ab (D1)." in src
+    assert "sonst weist der Kern die Bindung ab (D2)." not in src
+
+
+def test_monitoring_shows_steps_nobody_may_work() -> None:
+    """VAL-09: Vorgaenge, deren offener Schritt niemanden hat, standen im
+    Monitoring mit „ueberfaellig 0, eskaliert 0“. Kachel, Liste und Filter
+    kommen aus ``GET /monitoring/unstaffed`` (Rechnung im Kern)."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    view = _function_body(src, "async function viewMonitor(")
+    assert 'api.get("/monitoring/unstaffed")' in view
+    assert 'kpi("Niemand zust\\u00E4ndig", unstaffedIds.size)' in view
+    assert 'key === "UNSTAFFED" ? unstaffedIds.has(i.id)' in view
+    assert '{ key: "UNSTAFFED", label: "Niemand zust\\u00E4ndig" }' in src

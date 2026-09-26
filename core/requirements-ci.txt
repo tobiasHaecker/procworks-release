@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: BUSL-1.1 -- see LICENSE
+#
+# Exakte Versionen für die CI (Lint, mypy, pytest, Lizenz-Scan) -- NICHT für
+# Installationen beim Kunden und nicht für die Container-Images.
+#
+# Warum: pyproject.toml nennt nur Untergrenzen (">="). Ohne diese Datei holte
+# die CI bei jedem Lauf die neueste Version jeder Bibliothek; am 2026-09-24
+# wurde main dadurch rot, ohne dass sich am Code etwas geändert hatte
+# (SQLAlchemy 2.1.0 änderte die Typisierung von func.max). Jetzt ändern sich
+# Versionen nur noch per Commit -- in der Regel über einen Dependabot-PR, dessen
+# CI-Lauf das Update prüft, bevor es main erreicht.
+#
+# Die Datei enthält ALLE Pakete (auch transitive). Die CI installiert sie mit
+# `pip install -r` und procworks danach mit `--no-deps`; `pip check` schlägt
+# fehl, wenn eine Abhängigkeit fehlt. Neu erzeugen, wenn sich die
+# Abhängigkeiten in pyproject.toml ändern (Linux/CPython 3.12 ist maßgeblich;
+# macOS löst derzeit dieselbe Menge auf):
+#
+#   python3.12 -m venv /tmp/lock && /tmp/lock/bin/pip install -U pip
+#   /tmp/lock/bin/pip install -e ".[dev]" pip-licenses
+#   /tmp/lock/bin/pip freeze --exclude-editable  # Ausgabe unter diesen Kopf
+#
+alembic==1.20.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+ast_serialize==0.11.2
+certifi==2026.7.22
+cffi==2.1.1
+click==8.5.0
+cryptography==50.0.1
+fastapi==0.141.1
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.0
+librt==0.15.0
+Mako==1.4.3
+MarkupSafe==3.0.3
+mypy==2.3.1
+mypy_extensions==1.1.0
+packaging==26.3
+pathspec==1.1.1
+pip-licenses==5.5.5
+pluggy==1.6.0
+prettytable==3.18.0
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+Pygments==2.21.0
+pytest==9.1.1
+python-dotenv==1.2.3
+PyYAML==6.0.3
+ruff==0.16.9
+SQLAlchemy==2.1.0
+starlette==1.7.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+uvicorn==0.53.0
+uvloop==0.22.1
+watchfiles==1.3.0
+wcwidth==0.9.1
+websockets==17.1

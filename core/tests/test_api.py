@@ -7,7 +7,9 @@ from fastapi.testclient import TestClient
 from staffing import staff_via_api
 
 import procworks
+import procworks.api as api_module
 from procworks.api import app
+from procworks.audit import EventType
 
 client = TestClient(app)
 
@@ -681,18 +683,41 @@ def test_adhoc_insert_via_api_runs_through_variant() -> None:
 
     wl = client.get(f"/instances/{iid}/worklist").json()
     a_id = wl["ready_activities"][0]
+    rule = client.get(f"/schemas/{sid}").json()["staff_rules"][a_id]
+
+    # Without a staff rule the new step would stand in nobody's worklist (VAL-03).
+    unstaffed = client.post(
+        f"/instances/{iid}/adhoc/insert",
+        json={"after_node_id": a_id, "label": "Zusatz"},
+    )
+    assert unstaffed.status_code == 422
+    assert [f["code"] for f in unstaffed.json()["detail"]["findings"]] == ["B2.no-staff"]
 
     resp = client.post(
         f"/instances/{iid}/adhoc/insert",
-        json={"after_node_id": a_id, "label": "Zusatz"},
+        json={"after_node_id": a_id, "label": "Zusatz", "staff_rule": rule,
+              "reason": "Kunde verlangt Zusatzprüfung"},
     )
     assert resp.status_code == 200
     instance = resp.json()
     assert instance["ad_hoc_schema"] is not None
+    new_id = next(
+        nid for nid, n in instance["ad_hoc_schema"]["nodes"].items() if n["label"] == "Zusatz"
+    )
+    assert instance["ad_hoc_schema"]["staff_rules"][new_id] == rule
+    inserted = [
+        e for e in api_module._audit.for_instance(iid)
+        if e.event_type is EventType.ADHOC_INSERTED
+    ]
+    assert [e.detail.get("reason") for e in inserted] == ["Kunde verlangt Zusatzprüfung"]
     assert instance["ad_hoc_deltas"]
 
     # Drive the instance to completion through its variant.
     client.post(f"/instances/{iid}/complete", json={"node_id": a_id})
+    # The new step is someone's task now -- not a silent dead end.
+    tasks = client.get(f"/instances/{iid}/tasks").json()
+    assert [t["node_id"] for t in tasks] == [new_id]
+    assert tasks[0]["eligible_agents"]
     while True:
         wl = client.get(f"/instances/{iid}/worklist").json()
         if wl["state"] == "COMPLETED":

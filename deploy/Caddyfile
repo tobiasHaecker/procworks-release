@@ -29,10 +29,22 @@
 	}
 
 	# Everything else: serve the SPA static assets.
+	#
+	# Browser hardening for the app itself (Validierung 2026-09-25, VAL-06):
+	# CSP and X-Frame-Options sit HERE, not in the global header block, because
+	# the API's Swagger page (/api/docs) loads scripts from a CDN and would break.
+	# Keep the CSP identical to procworks.api.SPA_SECURITY_HEADERS (the demo
+	# container serves the SPA without Caddy); a test compares both.
+	#   style-src 'unsafe-inline': the client sets style attributes via el().
+	#   connect-src https:        : OIDC token endpoint and the demo feedback URL.
 	handle {
 		root * /srv
 		try_files {path} /index.html
 		file_server
+		header {
+			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+			X-Frame-Options DENY
+		}
 	}
 
 	header {

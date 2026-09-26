@@ -13,9 +13,10 @@ Interactive docs at /docs (OpenAPI is generated automatically).
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -23,7 +24,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from procworks import (
     __version__,
@@ -73,6 +74,7 @@ from procworks.auth import (
 )
 from procworks.auth_password import (
     DEFAULT_ADMIN_LOGIN,
+    LoginThrottle,
     PasswordAuthBackend,
     PasswordPolicyError,
     UserView,
@@ -80,7 +82,7 @@ from procworks.auth_password import (
 )
 from procworks.bpmn import BpmnError
 from procworks.connections import build_connection_registry
-from procworks.dal import DataAccessError
+from procworks.dal import DataAccessError, UnsafeIdentifierError
 from procworks.execution import ExecutionError
 from procworks.integration_runtime import ExternalTaskError, ExternalTaskRuntime
 from procworks.licensing import (
@@ -97,6 +99,7 @@ from procworks.licensing import (
 from procworks.metrics import ModelReport
 from procworks.model import (
     PRIORITY_RANK,
+    WRITE_MODES,
     AbsenceEntry,
     AccessMode,
     AggregateKind,
@@ -1346,6 +1349,13 @@ class CompleteActivityRequest(BaseModel):
 class AdhocInsertRequest(BaseModel):
     after_node_id: str = Field(..., examples=["act_1"])
     label: str = Field(..., examples=["Zusatzpruefung"])
+    #: Wer den neuen Schritt bearbeitet. Pflicht im Kern (B2 für den neuen
+    #: Schritt, VAL-03): ohne Regel stünde er in keiner Arbeitsliste. Optional
+    #: im Schema nur, damit der Kern die Ablehnung mit Befund ``B2.no-staff``
+    #: formuliert statt eines Pydantic-Fehlers.
+    staff_rule: StaffRule | None = None
+    #: Optionale Begründung; sie steht im Ereignis ``ADHOC_INSERTED``.
+    reason: str | None = None
 
 
 class AdhocDeleteRequest(BaseModel):
@@ -2006,17 +2016,66 @@ def get_auth_config() -> AuthConfig:
     return cfg
 
 
+#: Brute-force brake for ``POST /auth/login`` (VAL-06); see :class:`LoginThrottle`.
+_login_throttle = LoginThrottle()
+
+
+def _client_address(request: Request) -> str | None:
+    """Best-effort client address for the login throttle.
+
+    Behind the bundled Caddy the TCP peer is the proxy, so its address would
+    lump every user together. Caddy *sets* ``X-Forwarded-For`` to the real
+    client (it ignores a client-sent value unless ``trusted_proxies`` is
+    configured). The header is therefore honoured **only** when the peer is a
+    private/loopback address -- i.e. a proxy of our own stack -- and then its
+    last entry is taken (the hop Caddy appended). A public peer is the client
+    itself; a spoofed header from it is ignored.
+    """
+
+    import ipaddress
+
+    peer = request.client.host if request.client else None
+    try:
+        internal = peer is not None and (
+            ipaddress.ip_address(peer).is_private or ipaddress.ip_address(peer).is_loopback
+        )
+    except ValueError:
+        internal = False  # e.g. the TestClient's "testclient"
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if internal and forwarded.strip():
+        return forwarded.split(",")[-1].strip() or peer
+    return peer
+
+
 @app.post("/auth/login", response_model=LoginResponse)
-def post_login(req: LoginRequest) -> LoginResponse:
-    """Exchange username + password for a session bearer token (password mode)."""
+def post_login(req: LoginRequest, request: Request) -> LoginResponse:
+    """Exchange username + password for a session bearer token (password mode).
+
+    Guarded by :data:`_login_throttle` (VAL-06): after repeated failures per
+    login or per client address the endpoint answers 429 with ``Retry-After``
+    -- *before* the password is even checked, so a locked key gives no oracle.
+    """
 
     backend = _password_backend()
+    address = _client_address(request)
+    wait = _login_throttle.retry_after(req.login, address)
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Zu viele fehlgeschlagene Anmeldeversuche. Bitte in "
+                f"{wait} Sekunden erneut versuchen."
+            ),
+            headers={"Retry-After": str(wait)},
+        )
     try:
         result = backend.login(req.login, req.password)
     except AuthError as exc:
+        _login_throttle.failure(req.login, address)
         raise HTTPException(
             status_code=401, detail=exc.message, headers={"WWW-Authenticate": "Bearer"}
         ) from exc
+    _login_throttle.success(req.login)
     return LoginResponse(
         token=result.token,
         principal=result.principal,
@@ -3941,9 +4000,79 @@ def post_release(schema_id: str) -> ProcessSchema:
 # --- execution endpoints -------------------------------------------------
 
 
+def _reads_only_own_instances(principal: Principal) -> bool:
+    """Is this caller limited to the instances it is involved in? (VAL-05)
+
+    Before, every operator read every instance -- data values and audit
+    included, a colleague's leave request as well (Validierung 2026-09-25,
+    VAL-05). Limited is a **personal** login whose only role is ``operator``.
+    Not limited: ``viewer`` (the read-only role, i.e. management/revision),
+    ``modeler``/``admin``, and machine identities -- open dev mode, static
+    tokens, the ``integration`` role -- which keep the documented integration
+    path.
+    """
+
+    if _auth_mode() in ("open", "token") or INTEGRATION in principal.roles:
+        return False
+    return not principal.roles & {"viewer", "modeler", "admin"}
+
+
+def _involved_instance_ids(principal: Principal) -> set[str]:
+    """Instance ids a limited caller may read (see :func:`_reads_only_own_instances`).
+
+    Involved is the bound agent when it
+    * appears as the acting agent of any audit event of the instance (started
+      it, claimed, completed, returned ... a step), or
+    * may work -- or has claimed -- an open step right now (eligible agents
+      exactly as the worklist resolves them: deputies of absent colleagues and
+      fired escalation stages included).
+    An unbound personal operator is involved in nothing.
+    """
+
+    agent = principal.agent_id
+    if agent is None:
+        return set()
+    ids = {e.instance_id for e in _audit.list_all() if e.agent_id == agent}
+    absent = _current_absent_agents()
+    for instance_id in _instances.list_ids():
+        if instance_id in ids:
+            continue
+        instance = _instances.get(instance_id)
+        if instance is None or instance.state is not InstanceState.RUNNING:
+            continue
+        tasks = assignment.open_tasks(
+            _effective_schema_for(instance), instance, absent_agents=absent
+        )
+        if any(t.claimed_by == agent or agent in t.eligible_agents for t in tasks):
+            ids.add(instance_id)
+    return ids
+
+
+def _readable_instance_or_404(instance_id: str, principal: Principal) -> ProcessInstance:
+    """Load an instance for a read, hiding foreign ones from limited callers.
+
+    A limited caller gets **404** for an instance it is not involved in -- the
+    same answer as for a missing one, so the endpoint does not reveal which
+    instance ids exist.
+    """
+
+    instance = _get_instance_or_404(instance_id)
+    if _reads_only_own_instances(principal) and instance_id not in _involved_instance_ids(
+        principal
+    ):
+        raise HTTPException(status_code=404, detail="instance not found")
+    return instance
+
+
 @app.get("/instances", dependencies=[_read])
-def list_instances() -> list[str]:
-    return _instances.list_ids()
+def list_instances(principal: Principal = Depends(get_principal)) -> list[str]:
+    """All instance ids -- for a limited operator only its own (VAL-05)."""
+
+    ids = _instances.list_ids()
+    if _reads_only_own_instances(principal):
+        own = _involved_instance_ids(principal)
+        return [i for i in ids if i in own]
+    return ids
 
 
 @app.post(
@@ -3997,6 +4126,9 @@ def post_instantiate(
         instance.id,
         instance.schema_id,
         schema_version=instance.schema_version,
+        # The starter counts as involved (VAL-05: an operator reads its own
+        # instances); None for an unbound login, as before.
+        agent_id=principal.agent_id,
     )
     _emit_event("instance.started", _instance_event_payload(instance))
     if instance.state is InstanceState.COMPLETED:
@@ -4012,8 +4144,10 @@ def post_instantiate(
 
 
 @app.get("/instances/{instance_id}", response_model=ProcessInstance, dependencies=[_read])
-def get_instance(instance_id: str) -> ProcessInstance:
-    return _get_instance_or_404(instance_id)
+def get_instance(
+    instance_id: str, principal: Principal = Depends(get_principal)
+) -> ProcessInstance:
+    return _readable_instance_or_404(instance_id, principal)
 
 
 @app.get(
@@ -4021,8 +4155,10 @@ def get_instance(instance_id: str) -> ProcessInstance:
     response_model=WorklistReport,
     dependencies=[_read],
 )
-def get_worklist(instance_id: str) -> WorklistReport:
-    instance = _get_instance_or_404(instance_id)
+def get_worklist(
+    instance_id: str, principal: Principal = Depends(get_principal)
+) -> WorklistReport:
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     return WorklistReport(
         state=instance.state.value,
@@ -4036,9 +4172,11 @@ def get_worklist(instance_id: str) -> WorklistReport:
     response_model=list[OpenTask],
     dependencies=[_read],
 )
-def get_instance_tasks(instance_id: str) -> list[OpenTask]:
+def get_instance_tasks(
+    instance_id: str, principal: Principal = Depends(get_principal)
+) -> list[OpenTask]:
     _escalation_sweep()  # lazy boundary timer (T3/E9)
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     return assignment.open_tasks(
         schema,
@@ -4779,23 +4917,40 @@ def post_complete_activity(
     dependencies=[_run],
 )
 def post_adhoc_insert(instance_id: str, req: AdhocInsertRequest) -> ProcessInstance:
+    """Insert a serial step into one running instance (R1/R2, plus B2).
+
+    ``staff_rule`` is required by the core for the new step (422 with
+    ``B2.no-staff`` otherwise) -- a step without one would stand in nobody's
+    worklist (VAL-03). The optional ``reason`` travels into the
+    ``ADHOC_INSERTED`` event.
+    """
+
     instance = _get_instance_or_404(instance_id)
     schema = _effective_schema_for(instance)
     before_states = dict(instance.node_states)
     after = _commit_instance_or_422(
         lambda: adhoc.adhoc_insert_activity(
-            instance, schema, req.after_node_id, req.label, resolver=_resolver
+            instance,
+            schema,
+            req.after_node_id,
+            req.label,
+            resolver=_resolver,
+            staff_rule=req.staff_rule,
         )
     )
     if not instance.is_test:
         # Test instances record no audit events (see instance creation).
+        detail = {"label": req.label}
+        reason = (req.reason or "").strip()
+        if reason:
+            detail["reason"] = reason
         _audit.append(
             EventType.ADHOC_INSERTED,
             after.id,
             after.schema_id,
             schema_version=after.schema_version,
             node_id=req.after_node_id,
-            detail={"label": req.label},
+            detail=detail,
         )
         # An ad-hoc insert can make a mail-bound activity ready -> notify (§10.7).
         _after_advance(_effective_schema_for(after), before_states, after)
@@ -5175,10 +5330,12 @@ def post_migrate_instances(
     response_model=MigrationTarget,
     dependencies=[_read],
 )
-def get_migration_target(instance_id: str) -> MigrationTarget:
+def get_migration_target(
+    instance_id: str, principal: Principal = Depends(get_principal)
+) -> MigrationTarget:
     """The newest released revision this instance's schema has (if any)."""
 
-    inst = _get_instance_or_404(instance_id)
+    inst = _readable_instance_or_404(instance_id, principal)
     schemas = [s for sid in _store.list_ids() if (s := _store.get(sid)) is not None]
     best = migration.latest_successor(inst.schema_id, schemas)
     if best is None:
@@ -5194,12 +5351,20 @@ def get_migration_target(instance_id: str) -> MigrationTarget:
     response_model=list[AuditEvent],
     dependencies=[_read],
 )
-def get_instance_audit(instance_id: str) -> list[AuditEvent]:
-    _get_instance_or_404(instance_id)
+def get_instance_audit(
+    instance_id: str, principal: Principal = Depends(get_principal)
+) -> list[AuditEvent]:
+    """History of one instance; a limited operator only for its own (VAL-05)."""
+
+    _readable_instance_or_404(instance_id, principal)
     return instance_timeline(_audit.list_all(), instance_id)
 
 
-@app.get("/audit", response_model=list[AuditEvent], dependencies=[_read])
+@app.get(
+    "/audit",
+    response_model=list[AuditEvent],
+    dependencies=[Depends(require_role("viewer", "modeler", "admin"))],
+)
 def get_audit(
     schema_id: str | None = None, instance_id: str | None = None
 ) -> list[AuditEvent]:
@@ -5214,6 +5379,37 @@ def get_audit(
 @app.get("/monitoring/kpis", response_model=KpiReport, dependencies=[_read])
 def get_kpis(schema_id: str | None = None) -> KpiReport:
     return compute_kpis(_audit.list_all(), schema_id)
+
+
+@app.get(
+    "/monitoring/unstaffed",
+    response_model=list[assignment.UnstaffedStep],
+    dependencies=[_read],
+)
+def get_unstaffed_steps(
+    principal: Principal = Depends(get_principal),
+) -> list[assignment.UnstaffedStep]:
+    """Open human steps across all running instances that nobody may work (VAL-09).
+
+    The monitoring's "Niemand zuständig" figure and filter. Test instances are
+    left out (throw-away, not operations). Before this, a stalled instance
+    showed "overdue 0, escalated 0" and was only visible in its own detail
+    view (Validierung 2026-09-25). See :func:`assignment.unstaffed_steps`.
+    """
+
+    absent = _current_absent_agents()
+    own = _involved_instance_ids(principal) if _reads_only_own_instances(principal) else None
+    found: list[assignment.UnstaffedStep] = []
+    for instance_id in _instances.list_ids():
+        if own is not None and instance_id not in own:
+            continue  # VAL-05: a limited operator sees only its own instances
+        instance = _instances.get(instance_id)
+        if instance is None or instance.is_test:
+            continue
+        found += assignment.unstaffed_steps(
+            _effective_schema_for(instance), instance, absent_agents=absent
+        )
+    return found
 
 
 @app.get("/monitoring/process-map", response_model=ProcessMap, dependencies=[_read])
@@ -5270,6 +5466,10 @@ class SetDataRequest(BaseModel):
     values: dict[str, object] = Field(
         ..., examples=[{"betrag": 1200, "status": "open"}]
     )
+    #: Begründung einer Datenkorrektur als Aufsichtseingriff (Modellierer/Admin
+    #: an Elementen, die kein eigener offener Schritt schreibt); siehe
+    #: ``_authorize_data_write``.
+    reason: str | None = None
 
 
 class V1CompleteRequest(BaseModel):
@@ -5313,20 +5513,114 @@ def _validate_data_values(
     return findings
 
 
-@app.put(
-    "/instances/{instance_id}/data",
-    response_model=dict[str, object],
-    dependencies=[_run],
-)
-def put_instance_data(instance_id: str, req: SetDataRequest) -> dict[str, object]:
-    """Set process variable values directly on an instance (type-checked, D3).
+def _own_task_writes(
+    schema: ProcessSchema, instance: ProcessInstance, agent_id: str
+) -> set[str]:
+    """Data elements the agent may write *right now* through its own open steps.
 
-    This lets an operator/modeller enter instance data at any time -- in
-    particular right after starting an instance, before the first activity is
-    worked on -- without having to go through an activity completion. Only
-    ``INSTANCE`` data elements can be written; unknown elements or type
-    mismatches are rejected with HTTP 422 (D3). The write records no audit
-    event, so it never pollutes the monitoring KPIs.
+    A step counts when it is open (ACTIVATED/RUNNING, with a staff rule) and
+    either claimed by ``agent_id`` or unclaimed with ``agent_id`` among its
+    eligible agents (deputies and escalation included, exactly as the worklist
+    resolves them). Of those steps, every WRITE/READ_WRITE binding counts.
+    A step claimed by somebody else never counts -- that is their work item.
+    """
+
+    writable: set[str] = set()
+    for task in assignment.open_tasks(
+        schema, instance, absent_agents=_current_absent_agents()
+    ):
+        holder = task.claimed_by
+        if holder == agent_id or (holder is None and agent_id in task.eligible_agents):
+            writable.update(
+                a.element_id
+                for a in schema.accesses_of(task.node_id)
+                if a.mode in WRITE_MODES
+            )
+    return writable
+
+
+def _authorize_data_write(
+    principal: Principal,
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    element_ids: Iterable[str],
+    reason: str | None,
+) -> str | None:
+    """Decide whether the caller may set these values directly (VAL-01).
+
+    ``PUT /instances/{id}/data`` used to accept any value on any instance from
+    every operator, and wrote no audit event -- so a four-eyes approval could be
+    changed afterwards without a trace (Validierung 2026-09-25, VAL-01). The
+    rules, all at the boundary (identity is boundary knowledge):
+
+    * **Test instances** stay free (no audit, no productive work).
+    * A **completed** instance is closed: 409 for everybody.
+    * **Machine identities** -- open dev mode, static tokens, the
+      ``integration`` role -- keep the documented integration path
+      (``PUT /v1/instances/{id}/data`` with scope ``data:write``); the event
+      records the sender.
+    * A **bound** caller may set exactly the elements its own open steps write
+      (:func:`_own_task_writes`) -- entering the data of the work at hand.
+    * Anything else is a correction outside one's own work: only
+      ``modeler``/``admin`` may do it, and only as a supervision act with a
+      mandatory reason (422 starting with ``"Aufsichtseingriff"`` when it is
+      missing, which the web client recognises). Everyone else gets 403.
+
+    Returns the trimmed supervision reason, or ``None`` when no supervision is
+    involved.
+    """
+
+    if instance.is_test:
+        return None
+    if instance.state is not InstanceState.RUNNING:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Der Vorgang ist abgeschlossen; seine Daten lassen sich nicht "
+                "mehr ändern."
+            ),
+        )
+    if _may_act_for_others(principal, instance):
+        return None
+    wanted = set(element_ids)
+    if principal.agent_id is not None and wanted <= _own_task_writes(
+        schema, instance, principal.agent_id
+    ):
+        return None
+    if not principal.roles & {"modeler", "admin"}:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Diese Daten gehören zu keinem Schritt, den du gerade bearbeitest. "
+                "Werte gibst du beim Abschließen deines Schritts ein; eine "
+                "Korrektur darüber hinaus nimmt die Prozessverantwortung vor."
+            ),
+        )
+    cleaned = (reason or "").strip()
+    if not cleaned:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Aufsichtseingriff: Diese Werte gehören zu keinem Schritt, den du "
+                "gerade bearbeitest. Bitte eine Begründung für die Korrektur "
+                "angeben – sie wird im Audit-Verlauf festgehalten."
+            ),
+        )
+    return cleaned
+
+
+def _set_instance_data(
+    instance_id: str, req: SetDataRequest, principal: Principal
+) -> dict[str, object]:
+    """Shared body of both data endpoints: authorise, type-check, store, audit.
+
+    Order matters: the D3 type check runs first (a malformed request is a 422
+    regardless of who sends it), then :func:`_authorize_data_write`. Every
+    element whose value actually changes gets one ``INSTANCE_DATA_SET`` event
+    with ``old``/``new`` as JSON (``null`` for a previously unset element),
+    the sender as ``actor`` where it is not the bound agent itself, and the
+    supervision ``reason`` where there is one. Unchanged values write nothing.
+    Test instances are stored but never audited (as everywhere else).
     """
 
     instance = _get_instance_or_404(instance_id)
@@ -5337,10 +5631,61 @@ def put_instance_data(instance_id: str, req: SetDataRequest) -> dict[str, object
             status_code=422,
             detail={"findings": [f.model_dump() for f in findings]},
         )
+    supervision = _authorize_data_write(
+        principal, instance, schema, req.values.keys(), req.reason
+    )
     updated = instance.model_copy(deep=True)
     updated.data_values.update(req.values)
     _instances.put(updated)
+    if not instance.is_test:
+        for element_id, new in req.values.items():
+            missing = element_id not in instance.data_values
+            old = instance.data_values.get(element_id)
+            if not missing and old == new:
+                continue
+            detail = {
+                "element": element_id,
+                "old": json.dumps(old, ensure_ascii=False, default=str),
+                "new": json.dumps(new, ensure_ascii=False, default=str),
+            }
+            if not principal.is_bound and _auth_mode() != "open":
+                detail["actor"] = principal.subject
+            if supervision is not None:
+                detail["reason"] = supervision
+            element = schema.data_elements.get(element_id)
+            _audit.append(
+                EventType.INSTANCE_DATA_SET,
+                updated.id,
+                updated.schema_id,
+                schema_version=updated.schema_version,
+                label=element.name if element is not None else element_id,
+                agent_id=principal.agent_id,
+                detail=detail,
+            )
     return dict(updated.data_values)
+
+
+@app.put(
+    "/instances/{instance_id}/data",
+    response_model=dict[str, object],
+)
+def put_instance_data(
+    instance_id: str,
+    req: SetDataRequest,
+    principal: Principal = Depends(require_role("operator", "modeler", "admin")),
+) -> dict[str, object]:
+    """Set process variable values directly on an instance (type-checked, D3).
+
+    Lets a caller enter instance data outside an activity completion -- e.g.
+    right after the start. Unknown elements or type mismatches are rejected
+    with 422 (D3). Who may write what is decided by
+    :func:`_authorize_data_write` (VAL-01): a bound operator only the elements
+    of its own open steps, modeller/admin anything else only with a reason.
+    Every change is audited as ``INSTANCE_DATA_SET``; that event type is not
+    part of any KPI or mining aggregation, so the figures stay unchanged.
+    """
+
+    return _set_instance_data(instance_id, req, principal)
 
 
 @_v1.post(
@@ -5406,7 +5751,7 @@ def v1_get_instance(
         require_scope(SCOPE_DATA_READ, "viewer", "operator", "modeler", "admin")
     ),
 ) -> ProcessInstance:
-    return _get_instance_or_404(instance_id)
+    return _readable_instance_or_404(instance_id, principal)
 
 
 @_v1.get("/instances/{instance_id}/tasks", response_model=list[OpenTask])
@@ -5416,7 +5761,7 @@ def v1_get_instance_tasks(
         require_scope(SCOPE_DATA_READ, "viewer", "operator", "modeler", "admin")
     ),
 ) -> list[OpenTask]:
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     return assignment.open_tasks(
         schema, instance, absent_agents=_current_absent_agents()
@@ -5463,7 +5808,7 @@ def v1_get_instance_data(
 ) -> dict[str, object]:
     """Read all process variable values of an instance."""
 
-    return dict(_get_instance_or_404(instance_id).data_values)
+    return dict(_readable_instance_or_404(instance_id, principal).data_values)
 
 
 @_v1.put("/instances/{instance_id}/data", response_model=dict[str, object])
@@ -5475,21 +5820,15 @@ def v1_put_instance_data(
         require_scope(SCOPE_DATA_WRITE, "operator", "modeler", "admin")
     ),
 ) -> dict[str, object]:
-    """Set process variable values, type-checked against the schema (D3)."""
+    """Set process variable values, type-checked against the schema (D3).
+
+    Same rules and audit as the internal endpoint (:func:`_set_instance_data`);
+    a service token keeps its ``data:write`` path, and the event records it as
+    the sender.
+    """
 
     def produce() -> dict[str, object]:
-        instance = _get_instance_or_404(instance_id)
-        schema = _effective_schema_for(instance)
-        findings = _validate_data_values(schema, req.values)
-        if findings:
-            raise HTTPException(
-                status_code=422,
-                detail={"findings": [f.model_dump() for f in findings]},
-            )
-        updated = instance.model_copy(deep=True)
-        updated.data_values.update(req.values)
-        _instances.put(updated)
-        return dict(updated.data_values)
+        return _set_instance_data(instance_id, req, principal)
 
     result = _idempotent(principal, idempotency_key, produce)
     assert isinstance(result, dict)
@@ -5796,19 +6135,82 @@ def v1_test_connector(
     return ConnectorTestResult(connector_id=connector_id, ok=True)
 
 
+#: Schemas/prefixes of database *system* catalogues. The sample read never
+#: reads them, whatever the connector's catalogue says (VAL-08).
+_SYSTEM_ENTITY_PREFIXES = (
+    "sqlite_",
+    "information_schema.",
+    "pg_catalog.",
+    "pg_",
+    "sys.",
+    "mysql.",
+    "performance_schema.",
+)
+
+
+def _check_sample_entity(connector_id: str, entity: str) -> None:
+    """Admit only an entity the connector itself offers (sample-read allowlist).
+
+    ``POST /v1/connectors/{id}/sample-read {"entity": "sqlite_master"}`` used to
+    return the database's system table, although ``/entities`` offered only the
+    business tables (Validierung 2026-09-25, VAL-08). Rules:
+
+    * system catalogues (:data:`_SYSTEM_ENTITY_PREFIXES`) → 422, always;
+    * an unqualified name must be in the connector's catalogue
+      (``_connections.entities``) → 422 otherwise;
+    * a schema-qualified name (``schema.table``) is admitted when its schema is
+      no system schema -- SQL catalogues list only the default schema, and a
+      customer integration regularly lives in another one;
+    * a connector that cannot introspect (empty catalogue) keeps the manual
+      entry that worked before -- the identifier whitelist in ``dal`` still
+      applies.
+
+    A catalogue read that fails is the external system's fault (502).
+    """
+
+    lowered = entity.lower()
+    if lowered.startswith(_SYSTEM_ENTITY_PREFIXES):
+        raise HTTPException(
+            status_code=422,
+            detail={"message": f"Systemtabellen lassen sich nicht testlesen: {entity}"},
+        )
+    try:
+        catalogue = _connections.entities(connector_id)
+    except DataAccessError as err:
+        raise HTTPException(status_code=502, detail={"message": str(err)}) from err
+    if catalogue and "." not in entity and entity not in catalogue:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": (
+                    f"Die Tabelle „{entity}“ bietet dieser Connector nicht an. "
+                    "Bitte eine der vorgeschlagenen Tabellen wählen."
+                )
+            },
+        )
+
+
 @_v1.post("/connectors/{connector_id}/sample-read", response_model=list[dict[str, object]])
 def v1_sample_read_connector(
     connector_id: str,
     req: SampleReadRequest,
-    principal: Principal = Depends(
-        require_scope(SCOPE_DATA_READ, "operator", "modeler", "admin")
-    ),
+    principal: Principal = Depends(require_scope(SCOPE_DATA_READ, "modeler", "admin")),
 ) -> list[dict[str, object]]:
-    """Return a few sample records of an entity for GUI mapping help."""
+    """Return a few sample records of an entity for GUI mapping help.
+
+    A modelling aid, so only modeller/admin (and service tokens with
+    ``data:read``) may call it -- an operator has no mapping to build and
+    must not browse external tables (VAL-08). The entity must pass
+    :func:`_check_sample_entity`. Status codes: an unsafe or unknown entity
+    is the caller's error (422), a failing external system is 502.
+    """
 
     _require_connector(connector_id)
+    _check_sample_entity(connector_id, req.entity)
     try:
         rows = _connections.sample_read(connector_id, req.entity, limit=req.limit)
+    except UnsafeIdentifierError as err:
+        raise HTTPException(status_code=422, detail={"message": str(err)}) from err
     except DataAccessError as err:
         raise HTTPException(status_code=502, detail={"message": str(err)}) from err
     return [dict(row) for row in rows]
@@ -6036,6 +6438,50 @@ class _ApiPrefixShim:
         await self._app(scope, receive, send)
 
 
+#: Browser hardening for the SPA (VAL-06). Must equal the headers in
+#: ``deploy/Caddyfile`` (SPA block) -- ``test_spa_headers_match_the_caddyfile``.
+SPA_SECURITY_HEADERS: dict[str, str] = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+}
+
+
+class _SpaSecurityHeaders:
+    """ASGI middleware: add :data:`SPA_SECURITY_HEADERS` to SPA responses.
+
+    Only for the single-container demo, where this process serves the SPA
+    itself (:func:`_maybe_mount_web`); behind Caddy the Caddyfile does it.
+    API paths (``/api/...``), ``/docs``, ``/redoc`` and ``/openapi.json`` are
+    left alone: Swagger UI loads its scripts from a CDN and would break under
+    the CSP, and JSON responses gain nothing from it.
+    """
+
+    _SKIP = ("/api", "/docs", "/redoc", "/openapi.json")
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if scope["type"] != "http" or path.startswith(self._SKIP):
+            await self._app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers") or [])
+                for name, value in SPA_SECURITY_HEADERS.items():
+                    headers.append((name.lower().encode("latin-1"), value.encode("latin-1")))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self._app(scope, receive, send_with_headers)
+
+
 def _maybe_mount_web(target: FastAPI, web_dir: str) -> bool:
     """Mount the static web client at ``/`` when ``web_dir`` is a real directory.
 
@@ -6058,6 +6504,8 @@ def _maybe_mount_web(target: FastAPI, web_dir: str) -> bool:
         target.mount("/", StaticFiles(directory=web_dir, html=True), name="web")
         # Single-container demo only: let the SPA's /api-prefixed calls through.
         target.add_middleware(_ApiPrefixShim)
+        # Added last = outermost: sees the original path (still /api-prefixed).
+        target.add_middleware(_SpaSecurityHeaders)
         return True
     return False
 

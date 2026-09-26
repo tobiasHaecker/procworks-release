@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from staffing import staffed
 
+import procworks.api as api_module
 from procworks import (
     AccessMode,
     ConnectionConfig,
@@ -49,6 +50,7 @@ from procworks import (
     set_automation,
 )
 from procworks.api import _connections, app
+from procworks.auth_token import TokenAuthBackend
 from procworks.execution import ExecutionContext
 from procworks.integration_runtime import ExternalTaskError, ExternalTaskRuntime
 from procworks.model import AutomationKind
@@ -381,3 +383,62 @@ def test_entities_include_views(tmp_path: Path) -> None:
         "Kunde",
         "KundeBonn",
     ]
+
+
+# --- VAL-08: sample read only for modelling, only offered entities ----------
+
+
+def test_sample_read_refuses_system_tables(registered_connector: str) -> None:
+    """VAL-08 (Validierung 2026-09-25): ``sqlite_master`` came back with 200."""
+
+    res = client.post(
+        f"/v1/connectors/{registered_connector}/sample-read",
+        json={"entity": "sqlite_master", "limit": 5},
+    )
+
+    assert res.status_code == 422
+    assert "Systemtabellen" in res.json()["detail"]["message"]
+
+
+def test_sample_read_refuses_an_entity_the_catalogue_does_not_offer(
+    registered_connector: str,
+) -> None:
+    res = client.post(
+        f"/v1/connectors/{registered_connector}/sample-read",
+        json={"entity": "Lieferant", "limit": 1},
+    )
+
+    assert res.status_code == 422
+    assert "bietet dieser Connector nicht an" in res.json()["detail"]["message"]
+
+
+def test_sample_read_reports_an_unsafe_name_as_input_error(registered_connector: str) -> None:
+    # Schema-qualified, so the catalogue check lets it through to the identifier
+    # whitelist -- which is the caller's error (422), not a bad gateway (502).
+    res = client.post(
+        f"/v1/connectors/{registered_connector}/sample-read",
+        json={"entity": "main.Kunde;DROP", "limit": 1},
+    )
+
+    assert res.status_code == 422
+    assert "unsafe" in res.json()["detail"]["message"]
+
+
+def test_sample_read_is_a_modelling_aid_not_an_operator_right(
+    registered_connector: str,
+) -> None:
+    original = api_module._auth_backend
+    api_module._auth_backend = TokenAuthBackend({
+        "op": {"subject": "erika", "roles": ["operator"], "agent_id": "a1"},
+        "mod": {"subject": "mara", "roles": ["modeler"]},
+    })
+    try:
+        url = f"/v1/connectors/{registered_connector}/sample-read"
+        body = {"entity": "Kunde", "limit": 1}
+        as_operator = client.post(url, json=body, headers={"Authorization": "Bearer op"})
+        as_modeler = client.post(url, json=body, headers={"Authorization": "Bearer mod"})
+    finally:
+        api_module._auth_backend = original
+
+    assert as_operator.status_code == 403
+    assert as_modeler.status_code == 200

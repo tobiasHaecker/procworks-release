@@ -272,6 +272,78 @@ def open_tasks(
     return tasks
 
 
+
+class UnstaffedStep(BaseModel):
+    """An open human step of a running instance that nobody may work (VAL-09).
+
+    ``reason`` is ``"no_rule"`` (an interactive step without a staff rule --
+    e.g. an ad-hoc step from before the B2 gate) or ``"nobody"`` (the rule
+    resolves to nobody right now: an empty EXCEPT, an org change, a
+    supervision act before a four-eyes step). Such an instance stands still,
+    and before this report it showed as "overdue 0, escalated 0".
+    """
+
+    instance_id: str
+    schema_id: str
+    schema_version: int = 1
+    node_id: str
+    label: str
+    reason: str
+
+
+def unstaffed_steps(
+    schema: ProcessSchema,
+    instance: ProcessInstance,
+    *,
+    absent_agents: frozenset[str] = frozenset(),
+) -> list[UnstaffedStep]:
+    """List the open human steps of ``instance`` that no agent can work.
+
+    Pure read, never persisted. Considered are ACTIVATED/RUNNING ACTIVITY
+    nodes of a RUNNING instance; automatic steps (service binding with
+    ``automatic``) are machines' work and never listed. A step with a rule
+    counts as unstaffed when :func:`eligible_agents` -- deputies of absent
+    agents and fired FUNCTIONAL escalation stages included, exactly as the
+    worklist resolves them -- is empty.
+
+    This is the **last line of defence**: Z2 and the ad-hoc B2 gate prevent
+    most such steps at modelling time, but an organisation changes during
+    operation, and some rules (performer references) are only decided at
+    runtime.
+    """
+
+    result: list[UnstaffedStep] = []
+    if instance.state is not InstanceState.RUNNING:
+        return result
+    for node_id, node_state in instance.node_states.items():
+        if node_state not in (NodeState.ACTIVATED, NodeState.RUNNING):
+            continue
+        node = schema.nodes.get(node_id)
+        if node is None or node.type is not NodeType.ACTIVITY:
+            continue
+        binding = schema.service_bindings.get(node_id)
+        if binding is not None and binding.automatic:
+            continue
+        if node_id not in schema.staff_rules:
+            reason = "no_rule"
+        elif not eligible_agents(schema, node_id, instance, absent_agents=absent_agents):
+            reason = "nobody"
+        else:
+            continue
+        result.append(
+            UnstaffedStep(
+                instance_id=instance.id,
+                schema_id=instance.schema_id,
+                schema_version=instance.schema_version,
+                node_id=node_id,
+                label=node.label or node_id,
+                reason=reason,
+            )
+        )
+    result.sort(key=lambda u: (u.label, u.node_id))
+    return result
+
+
 def _resolve(org: OrgModel, rule: StaffRule, instance: ProcessInstance) -> set[str]:
     """Resolve a staff rule to a concrete set of agent ids for this instance."""
 

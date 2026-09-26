@@ -48,3 +48,19 @@ def offline_lookup(host: str) -> list[str]:
 @pytest.fixture(autouse=True)
 def _no_real_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(outbox_module, "_lookup", offline_lookup)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_login_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test starts with an empty login throttle (VAL-06).
+
+    The throttle is module state of the API and counts failures per login and
+    per client address -- and every TestClient request comes from the same
+    address. Without a reset, the failed logins of one test would lock out the
+    next. Tests of the throttle itself install their own instance.
+    """
+
+    import procworks.api as api_module
+    from procworks.auth_password import LoginThrottle
+
+    monkeypatch.setattr(api_module, "_login_throttle", LoginThrottle())

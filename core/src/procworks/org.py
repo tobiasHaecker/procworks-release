@@ -64,6 +64,8 @@ def validate_org(org: OrgModel) -> list[ValidationFinding]:
                     ValidationFinding(
                         rule="Z1",
                         message=f"agent '{agent.id}' references unknown role '{role_id}'",
+                        code="Z1.agent-unknown-role",
+                        params={"agent": str(agent.id), "role": str(role_id)},
                     )
                 )
         if agent.org_unit_id is not None and agent.org_unit_id not in org.org_units:
@@ -71,13 +73,18 @@ def validate_org(org: OrgModel) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="Z1",
                     message=f"agent '{agent.id}' references unknown org unit '{agent.org_unit_id}'",
+                    code="Z1.agent-unknown-unit",
+                    params={"agent": str(agent.id), "unit_ref": str(agent.org_unit_id)},
                 )
             )
         if agent.deputy_id is not None:
             if agent.deputy_id == agent.id:
                 findings.append(
                     ValidationFinding(
-                        rule="Z1", message=f"agent '{agent.id}' cannot be its own deputy"
+                        rule="Z1",
+                        message=f"agent '{agent.id}' cannot be its own deputy",
+                        code="Z1.own-deputy",
+                        params={"agent": str(agent.id)},
                     )
                 )
             elif agent.deputy_id not in org.agents:
@@ -85,6 +92,8 @@ def validate_org(org: OrgModel) -> list[ValidationFinding]:
                     ValidationFinding(
                         rule="Z1",
                         message=f"agent '{agent.id}' has unknown deputy '{agent.deputy_id}'",
+                        code="Z1.unknown-deputy",
+                        params={"agent": str(agent.id), "deputy": str(agent.deputy_id)},
                     )
                 )
     for unit in org.org_units.values():
@@ -93,6 +102,8 @@ def validate_org(org: OrgModel) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="Z1",
                     message=f"org unit '{unit.id}' has unknown manager '{unit.manager_id}'",
+                    code="Z1.unknown-manager",
+                    params={"unit": str(unit.id), "manager": str(unit.manager_id)},
                 )
             )
         if unit.parent_id is not None and unit.parent_id not in org.org_units:
@@ -100,6 +111,8 @@ def validate_org(org: OrgModel) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="Z1",
                     message=f"org unit '{unit.id}' has unknown parent '{unit.parent_id}'",
+                    code="Z1.unknown-parent",
+                    params={"unit": str(unit.id), "parent": str(unit.parent_id)},
                 )
             )
     findings += _check_hierarchy_acyclic(org)
@@ -114,21 +127,30 @@ def _check_addresses(org: OrgModel) -> list[ValidationFinding]:
         if agent.email is not None and not is_valid_email(agent.email):
             findings.append(
                 ValidationFinding(
-                    rule="N1", message=f"agent '{agent.id}' has a malformed e-mail address"
+                    rule="N1",
+                    message=f"agent '{agent.id}' has a malformed e-mail address",
+                    code="N1.agent-mail",
+                    params={"agent": str(agent.id)},
                 )
             )
     for role in org.roles.values():
         if role.mailbox is not None and not is_valid_email(role.mailbox):
             findings.append(
                 ValidationFinding(
-                    rule="N1", message=f"role '{role.id}' has a malformed group mailbox"
+                    rule="N1",
+                    message=f"role '{role.id}' has a malformed group mailbox",
+                    code="N1.role-mail",
+                    params={"role": str(role.id)},
                 )
             )
     for unit in org.org_units.values():
         if unit.mailbox is not None and not is_valid_email(unit.mailbox):
             findings.append(
                 ValidationFinding(
-                    rule="N1", message=f"org unit '{unit.id}' has a malformed mailbox"
+                    rule="N1",
+                    message=f"org unit '{unit.id}' has a malformed mailbox",
+                    code="N1.unit-mail",
+                    params={"unit": str(unit.id)},
                 )
             )
     return findings
@@ -145,6 +167,8 @@ def _check_hierarchy_acyclic(org: OrgModel) -> list[ValidationFinding]:
                     ValidationFinding(
                         rule="Z1",
                         message=f"org unit hierarchy contains a cycle at '{current}'",
+                        code="Z1.unit-cycle",
+                        params={"unit": str(current)},
                     )
                 )
                 break
@@ -163,8 +187,18 @@ def raise_if_invalid_org(org: OrgModel) -> OrgModel:
     return org
 
 
-def _fail(message: str) -> CorrectnessError:
-    return CorrectnessError([ValidationFinding(rule="OP", message=message)])
+def _fail(
+    message: str, *, code: str, params: dict[str, str] | None = None
+) -> CorrectnessError:
+    """OP rejection of an org operation, with a ``code`` the client words (VAL-07).
+
+    Same codes as ``operations.py`` (``OP.not-found``/``OP.already-exists`` with
+    ``kind`` and ``name``), so one catalogue entry covers both.
+    """
+
+    return CorrectnessError(
+        [ValidationFinding(rule="OP", message=message, code=code, params=params or {})]
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -180,7 +214,11 @@ def org_add_role(org: OrgModel, name: str, *, role_id: str | None = None) -> Org
     candidate = org.model_copy(deep=True)
     rid = role_id or _new_id("role")
     if rid in candidate.roles:
-        raise _fail(f"role '{rid}' already exists")
+        raise _fail(
+            f"role '{rid}' already exists",
+            code="OP.already-exists",
+            params={"kind": "role", "name": str(rid)},
+        )
     candidate.roles[rid] = Role(id=rid, name=name)
     return raise_if_invalid_org(candidate)
 
@@ -196,11 +234,23 @@ def org_add_unit(
     candidate = org.model_copy(deep=True)
     uid = org_unit_id or _new_id("unit")
     if uid in candidate.org_units:
-        raise _fail(f"org unit '{uid}' already exists")
+        raise _fail(
+            f"org unit '{uid}' already exists",
+            code="OP.already-exists",
+            params={"kind": "org_unit", "name": str(uid)},
+        )
     if parent_id is not None and parent_id not in candidate.org_units:
-        raise _fail(f"parent org unit '{parent_id}' does not exist")
+        raise _fail(
+            f"parent org unit '{parent_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "org_unit", "name": str(parent_id)},
+        )
     if manager_id is not None and manager_id not in candidate.agents:
-        raise _fail(f"manager '{manager_id}' does not exist")
+        raise _fail(
+            f"manager '{manager_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "agent", "name": str(manager_id)},
+        )
     candidate.org_units[uid] = OrgUnit(
         id=uid, name=name, parent_id=parent_id, manager_id=manager_id
     )
@@ -220,14 +270,30 @@ def org_add_agent(
     candidate = org.model_copy(deep=True)
     aid = agent_id or _new_id("agent")
     if aid in candidate.agents:
-        raise _fail(f"agent '{aid}' already exists")
+        raise _fail(
+            f"agent '{aid}' already exists",
+            code="OP.already-exists",
+            params={"kind": "agent", "name": str(aid)},
+        )
     for role_id in role_ids or []:
         if role_id not in candidate.roles:
-            raise _fail(f"role '{role_id}' does not exist")
+            raise _fail(
+                f"role '{role_id}' does not exist",
+                code="OP.not-found",
+                params={"kind": "role", "name": str(role_id)},
+            )
     if org_unit_id is not None and org_unit_id not in candidate.org_units:
-        raise _fail(f"org unit '{org_unit_id}' does not exist")
+        raise _fail(
+            f"org unit '{org_unit_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "org_unit", "name": str(org_unit_id)},
+        )
     if deputy_id is not None and deputy_id not in candidate.agents:
-        raise _fail(f"deputy '{deputy_id}' does not exist")
+        raise _fail(
+            f"deputy '{deputy_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "agent", "name": str(deputy_id)},
+        )
     candidate.agents[aid] = Agent(
         id=aid,
         name=name,
@@ -251,17 +317,29 @@ def org_update_agent(
     candidate = org.model_copy(deep=True)
     agent = candidate.agents.get(agent_id)
     if agent is None:
-        raise _fail(f"agent '{agent_id}' does not exist")
+        raise _fail(
+            f"agent '{agent_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "agent", "name": str(agent_id)},
+        )
     if name is not None:
         agent.name = name
     if role_ids is not None:
         for role_id in role_ids:
             if role_id not in candidate.roles:
-                raise _fail(f"role '{role_id}' does not exist")
+                raise _fail(
+                    f"role '{role_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "role", "name": str(role_id)},
+                )
         agent.role_ids = list(role_ids)
     if not isinstance(org_unit_id, _KeepSentinel):
         if org_unit_id is not None and org_unit_id not in candidate.org_units:
-            raise _fail(f"org unit '{org_unit_id}' does not exist")
+            raise _fail(
+                f"org unit '{org_unit_id}' does not exist",
+                code="OP.not-found",
+                params={"kind": "org_unit", "name": str(org_unit_id)},
+            )
         agent.org_unit_id = org_unit_id
     if not isinstance(email, _KeepSentinel):
         # ``None`` clears the address; a value is checked for well-formedness by
@@ -274,9 +352,17 @@ def org_set_manager(org: OrgModel, org_unit_id: str, manager_id: str | None) -> 
     candidate = org.model_copy(deep=True)
     unit = candidate.org_units.get(org_unit_id)
     if unit is None:
-        raise _fail(f"org unit '{org_unit_id}' does not exist")
+        raise _fail(
+            f"org unit '{org_unit_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "org_unit", "name": str(org_unit_id)},
+        )
     if manager_id is not None and manager_id not in candidate.agents:
-        raise _fail(f"manager '{manager_id}' does not exist")
+        raise _fail(
+            f"manager '{manager_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "agent", "name": str(manager_id)},
+        )
     unit.manager_id = manager_id
     return raise_if_invalid_org(candidate)
 
@@ -285,16 +371,27 @@ def org_set_parent(org: OrgModel, org_unit_id: str, parent_id: str | None) -> Or
     candidate = org.model_copy(deep=True)
     unit = candidate.org_units.get(org_unit_id)
     if unit is None:
-        raise _fail(f"org unit '{org_unit_id}' does not exist")
+        raise _fail(
+            f"org unit '{org_unit_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "org_unit", "name": str(org_unit_id)},
+        )
     if parent_id is not None:
         if parent_id not in candidate.org_units:
-            raise _fail(f"parent org unit '{parent_id}' does not exist")
+            raise _fail(
+                f"parent org unit '{parent_id}' does not exist",
+                code="OP.not-found",
+                params={"kind": "org_unit", "name": str(parent_id)},
+            )
         if parent_id == org_unit_id:
-            raise _fail("an org unit cannot be its own parent")
+            raise _fail("an org unit cannot be its own parent", code="OP.org-cycle")
         walker: str | None = parent_id
         while walker is not None:
             if walker == org_unit_id:
-                raise _fail("setting this parent would create a cycle in the org hierarchy")
+                raise _fail(
+                    "setting this parent would create a cycle in the org hierarchy",
+                    code="OP.org-cycle",
+                )
             walker = candidate.org_units[walker].parent_id
     unit.parent_id = parent_id
     return raise_if_invalid_org(candidate)
@@ -304,12 +401,20 @@ def org_set_deputy(org: OrgModel, agent_id: str, deputy_id: str | None) -> OrgMo
     candidate = org.model_copy(deep=True)
     agent = candidate.agents.get(agent_id)
     if agent is None:
-        raise _fail(f"agent '{agent_id}' does not exist")
+        raise _fail(
+            f"agent '{agent_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "agent", "name": str(agent_id)},
+        )
     if deputy_id is not None:
         if deputy_id == agent_id:
-            raise _fail("an agent cannot be its own deputy")
+            raise _fail("an agent cannot be its own deputy", code="OP.own-deputy")
         if deputy_id not in candidate.agents:
-            raise _fail(f"deputy '{deputy_id}' does not exist")
+            raise _fail(
+                f"deputy '{deputy_id}' does not exist",
+                code="OP.not-found",
+                params={"kind": "agent", "name": str(deputy_id)},
+            )
     agent.deputy_id = deputy_id
     return raise_if_invalid_org(candidate)
 
@@ -325,7 +430,11 @@ def org_set_role_mailbox(org: OrgModel, role_id: str, mailbox: str | None) -> Or
     candidate = org.model_copy(deep=True)
     role = candidate.roles.get(role_id)
     if role is None:
-        raise _fail(f"role '{role_id}' does not exist")
+        raise _fail(
+            f"role '{role_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "role", "name": str(role_id)},
+        )
     role.mailbox = mailbox
     return raise_if_invalid_org(candidate)
 
@@ -340,6 +449,10 @@ def org_set_unit_mailbox(org: OrgModel, org_unit_id: str, mailbox: str | None) -
     candidate = org.model_copy(deep=True)
     unit = candidate.org_units.get(org_unit_id)
     if unit is None:
-        raise _fail(f"org unit '{org_unit_id}' does not exist")
+        raise _fail(
+            f"org unit '{org_unit_id}' does not exist",
+            code="OP.not-found",
+            params={"kind": "org_unit", "name": str(org_unit_id)},
+        )
     unit.mailbox = mailbox
     return raise_if_invalid_org(candidate)

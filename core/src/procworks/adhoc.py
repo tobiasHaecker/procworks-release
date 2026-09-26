@@ -26,11 +26,13 @@ from procworks.model import (
     NodeType,
     ProcessInstance,
     ProcessSchema,
+    StaffRule,
 )
 from procworks.validator import (
     CorrectnessError,
     SchemaResolver,
     ValidationFinding,
+    check_executable,
     raise_if_invalid,
 )
 
@@ -47,8 +49,24 @@ def effective_schema(
     return instance.ad_hoc_schema or base_schema
 
 
-def _r1_error(message: str, node_id: str | None = None) -> CorrectnessError:
-    return CorrectnessError([ValidationFinding(rule="R1", message=message, node_id=node_id)])
+def _r1_error(message: str, node_id: str | None = None, *, code: str) -> CorrectnessError:
+    """R1 rejection with a ``code`` the client words (VAL-07).
+
+    ``params["node"]`` carries the node id; the client resolves it to the
+    step's name in the instance variant it shows.
+    """
+
+    return CorrectnessError(
+        [
+            ValidationFinding(
+                rule="R1",
+                message=message,
+                node_id=node_id,
+                code=code,
+                params={"node": node_id} if node_id else {},
+            )
+        ]
+    )
 
 
 def adhoc_insert_activity(
@@ -59,38 +77,57 @@ def adhoc_insert_activity(
     *,
     resolver: SchemaResolver | None = None,
     new_node_id: str | None = None,
+    staff_rule: StaffRule | None = None,
 ) -> ProcessInstance:
     """Insert a serial ACTIVITY after ``after_node_id`` into one instance.
 
     requires (R1): the anchor exists and is not END, its single outgoing edge
                    is not yet signaled and its successor is NOT_ACTIVATED (the
                    region is still ahead of the execution front).
-    ensures (R2):  the resulting instance schema is still correct; the new node
-                   is spliced in as NOT_ACTIVATED.
+    requires (B2): ``staff_rule`` names who works the new step. The instance
+                   runs, so the new step must be *runnable*, not merely
+                   correct: without a rule it is activated but stands in no
+                   worklist, and the instance only moves on by a supervision
+                   act (Validierung 2026-09-25, VAL-03). The check is
+                   :func:`check_executable` restricted to the new node -- the
+                   rest of the variant is the released schema (or, for a test
+                   instance, a draft that may still be incomplete).
+                   ``check_executable`` deliberately stays **outside**
+                   ``validate()``; this is the ad-hoc path's own gate.
+    ensures (R2):  the resulting instance schema is still correct (the staff
+                   rule included: Z1-Z3 apply as everywhere); the new node is
+                   spliced in as NOT_ACTIVATED.
     """
 
     current = effective_schema(instance, schema)
     anchor = current.nodes.get(after_node_id)
     if anchor is None:
-        raise _r1_error(f"node '{after_node_id}' does not exist", after_node_id)
+        raise _r1_error(
+            f"node '{after_node_id}' does not exist", after_node_id, code="R1.not-found"
+        )
     if anchor.type is NodeType.END:
-        raise _r1_error("cannot insert after END", after_node_id)
+        raise _r1_error("cannot insert after END", after_node_id, code="R1.after-end")
     outgoing = current.outgoing(after_node_id)
     if len(outgoing) != 1:
         raise _r1_error(
             f"anchor '{after_node_id}' must have exactly one outgoing edge",
             after_node_id,
+            code="R1.anchor-not-serial",
         )
     edge = outgoing[0]
     successor_id = edge.target
     edge_state = instance.edge_states.get(_edge_key(after_node_id, successor_id))
     if edge_state is not None and edge_state is not EdgeState.NOT_SIGNALED:
         raise _r1_error(
-            f"edge '{after_node_id}->{successor_id}' is already signaled", after_node_id
+            f"edge '{after_node_id}->{successor_id}' is already signaled",
+            after_node_id,
+            code="R1.already-passed",
         )
     if instance.node_states.get(successor_id) not in (None, NodeState.NOT_ACTIVATED):
         raise _r1_error(
-            f"successor '{successor_id}' is already reached", successor_id
+            f"successor '{successor_id}' is already reached",
+            successor_id,
+            code="R1.already-reached",
         )
 
     candidate = current.model_copy(deep=True)
@@ -107,8 +144,13 @@ def adhoc_insert_activity(
     ]
     candidate.edges.append(ControlEdge(source=after_node_id, target=new_node.id))
     candidate.edges.append(ControlEdge(source=new_node.id, target=successor_id))
+    if staff_rule is not None:
+        candidate.staff_rules[new_node.id] = staff_rule
     candidate.lifecycle_state = LifecycleState.RELEASED
     raise_if_invalid(candidate, resolver)
+    unready = [f for f in check_executable(candidate) if f.node_id == new_node.id]
+    if unready:
+        raise CorrectnessError(unready)
 
     result = instance.model_copy(deep=True)
     result.ad_hoc_schema = candidate
@@ -141,16 +183,22 @@ def adhoc_delete_node(
     current = effective_schema(instance, schema)
     node = current.nodes.get(node_id)
     if node is None:
-        raise _r1_error(f"node '{node_id}' does not exist", node_id)
+        raise _r1_error(f"node '{node_id}' does not exist", node_id, code="R1.not-found")
     if node.type is not NodeType.ACTIVITY:
-        raise _r1_error("only ACTIVITY nodes can be deleted ad-hoc", node_id)
+        raise _r1_error(
+            "only ACTIVITY nodes can be deleted ad-hoc", node_id, code="R1.delete-not-activity"
+        )
     if instance.node_states.get(node_id) is not NodeState.NOT_ACTIVATED:
-        raise _r1_error(f"node '{node_id}' is already reached", node_id)
+        raise _r1_error(
+            f"node '{node_id}' is already reached", node_id, code="R1.already-reached"
+        )
     incoming = current.incoming(node_id)
     outgoing = current.outgoing(node_id)
     if len(incoming) != 1 or len(outgoing) != 1:
         raise _r1_error(
-            f"node '{node_id}' is not on a serial stretch (one in/one out)", node_id
+            f"node '{node_id}' is not on a serial stretch (one in/one out)",
+            node_id,
+            code="R1.not-serial",
         )
     predecessor_id = incoming[0].source
     successor_id = outgoing[0].target
@@ -209,13 +257,17 @@ def adhoc_rename_activity(
     current = effective_schema(instance, schema)
     node = current.nodes.get(node_id)
     if node is None:
-        raise _r1_error(f"node '{node_id}' does not exist", node_id)
+        raise _r1_error(f"node '{node_id}' does not exist", node_id, code="R1.not-found")
     if node.type not in (NodeType.ACTIVITY, NodeType.SUBPROCESS):
         raise _r1_error(
-            "only ACTIVITY or SUBPROCESS nodes can be renamed ad-hoc", node_id
+            "only ACTIVITY or SUBPROCESS nodes can be renamed ad-hoc",
+            node_id,
+            code="R1.rename-not-step",
         )
     if instance.node_states.get(node_id) not in (None, NodeState.NOT_ACTIVATED):
-        raise _r1_error(f"node '{node_id}' is already reached", node_id)
+        raise _r1_error(
+            f"node '{node_id}' is already reached", node_id, code="R1.already-reached"
+        )
 
     candidate = current.model_copy(deep=True)
     candidate.nodes[node_id].label = label

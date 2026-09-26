@@ -530,7 +530,7 @@ const FINDING_TEXTS = {
 
   // --- Vorbedingungen der Operationen (Regel OP) -------------------------
   "OP.not-found": (p) => ({
-    text: `${OP_KIND_NAMES[p.kind] || "Das Element"} „${p.name}“ gibt es nicht (mehr).`,
+    text: `${OP_KIND_NAMES[p.kind] || "Das Element"} „${nm(p.name)}“ gibt es nicht (mehr).`,
     hint: "Ansicht neu laden – vermutlich wurde es inzwischen geändert oder entfernt.",
   }),
   "OP.already-exists": (p) => ({
@@ -623,6 +623,217 @@ const FINDING_TEXTS = {
     text: "Diese Instanz wurde einzeln angepasst (Ad-hoc-Änderung) und wird deshalb nicht automatisch migriert.",
     hint: "Sie läuft sicher auf ihrer Version weiter.",
   }),
+  // --- Seit VAL-07 (Validierung 2026-09-25): jeder Befund des Kerns traegt einen
+  // Code. IDs in den Parametern loest ``nm()`` gegen das gezeigte Modell auf,
+  // ``p.step`` ergaenzt ``findingText`` aus ``node_id``.
+  "K2.degree": (p) => ({
+    text: `${stepOf(p)} hat ${p.in} eingehende und ${p.out} ausgehende Verbindung(en); erwartet ist ${degreeText(p.expected)}.`,
+    hint: "Typisch bei importiertem BPMN: Verbindungen fehlen oder ein Schritt hat mehrere Ein- oder Ausgänge.",
+  }),
+  "K4.unknown-node": () => ({ text: "Eine Warte-Beziehung verweist auf einen Schritt, den es nicht gibt." }),
+  "K4.not-activity": () => ({ text: "Warte-Beziehungen verbinden nur Aufgaben-Schritte." }),
+  "K4.not-parallel": () => ({
+    text: "Eine Warte-Beziehung verbindet nur Schritte verschiedener Zweige derselben parallelen Verzweigung.",
+  }),
+  "K4.cycle": () => ({ text: "Die Warte-Beziehungen bilden mit dem Ablauf einen Kreis – die Schritte würden aufeinander warten." }),
+  "K6.decision-not-loop-end": () => ({ text: "Eine Wiederholungsbedingung hängt an einem Knoten, der kein Schleifenende ist." }),
+  "K6.unbalanced": (p) => ({ text: `Es gibt ${p.starts} Schleifenanfänge, aber ${p.ends} Schleifenenden.` }),
+  "K6.start-unpaired": () => ({ text: "Zu einem Schleifenanfang gibt es kein passendes Schleifenende." }),
+  "K6.end-unpaired": () => ({ text: "Zu einem Schleifenende gibt es keinen passenden Schleifenanfang." }),
+  "K6.end-claimed-twice": () => ({ text: "Zwei Schleifenanfänge enden am selben Schleifenende – die Schleifen überkreuzen sich." }),
+  "K6.empty-body": () => ({ text: "Die Schleife enthält keinen Schritt.", hint: "Einen Schritt in die Schleife legen oder sie entfernen." }),
+  "K6.no-decision": () => ({ text: "Das Schleifenende hat keine Wiederholungsbedingung.", hint: "Am Schleifenende festlegen, wann wiederholt wird." }),
+  "K6.discriminator-missing": (p) => ({ text: `Das Merkmal „${nm(p.element)}“ der Wiederholungsbedingung gibt es nicht.` }),
+  "K6.discriminator-not-instance": (p) => ({ text: `Das Merkmal „${nm(p.element)}“ muss ein Vorgangsdatum sein, kein externes Datum.` }),
+  "K6.discriminator-not-boolean": (p) => ({ text: `Das Merkmal „${nm(p.element)}“ muss Ja/Nein sein (ist ${typeName(p.type)}).` }),
+  "K6.cells-need-boolean": () => ({ text: "Eine Wiederholungsbedingung ohne Wertbereiche braucht ein Ja/Nein-Merkmal." }),
+  "K6.discriminator-type": (p) => ({ text: `Ein Merkmal vom Typ ${typeName(p.type)} kann über keine Wiederholung entscheiden.` }),
+  "K6.kind-mismatch": (p) => ({ text: `Die Art der Wiederholungsbedingung passt nicht zum Typ ${typeName(p.type)} des Merkmals.` }),
+  "K6.no-exit-cell": () => ({ text: "Die Wiederholungsbedingung hat keinen Wert, bei dem die Schleife endet – sie liefe endlos." }),
+  "K6.no-repeat-cell": () => ({ text: "Die Wiederholungsbedingung hat keinen Wert, bei dem wiederholt wird." }),
+  "K6.max-iterations": (p) => ({ text: `Die Höchstzahl der Durchläufe muss mindestens 2 sein (ist ${p.value}).` }),
+  "K6.discriminator-not-written": (p) => ({
+    text: `„${nm(p.element)}“ wird nicht in jedem Durchlauf der Schleife neu gesetzt – die Schleife entschiede auf altem Stand.`,
+    hint: `In der Schleife einen Schritt „${nm(p.element)}“ schreiben lassen (Pflichtbindung).`,
+  }),
+  "K7.decision-not-split": () => ({ text: "Eine Verzweigungsbedingung hängt an einem Knoten, der keine Entscheidung ist." }),
+  "K7.condition-not-on-split": () => ({ text: "Nur Verbindungen, die eine Entscheidung verlassen, können eine Bedingung tragen." }),
+  "K7.no-decision": (p) => ({
+    text: `${stepOf(p, "Die Entscheidung")} hat keine Bedingung, nach der ein Zweig gewählt wird.`,
+    hint: "Ein Merkmal und die Wertbereiche der Zweige festlegen.",
+  }),
+  "K7.targets-mismatch": () => ({ text: "Die Zweige der Bedingung passen nicht zu den Ausgängen der Entscheidung." }),
+  "K7.too-few-branches": () => ({ text: "Eine Entscheidung braucht mindestens zwei Zweige." }),
+  "K7.two-empty-branches": () => ({ text: "Eine Entscheidung darf höchstens einen leeren Zweig haben." }),
+  "K7.discriminator-missing": () => ({ text: "Das Entscheidungsmerkmal gibt es nicht." }),
+  "K7.discriminator-not-instance": () => ({ text: "Das Entscheidungsmerkmal muss ein Vorgangsdatum sein, kein externes Datum." }),
+  "K7.discriminator-type": (p) => ({ text: `Ein Merkmal vom Typ ${typeName(p.type)} kann keine Entscheidung steuern.` }),
+  "K7.kind-mismatch": (p) => ({ text: `Die Art der Bedingung passt nicht zum Typ ${typeName(p.type)} des Merkmals.` }),
+  "K7.discriminator-unset": (p) => ({
+    text: `Das Merkmal von ${stepOf(p, "der Entscheidung")} ist nicht auf jedem Weg gesetzt, wenn entschieden wird.`,
+    hint: "Das Merkmal vorher in einem Schritt schreiben lassen (Pflichtbindung).",
+  }),
+  "K7.threshold-last-unbounded": () => ({ text: "Der letzte Wertbereich muss nach oben offen sein." }),
+  "K7.threshold-only-last-unbounded": () => ({ text: "Nur der letzte Wertbereich darf nach oben offen sein." }),
+  "K7.threshold-ascending": () => ({ text: "Die Grenzen der Wertbereiche müssen aufsteigen." }),
+  "K7.boolean-two-branches": () => ({ text: "Eine Ja/Nein-Bedingung hat genau zwei Zweige." }),
+  "K7.boolean-cover": () => ({ text: "Eine Ja/Nein-Bedingung braucht genau einen Ja- und einen Nein-Zweig." }),
+  "K7.enum-one-otherwise": () => ({ text: "Eine Auswahl-Bedingung braucht genau einen Zweig „sonst“." }),
+  "K7.otherwise-values": () => ({ text: "Der Zweig „sonst“ darf keine Werte aufzählen." }),
+  "K7.enum-empty-branch": () => ({ text: "Jeder Zweig einer Auswahl-Bedingung braucht mindestens einen Wert." }),
+  "K7.enum-duplicate": (p) => ({ text: `Der Wert ${p.value} steht in mehr als einem Zweig.` }),
+  "D3.param-type": (p) => ({ text: `Der Parametertyp ${typeName(p.param_type)} passt nicht zu „${nm(p.element)}“ (${typeName(p.type)}).` }),
+  "D4.unknown-node": () => ({ text: "Eine Datenbindung verweist auf einen Schritt, den es nicht gibt." }),
+  "D4.not-activity": () => ({ text: "Daten lassen sich nur an Aufgaben-Schritte binden." }),
+  "D4.unknown-element": (p) => ({ text: `Eine Datenbindung verweist auf das unbekannte Datenelement „${nm(p.element)}“.` }),
+  "U1.unknown-node": () => ({ text: "Eine Eingabemaske hängt an einem Schritt, den es nicht gibt." }),
+  "U1.not-activity": () => ({ text: "Eingabemasken gibt es nur an Aufgaben-Schritten." }),
+  "U1.unknown-element": (p) => ({ text: `Ein Maskenfeld verweist auf das unbekannte Datenelement „${nm(p.element)}“.` }),
+  "U2.duplicate-field": () => ({ text: "Zwei Felder der Maske haben dieselbe Kennung." }),
+  "U2.element-twice": (p) => ({ text: `„${nm(p.element)}“ steht zweimal in derselben Maske.` }),
+  "U2.empty-label": () => ({ text: "Ein Maskenfeld hat keine Beschriftung." }),
+  "U2.widget-type": (p) => ({ text: `Dieses Bedienelement kann „${nm(p.element)}“ (${typeName(p.type)}) nicht darstellen.` }),
+  "U2.dropdown-options": () => ({ text: "Eine Auswahlliste braucht mindestens zwei Einträge." }),
+  "U2.duplicate-options": () => ({ text: "Eine Auswahlliste enthält einen Eintrag doppelt." }),
+  "U2.options-not-dropdown": () => ({ text: "Nur eine Auswahlliste trägt Einträge." }),
+  "U3.input-no-write": (p) => ({ text: `Das Eingabefeld für „${nm(p.element)}“ hat keine Schreibbindung am Schritt.` }),
+  "U3.display-no-read": (p) => ({ text: `Das Anzeigefeld für „${nm(p.element)}“ hat keine Lesebindung am Schritt.` }),
+  "C1.instance-with-binding": (p) => ({ text: `„${nm(p.element)}“ ist ein Vorgangsdatum und darf keine externe Anbindung tragen.` }),
+  "C1.binding-kinds": (p) => ({ text: `„${nm(p.element)}“ braucht genau eine Art externer Anbindung.` }),
+  "C1.binding-missing": (p) => ({ text: `Das externe Datenelement „${nm(p.element)}“ hat keine Anbindung.` }),
+  "C1.unknown-connector": (p) => ({ text: `„${nm(p.element)}“ verweist auf den unbekannten Connector „${p.connector}“.` }),
+  "C3.empty-entity": (p) => ({ text: `Für „${nm(p.element)}“ fehlt die Tabelle.` }),
+  "C2.self-key": (p) => ({ text: `„${nm(p.element)}“ kann nicht sein eigener Schlüssel sein.` }),
+  "C2.unknown-key": (p) => ({ text: `Der Schlüssel „${nm(p.key)}“ von „${nm(p.element)}“ existiert nicht.` }),
+  "C2.key-not-instance": (p) => ({ text: `Der Schlüssel „${nm(p.key)}“ von „${nm(p.element)}“ muss ein Vorgangsdatum sein.` }),
+  "C2.key-not-set": (p) => ({
+    text: `Der Schlüssel „${nm(p.key)}“ für „${nm(p.element)}“ ist nicht auf jedem Weg gesetzt, bevor gelesen wird.`,
+    hint: "Den Schlüssel vorher in einem Schritt schreiben lassen (Pflichtbindung).",
+  }),
+  "C4.type-mismatch": (p) => ({ text: `„${nm(p.element)}“ ist ${typeName(p.type)}, die Abfrage liefert aber ${typeName(p.result_type)}.` }),
+  "C5.unknown-connector": (p) => ({ text: `„${nm(p.element)}“ verweist auf den unbekannten Connector „${p.connector}“.` }),
+  "C5.empty-entity": (p) => ({ text: `Für die Abfrage von „${nm(p.element)}“ fehlt die Tabelle.` }),
+  "C5.empty-column": (p) => ({ text: `Für die Abfrage von „${nm(p.element)}“ fehlt die Spalte.` }),
+  "C5.operator-type": (p) => ({ text: `Der Vergleich ${p.operator} passt nicht zu einer Spalte vom Typ ${typeName(p.column_type)} (${nm(p.element)}).` }),
+  "C5.unknown-source": (p) => ({ text: `Ein Filter von „${nm(p.element)}“ verweist auf das unbekannte Datenelement „${nm(p.source)}“.` }),
+  "C5.source-not-instance": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ muss ein Vorgangsdatum sein.` }),
+  "C5.source-type": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ (${typeName(p.source_type)}) passt nicht zur Spalte (${typeName(p.column_type)}).` }),
+  "C5.source-unset": (p) => ({
+    text: `Der Filterwert „${nm(p.source)}“ für „${nm(p.element)}“ ist nicht auf jedem Weg gesetzt, bevor gelesen wird.`,
+    hint: "Den Filterwert vorher in einem Schritt schreiben lassen (Pflichtbindung).",
+  }),
+  "C6.no-unique-column": (p) => ({ text: `„${nm(p.element)}“ liest genau einen Datensatz, nennt aber keine eindeutige Spalte.` }),
+  "C6.no-unique-filter": (p) => ({ text: `„${nm(p.element)}“ liest genau einen Datensatz, filtert aber nicht auf die eindeutige Spalte „${p.column}“.` }),
+  "C6.aggregate-plain-column": (p) => ({ text: `„${nm(p.element)}“ fasst Datensätze zusammen, liest aber eine einfache Spalte.` }),
+  "C6.empty-order": (p) => ({ text: `„${nm(p.element)}“ nimmt den ersten Datensatz, gibt aber keine Sortierung an.` }),
+  "C7.type-mismatch": (p) => ({ text: `„${nm(p.element)}“ ist ${typeName(p.type)}, die Zielspalte aber ${typeName(p.column_type)}.` }),
+  "C8.unknown-connector": (p) => ({ text: `Das Zurückschreiben von „${nm(p.element)}“ verweist auf den unbekannten Connector „${p.connector}“.` }),
+  "C8.empty-entity": (p) => ({ text: `Für das Zurückschreiben von „${nm(p.element)}“ fehlt die Tabelle.` }),
+  "C8.empty-column": (p) => ({ text: `Für das Zurückschreiben von „${nm(p.element)}“ fehlt die Zielspalte.` }),
+  "C8.operator-type": (p) => ({ text: `Der Vergleich ${p.operator} passt nicht zu einer Spalte vom Typ ${typeName(p.column_type)} (${nm(p.element)}).` }),
+  "C8.unknown-source": (p) => ({ text: `Ein Filter beim Zurückschreiben von „${nm(p.element)}“ verweist auf das unbekannte Datenelement „${nm(p.source)}“.` }),
+  "C8.source-not-instance": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ muss ein Vorgangsdatum sein.` }),
+  "C8.source-type": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ (${typeName(p.source_type)}) passt nicht zur Spalte (${typeName(p.column_type)}).` }),
+  "C8.source-unset": (p) => ({
+    text: `Der Filterwert „${nm(p.source)}“ ist nicht auf jedem Weg gesetzt, bevor „${nm(p.element)}“ zurückgeschrieben wird.`,
+    hint: "Den Filterwert vorher in einem Schritt schreiben lassen (Pflichtbindung).",
+  }),
+  "C9.no-unique-column": (p) => ({ text: `Das Zurückschreiben von „${nm(p.element)}“ nennt keine eindeutige Spalte – es muss genau einen Datensatz treffen.` }),
+  "C9.no-unique-filter": (p) => ({ text: `Das Zurückschreiben von „${nm(p.element)}“ filtert nicht auf die eindeutige Spalte „${p.column}“.` }),
+  "Z1.unknown-role": (p) => ({ text: `Die Bearbeiterregel nennt die unbekannte Rolle „${nm(p.ref)}“.` }),
+  "Z1.unknown-unit": (p) => ({ text: `Die Bearbeiterregel nennt die unbekannte Abteilung „${nm(p.ref)}“.` }),
+  "Z1.unknown-agent": (p) => ({ text: `Die Bearbeiterregel nennt die unbekannte Person „${nm(p.ref)}“.` }),
+  "Z1.unknown-node-ref": (p) => ({ text: `Die Bearbeiterregel verweist auf den unbekannten Schritt „${nm(p.ref)}“.` }),
+  "Z1.unknown-node": () => ({ text: "Eine Bearbeiterregel hängt an einem Schritt, den es nicht gibt." }),
+  "Z1.not-activity": () => ({ text: "Bearbeiter lassen sich nur Aufgaben-Schritten zuordnen." }),
+  "Z1.no-operands-allowed": () => ({ text: "Diese Art von Bearbeiterregel darf keine Teilregeln enthalten." }),
+  "Z1.reference-missing": () => ({ text: "Der Bearbeiterregel fehlt die Angabe, wer gemeint ist." }),
+  "Z1.except-two": () => ({ text: "„außer“ braucht genau zwei Teilregeln: wer, und wer davon nicht." }),
+  "Z1.too-few-operands": (p) => ({ text: `Diese Kombination braucht mindestens ${p.count} Teilregel(n).` }),
+  "Z1.agent-unknown-role": (p) => ({ text: `„${nm(p.agent)}“ hat die unbekannte Rolle „${nm(p.role)}“.` }),
+  "Z1.agent-unknown-unit": (p) => ({ text: `„${nm(p.agent)}“ gehört zur unbekannten Abteilung „${nm(p.unit_ref)}“.` }),
+  "Z1.own-deputy": (p) => ({ text: `„${nm(p.agent)}“ kann nicht die eigene Vertretung sein.` }),
+  "Z1.unknown-deputy": (p) => ({ text: `Die Vertretung „${nm(p.deputy)}“ von „${nm(p.agent)}“ gibt es nicht.` }),
+  "Z1.unknown-manager": (p) => ({ text: `Die Leitung „${nm(p.manager)}“ der Abteilung „${nm(p.unit)}“ gibt es nicht.` }),
+  "Z1.unknown-parent": (p) => ({ text: `Die übergeordnete Abteilung „${nm(p.parent)}“ von „${nm(p.unit)}“ gibt es nicht.` }),
+  "Z1.unit-cycle": () => ({ text: "Die Abteilungen sind im Kreis untergeordnet." }),
+  "Z4.not-activity": () => ({ text: "Ein Dienst lässt sich nur an Aufgaben-Schritte binden." }),
+  "A1.unknown-template": (p) => ({ text: `Die Dienst-Vorlage „${p.template}“ gibt es nicht.` }),
+  "A2.executor-mismatch": (p) => ({ text: `„automatisch“ passt nicht zur Ausführungsart der Dienst-Vorlage „${p.template}“.` }),
+  "A3.param-unbound": (p) => ({ text: `Der Pflichtparameter „${p.param}“ des Dienstes ist nicht belegt.` }),
+  "A3.unknown-param": (p) => ({ text: `Die Dienst-Vorlage „${p.template}“ hat keinen Parameter „${p.param}“.` }),
+  "A3.unknown-element": (p) => ({ text: `Der Parameter „${p.param}“ ist an das unbekannte Datenelement „${nm(p.element)}“ gebunden.` }),
+  "A3.type-mismatch": (p) => ({ text: `Der Parameter „${p.param}“ (${typeName(p.param_type)}) passt nicht zu „${nm(p.element)}“ (${typeName(p.type)}).` }),
+  "I1.no-topic": () => ({ text: "Eine externe Aufgabe braucht ein Thema (Topic)." }),
+  "I1.no-endpoint": () => ({ text: "Ein HTTP-Aufruf braucht einen Endpunkt." }),
+  "I2.topic-with-endpoint": () => ({ text: "Eine externe Aufgabe darf keinen Endpunkt tragen." }),
+  "I2.endpoint-with-topic": () => ({ text: "Ein HTTP-Aufruf darf kein Thema (Topic) tragen." }),
+  "I2.automated-not-automatic": () => ({ text: "Eine angebundene Automatik muss als „automatisch“ markiert sein." }),
+  "I3.unknown-element": (p) => ({ text: `Der Parameter „${p.param}“ verweist auf das unbekannte Datenelement „${nm(p.element)}“.` }),
+  "I4.inline-reference": () => ({
+    text: "Adressen und Zugangsdaten gehören nicht ins Modell, nur ein Verweis auf die Konfiguration.",
+  }),
+  "T1.negative-deadline": () => ({ text: "Der Termin des Prozesses darf nicht negativ sein." }),
+  "T1.unknown-node": () => ({ text: "Eine Zeitvorgabe hängt an einem Schritt, den es nicht gibt." }),
+  "T1.negative-duration": () => ({ text: "Die Höchstdauer darf nicht negativ sein." }),
+  "T1.negative-lead": () => ({ text: "Die Soll-Zeit darf nicht negativ sein." }),
+  "T3.not-activity": () => ({ text: "Eine Eskalation gibt es nur an Aufgaben-Schritten." }),
+  "T3.automatic": () => ({ text: "Ein automatischer Schritt eskaliert nicht – dafür gibt es Störungen und Wiederholungen." }),
+  "T3.no-target-time": () => ({ text: "Für eine Eskalation braucht der Schritt eine Soll-Zeit oder Höchstdauer." }),
+  "T3.no-stages": () => ({ text: "Eine Eskalation braucht mindestens eine Stufe." }),
+  "T3.negative-offset": () => ({ text: "Eine Eskalationsstufe darf nicht vor der Fälligkeit liegen." }),
+  "T3.offsets-ascending": () => ({ text: "Die Eskalationsstufen müssen zeitlich aufeinander folgen." }),
+  "T3.node-ref-target": () => ({ text: "Eine Eskalation richtet sich an Rollen oder Abteilungen, nicht an den Bearbeiter eines Schritts." }),
+  "T3.nobody": () => ({ text: "Das Ziel der Eskalation findet niemanden im Organisationsmodell." }),
+  "N1.agent-mail": (p) => ({ text: `Die E-Mail-Adresse von „${nm(p.agent)}“ ist ungültig.` }),
+  "N1.role-mail": (p) => ({ text: `Das Gruppenpostfach der Rolle „${nm(p.role)}“ ist ungültig.` }),
+  "N1.unit-mail": (p) => ({ text: `Das Postfach der Abteilung „${nm(p.unit)}“ ist ungültig.` }),
+  "N2.unknown-node": () => ({ text: "Eine E-Mail-Benachrichtigung hängt an einem Schritt, den es nicht gibt." }),
+  "N2.not-activity": () => ({ text: "E-Mail-Benachrichtigungen gibt es nur an Aufgaben-Schritten." }),
+  "N2.no-staff-rule": () => ({ text: "Ohne Bearbeiterzuordnung gibt es niemanden, der benachrichtigt werden kann." }),
+  "N3.not-static": () => ({
+    text: "Die Empfänger hängen vom Bearbeiter eines früheren Schritts ab – persönliche Mails lassen sich hier nicht modellieren.",
+    hint: "Ein Gruppenpostfach verwenden.",
+  }),
+  "N3.no-address": (p) => ({ text: `„${nm(p.agent)}“ könnte zuständig sein, hat aber keine E-Mail-Adresse.` }),
+  "N3.no-group": () => ({ text: "Die Bearbeiterregel nennt keine Rolle oder Abteilung – es gibt kein Gruppenpostfach." }),
+  "N3.role-no-mailbox": (p) => ({ text: `Die Rolle „${nm(p.ref)}“ hat kein Gruppenpostfach.` }),
+  "N3.unit-no-mailbox": (p) => ({ text: `Die Abteilung „${nm(p.ref)}“ hat kein Postfach.` }),
+  "N3.performer-no-mailbox": () => ({ text: "Der Bearbeiter eines früheren Schritts hat kein Gruppenpostfach – dafür persönliche Mails verwenden." }),
+  "N4.unknown-element": (p) => ({ text: `Der Platzhalter {${p.ref}} verweist auf ein unbekanntes Datenelement.` }),
+  "N4.not-instance": (p) => ({ text: `Der Platzhalter {${p.ref}} ist kein Vorgangsdatum und steht im Mailtext nicht zur Verfügung.` }),
+  "N4.not-set": (p) => ({ text: `Der Platzhalter {${p.ref}} ist nicht sicher gesetzt, wenn die Aufgabe bereit wird.` }),
+  "H1.no-binding": () => ({ text: "Der Teilprozess-Schritt ist an keinen Teilprozess gebunden." }),
+  "H1.not-subprocess": () => ({ text: "Eine Teilprozess-Bindung hängt an einem Schritt, der kein Teilprozess ist." }),
+  "H1.target-missing": (p) => ({ text: `Den Teilprozess „${schemaName(p.target)}“ (Version ${p.version}) gibt es nicht.` }),
+  "H1.target-not-released": (p) => ({ text: `Der Teilprozess „${schemaName(p.target)}“ ist nicht freigegeben.` }),
+  "H2.unknown-parent-element": (p) => ({ text: `Die Übergabe verweist auf das unbekannte Datenelement „${nm(p.parent_element)}“.` }),
+  "H2.unknown-target-element": (p) => ({ text: `Die Übergabe nennt das unbekannte Datenelement „${p.target_element}“ im Teilprozess.` }),
+  "H2.type-mismatch": (p) => ({ text: `Die Übergabe verbindet „${nm(p.parent_element)}“ (${typeName(p.parent_type)}) mit „${p.target_element}“ (${typeName(p.target_type)}).` }),
+  "H2.output-not-written": (p) => ({ text: `Der Teilprozess setzt „${p.target_element}“ nicht auf jedem Weg – „${nm(p.parent_element)}“ bliebe leer.` }),
+  "H2.input-not-written": (p) => ({ text: `„${nm(p.parent_element)}“ ist nicht auf jedem Weg gesetzt, bevor der Teilprozess startet.` }),
+  "H3.cycle": () => ({ text: "Die Teilprozesse enthalten sich gegenseitig – ein Prozess kann sich nicht selbst enthalten." }),
+  "F1.no-released-version": () => ({ text: "Vom Folgeprozess gibt es keine passende freigegebene Version." }),
+  "F1.not-released": () => ({ text: "Der Folgeprozess ist nicht freigegeben." }),
+  "F2.unknown-source": (p) => ({ text: `Die Übergabe an den Folgeprozess verweist auf das unbekannte Datenelement „${nm(p.source_element)}“.` }),
+  "F2.unknown-target": (p) => ({ text: `Die Übergabe nennt das unbekannte Datenelement „${p.target_element}“ im Folgeprozess.` }),
+  "F2.type-mismatch": (p) => ({ text: `Die Übergabe verbindet „${nm(p.source_element)}“ (${typeName(p.source_type)}) mit „${p.target_element}“ (${typeName(p.target_type)}).` }),
+  "F4.no-condition": () => ({ text: "Ein bedingter Folgeprozess hat keine Bedingung." }),
+  "F4.invalid-condition": (p) => ({ text: `Die Bedingung des Folgeprozesses ist ungültig: ${p.error}` }),
+  "F4.unknown-element": (p) => ({ text: `Die Bedingung des Folgeprozesses verweist auf das unbekannte Datenelement „${p.element}“.` }),
+  "F4.condition-not-written": (p) => ({
+    text: `Die Bedingung des Folgeprozesses liest „${nm(p.element)}“, das nicht auf jedem Weg gesetzt wird.`,
+    hint: "Das Datenelement in einem Schritt auf jedem Weg schreiben lassen, z. B. über ein Ankreuzfeld.",
+  }),
+  "R1.not-found": () => ({ text: "Diesen Schritt gibt es in dem Vorgang nicht." }),
+  "R1.after-end": () => ({ text: "Hinter dem Ende lässt sich nichts einfügen." }),
+  "R1.anchor-not-serial": (p) => ({ text: `Hinter ${stepOf(p, "diesem Knoten")} lässt sich nichts einfügen – er hat mehr als einen Ausgang.` }),
+  "R1.already-passed": (p) => ({ text: `Der Vorgang ist schon über ${stepOf(p, "diese Stelle")} hinaus – dort lässt sich nichts mehr ändern.` }),
+  "R1.already-reached": (p) => ({ text: `${stepOf(p)} ist im Vorgang schon erreicht – ad hoc ändern lässt sich nur, was der Vorgang noch nicht erreicht hat.` }),
+  "R1.delete-not-activity": () => ({ text: "Ad hoc lassen sich nur Aufgaben-Schritte entfernen." }),
+  "R1.not-serial": () => ({ text: "Dieser Schritt liegt nicht auf einer einfachen Strecke und lässt sich ad hoc nicht entfernen." }),
+  "R1.rename-not-step": () => ({ text: "Ad hoc lassen sich nur Schritte und Teilprozesse umbenennen." }),
+  "OP.own-deputy": () => ({ text: "Eine Person kann nicht ihre eigene Vertretung sein." }),
 };
 
 /**
@@ -636,10 +847,65 @@ const FINDING_TEXTS = {
  * @param {{withHint?: boolean}} [opts] ``withHint`` haengt den Handlungsvorschlag an
  * @returns {string}
  */
+/**
+ * Anzeigename fuer eine ID aus Befund-Parametern (VAL-07).
+ *
+ * Viele Befunde des Kerns nennen IDs (Datenelement, Rolle, Person, Schritt),
+ * weil der Kern an der Stelle nur die ID kennt. Aufgeloest wird gegen das
+ * gezeigte Modell: Schritte (auch im Ad-hoc-Wandel des Vorgangs),
+ * Datenelemente, Rollen, Abteilungen, Personen. Unbekanntes bleibt, wie es
+ * ist -- ein Name aus dem Kern loest sich so auf sich selbst auf.
+ * @param {string|undefined} id ID oder bereits ein Name
+ * @returns {string}
+ */
+function nm(id) {
+  if (id == null || id === "") return "\u2013";
+  const models = [state.schema, state.instance && state.instance.ad_hoc_schema].filter(Boolean);
+  for (const m of models) {
+    const n = (m.nodes || {})[id];
+    if (n) return nodeCaption(n);
+    const d = (m.data_elements || {})[id];
+    if (d) return d.name || id;
+    const org = m.org_model || {};
+    for (const map of [org.roles, org.org_units, org.agents]) {
+      if (map && map[id]) return map[id].name || id;
+    }
+  }
+  if (state.agentDirectory && state.agentDirectory[id]) return state.agentDirectory[id].name || id;
+  return String(id);
+}
+
+/** Datentypen in Befundtexten mit fachlichem Namen statt INTEGER/FLOAT (VAL-07). */
+const FINDING_TYPE_NAMES = {
+  INTEGER: "Ganzzahl", FLOAT: "Kommazahl", STRING: "Text", DATE: "Datum", BOOLEAN: "Ja/Nein", URI: "Link",
+};
+function typeName(t) { return FINDING_TYPE_NAMES[t] || t || "?"; }
+
+/** Name eines Schemas (Teilprozess, Folgeprozess) aus seiner ID, ohne Version. */
+function schemaName(id) { return (state.schemaNames && state.schemaNames[id]) || id; }
+
+/**
+ * Der Schritt eines Befunds als Satzanfang: „„Pruefen““ oder ein Ersatzwort.
+ * @param {object} p Parameter (``step`` ergaenzt ``findingText`` aus ``node_id``)
+ * @param {string} [fallback] Ersatz, wenn der Befund keinen Schritt nennt
+ */
+function stepOf(p, fallback) { return p.step ? `„${p.step}“` : (fallback || "Dieser Schritt"); }
+
+/** „in=1, out>=2“ aus K2 als Satzteil. */
+function degreeText(expected) {
+  const m = /in(>=|=)(\d+), out(>=|=)(\d+)/.exec(expected || "");
+  if (!m) return expected || "?";
+  const q = (op, n, what) => `${op === ">=" ? "mindestens " : "genau "}${n} ${what}`;
+  return `${q(m[1], m[2], "eingehende")} und ${q(m[3], m[4], "ausgehende")}`;
+}
+
 function findingText(f, opts) {
   const entry = f && f.code && FINDING_TEXTS[f.code];
   if (entry) {
-    const t = entry(f.params || {});
+    // ``step`` ergaenzen, wo der Kern nur ``node_id`` mitgibt (VAL-07).
+    const params = Object.assign({}, f.params || {});
+    if (!params.step && f.node_id) params.step = nm(f.node_id);
+    const t = entry(params);
     return opts && opts.withHint && t.hint ? `${t.text} ${t.hint}` : t.text;
   }
   let msg = (f && f.message) || "";
@@ -660,6 +926,10 @@ function describeError(err) {
   // err.detail can be: string, {message}, {findings:[{rule,message,node_id,code,params}]}
   const d = err && err.detail;
   if (!d) return { title: err.message || "Fehler", lines: [] };
+  // 403 der Rollenpruefung kommt als nacktes „forbidden“ (VAL-07).
+  if (err.status === 403 && d === "forbidden") {
+    return { title: "Daf\u00FCr fehlt dir die Berechtigung.", lines: ["Wende dich an deine Administration, wenn du diese Aktion brauchst."] };
+  }
   if (typeof d === "string") return { title: d, lines: [] };
   if (d.findings) {
     // Titel ohne Fachjargon; die Regel steht als Kuerzel vor jeder Zeile.
@@ -3540,7 +3810,7 @@ function bindDataDialog(nodeId) {
   openModal(`Datenelement an „${nodeCaption(node)}" binden`,
     el("div", null,
       el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
-        "Was dieser Schritt liest, muss vorher jemand geschrieben haben – sonst weist der Kern die Bindung ab (D2)."),
+        "Was dieser Schritt liest, muss vorher jemand geschrieben haben – sonst weist der Kern die Bindung ab (D1)."),
       picker.node,
       el("div", { class: "form-grid", style: "margin-top:12px" },
         el("label", { class: "field" }, "Richtung", modeSel),
@@ -4806,16 +5076,73 @@ async function openSubprocessBinding(node, mode) {
     }, isConvert ? "Umwandeln" : "\u00DCbernehmen");
 }
 
+/**
+ * Wandelt eine Texteingabe in den Wert des Datentyps -- aber nur, wenn das
+ * **eindeutig** geht. Alles andere bleibt der rohe Text, und der Kern lehnt
+ * ihn mit einer D3-Meldung ab, die der Nutzer sieht.
+ *
+ * Frueher stand an zwei Stellen ``val === "true" || val === "1"``: „vielleicht"
+ * im Ja/Nein-Feld wurde still zu ``false`` gespeichert, und der Vorgang lief
+ * weiter (Validierung 2026-09, VAL-04). Ebenso machte ``parseInt`` aus „12,5"
+ * still 12 und aus „abc" ``NaN``. Hier wird deshalb nie geraten.
+ *
+ * @param {string} dtype Datentyp des Elements (INTEGER, FLOAT, BOOLEAN, ...)
+ * @param {string} raw nicht-leere Texteingabe
+ * @returns {string|number|boolean} typisierter Wert oder der unveraenderte Text
+ */
+function coerceTypedInput(dtype, raw) {
+  const text = String(raw).trim();
+  if (dtype === "INTEGER" || dtype === "FLOAT") {
+    const num = Number(text.replace(",", "."));
+    if (text === "" || !Number.isFinite(num)) return raw;
+    if (dtype === "INTEGER" && !Number.isInteger(num)) return raw;
+    return num;
+  }
+  if (dtype === "BOOLEAN") {
+    const lower = text.toLowerCase();
+    if (["true", "ja", "1"].includes(lower)) return true;
+    if (["false", "nein", "0"].includes(lower)) return false;
+    return raw;
+  }
+  return raw;
+}
+
+/**
+ * Widget fuer ein Datenelement **ohne** gestaltete Maske (Abschliessen ohne
+ * Maske, Dialog „Instanzdaten eingeben"): nach Datentyp, nie ein Freitextfeld
+ * fuer Zahl, Datum oder Ja/Nein. BOOLEAN bekommt eine Ja/Nein-Auswahl ohne
+ * Vorbelegung (``YESNO``) statt eines Ankreuzfelds -- ein Ankreuzfeld liefert
+ * immer einen Wert, ein uebersehenes Pflichtfeld waere dann still „Nein".
+ * @param {object|undefined} elem Datenelement
+ * @returns {string} Widget-Art fuer :func:`maskControl`
+ */
+function fallbackWidget(elem) {
+  const dtype = elem ? elem.data_type : "STRING";
+  if (dtype === "BOOLEAN") return "YESNO";
+  if (dtype === "INTEGER" || dtype === "FLOAT") return "NUMBER";
+  if (dtype === "DATE") return "DATE";
+  return "TEXT";
+}
+
 // Widget-Factory: erzeugt fuer ein Datenelement + Widget-Typ das passende
 // Eingabe-Control (control) samt Lesefunktion (read). Wird vom Eingabemasken-
-// Designer und von der Laufzeit-Maske gemeinsam genutzt.
+// Designer, von der Laufzeit-Maske und vom Dialog „Instanzdaten eingeben"
+// gemeinsam genutzt. ``read()`` liefert ``undefined`` fuer ein leeres Feld,
+// sonst den typisierten Wert (``coerceTypedInput``) -- oder, wenn die Eingabe
+// nicht eindeutig passt, den rohen Text, den der Kern mit D3 ablehnt.
+// Zahlenfelder tragen ``step="any"``: ohne das markiert der Browser 499,99 als
+// ungueltig, obwohl der Wert gespeichert wird (VAL-22).
 function maskControl(elem, widget, options, current) {
   const dtype = elem ? elem.data_type : "STRING";
-  const coerce = (raw) => {
-    if (dtype === "INTEGER") return parseInt(raw, 10);
-    if (dtype === "FLOAT") return parseFloat(raw);
-    return raw;
-  };
+  const coerce = (raw) => coerceTypedInput(dtype, raw);
+  if (widget === "YESNO") {
+    const input = el("select", null,
+      el("option", { value: "" }, "\u2013 bitte w\u00E4hlen \u2013"),
+      el("option", { value: "true" }, "Ja"),
+      el("option", { value: "false" }, "Nein"));
+    if (current === true || current === false) input.value = String(current);
+    return { control: input, read: () => (input.value === "" ? undefined : input.value === "true") };
+  }
   if (widget === "CHECKBOX") {
     const input = el("input", { type: "checkbox" });
     if (current === true || current === "true" || current === "1") input.checked = true;
@@ -4834,7 +5161,9 @@ function maskControl(elem, widget, options, current) {
     return { control: input, read: () => (input.value === "" ? undefined : input.value) };
   }
   const type = widget === "NUMBER" ? "number" : widget === "DATE" ? "date" : "text";
-  const input = el("input", { type, placeholder: elem ? elem.name : "" });
+  const attrs = { type, placeholder: elem ? elem.name : "" };
+  if (widget === "NUMBER") attrs.step = dtype === "INTEGER" ? "1" : "any";
+  const input = el("input", attrs);
   if (current != null) input.value = String(current);
   return { control: input, read: () => (input.value === "" ? undefined : coerce(input.value)) };
 }
@@ -6680,20 +7009,87 @@ async function reloadInstance(instId) {
   render();
 }
 
+/**
+ * Bearbeiterregel, die ein ad hoc eingefuegter Schritt als Vorschlag erbt: die
+ * des Ankers bzw. -- ist der Anker ein Gateway oder ohne Regel -- die des
+ * naechsten Schritts davor (Rueckweg ueber die erste eingehende Kante).
+ * Reine Vorbelegung; ob die Regel passt, prueft der Kern (Z1-Z3, B2).
+ * @param {object} schema wirksames Schema der Instanz
+ * @param {string} anchorId Knoten, hinter dem eingefuegt wird
+ * @returns {{rule: object, from: string}|null} Regel und Schrittname oder null
+ */
+function adhocSuggestedRule(schema, anchorId) {
+  const rules = schema.staff_rules || {};
+  const seen = new Set();
+  let current = anchorId;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (rules[current]) {
+      const n = (schema.nodes || {})[current];
+      return { rule: rules[current], from: n ? nodeCaption(n) : current };
+    }
+    const inc = controlEdges(schema).filter((e) => e.target === current);
+    current = inc.length ? inc[0].source : null;
+  }
+  return null;
+}
+
 // Ad-hoc: neuen seriellen Schritt hinter einem Anker einfuegen.
+//
+// Der Schritt braucht eine Bearbeiterregel (B2 im Ad-hoc-Pfad, VAL-03): ohne
+// sie stand er zur Laufzeit in keiner Arbeitsliste, und der Vorgang kam nur per
+// Aufsichtseingriff weiter. Vorbelegt ist die Regel des Schritts davor
+// (``adhocSuggestedRule``); daneben Rollen, Abteilungen und Personen des
+// Organisationsmodells. Die Entscheidung trifft der Kern.
 function openAdhocInsert(schema, inst, anchors) {
   const anchorSel = el("select", null,
     ...anchors.map((n) => el("option", { value: n.id }, nodeCaption(n))));
   const labelInput = el("input", { type: "text", placeholder: "Bezeichnung des neuen Schritts" });
+  const org = schema.org_model || { roles: {}, org_units: {}, agents: {} };
+  const choices = {};
+  const staffSel = el("select");
+  const fillStaff = () => {
+    staffSel.innerHTML = "";
+    Object.keys(choices).forEach((k) => delete choices[k]);
+    const add = (group, key, label, rule) => {
+      choices[key] = rule;
+      group.appendChild(el("option", { value: key }, label));
+    };
+    const suggestion = adhocSuggestedRule(schema, anchorSel.value);
+    staffSel.appendChild(el("option", { value: "" }, "\u2013 bitte w\u00E4hlen \u2013"));
+    if (suggestion) {
+      const g = el("optgroup", { label: "Vorschlag" });
+      add(g, "SUGGEST", `Wie \u201E${suggestion.from}\u201C: ${describeRule(suggestion.rule, schema)}`, suggestion.rule);
+      staffSel.appendChild(g);
+    }
+    [["Rollen", "ROLE", org.roles], ["Abteilungen", "ORG_UNIT", org.org_units], ["Personen", "AGENT", org.agents]]
+      .forEach(([title, kind, entries]) => {
+        const list = Object.values(entries || {});
+        if (!list.length) return;
+        const g = el("optgroup", { label: title });
+        list.forEach((x) => add(g, `${kind}:${x.id}`, x.name, { kind, ref: x.id }));
+        staffSel.appendChild(g);
+      });
+    staffSel.value = suggestion ? "SUGGEST" : "";
+  };
+  anchorSel.addEventListener("change", fillStaff);
+  fillStaff();
+  const reasonInput = el("input", { type: "text", placeholder: "optional, steht im Verlauf" });
   const body = el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Einf\u00FCgen hinter", anchorSel),
-    el("label", { class: "field" }, "Neuer Schritt", labelInput));
+    el("label", { class: "field" }, "Neuer Schritt", labelInput),
+    el("label", { class: "field" }, "Bearbeiter *", staffSel),
+    el("label", { class: "field" }, "Anlass", reasonInput));
   openModal("Schritt einf\u00FCgen (Ad-hoc)", body, async () => {
     const label = labelInput.value.trim();
     if (!label) { toast("info", "Bitte eine Bezeichnung angeben."); return false; }
+    const rule = choices[staffSel.value];
+    if (!rule) { toast("err", "Bitte festlegen, wer den neuen Schritt bearbeitet."); return false; }
+    const payload = { after_node_id: anchorSel.value, label, staff_rule: rule };
+    if (reasonInput.value.trim()) payload.reason = reasonInput.value.trim();
     try {
-      await api.post(`/instances/${inst.id}/adhoc/insert`, { after_node_id: anchorSel.value, label });
-      toast("ok", "Schritt eingef\u00FCgt");
+      await api.post(`/instances/${inst.id}/adhoc/insert`, payload);
+      toast("ok", "Schritt eingef\u00FCgt", [describeRule(rule, schema)]);
       await reloadInstance(inst.id);
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Einf\u00FCgen");
@@ -6836,6 +7232,15 @@ async function completeActivity(nodeId, node) {
 // Instanzdaten direkt eingeben/aendern – ohne eine Aktivitaet abzuschliessen.
 // Angeboten werden alle INSTANCE-Datenelemente des Schemas (EXTERNAL-Elemente
 // werden zur Laufzeit ueber Connectoren aufgeloest und daher nicht abgefragt).
+//
+// Wer was aendern darf, entscheidet allein der Kern (VAL-01): ein Bearbeiter
+// nur die Werte seines eigenen offenen Schritts (sonst 403 mit Erklaerung),
+// Modellierer/Admin alles Uebrige als Aufsichtseingriff mit Begruendung. Der
+// Client kennt die Regel nicht; er reagiert auf die 422 „Aufsichtseingriff…"
+// mit der Frage nach der Begruendung und sendet erneut. Die Felder kommen aus
+// derselben Widget-Factory wie die Aufgabenmaske (``maskControl`` +
+// ``fallbackWidget``) -- frueher wandelte der Dialog Ja/Nein-Freitext selbst
+// und still in ``false`` (VAL-04).
 function openInstanceDataForm(schema, inst) {
   const elems = Object.values(schema.data_elements || {}).filter((e) => e.source !== "EXTERNAL");
   if (!elems.length) { toast("info", "Keine Instanz-Datenelemente definiert."); return; }
@@ -6843,33 +7248,52 @@ function openInstanceDataForm(schema, inst) {
   const body = el("div", { class: "form-grid" });
   elems.forEach((elem) => {
     const cur = (inst.data_values || {})[elem.id];
-    const input = el("input", {
-      type: (elem.data_type === "INTEGER" || elem.data_type === "FLOAT") ? "number" : "text",
-      placeholder: elem.name,
-      value: cur === undefined || cur === null ? "" : String(cur),
-    });
-    inputs[elem.id] = { input, elem };
-    body.appendChild(el("label", { class: "field" }, `${elem.name} (${elem.data_type})`, input));
+    const { control, read } = maskControl(elem, fallbackWidget(elem), null, cur);
+    inputs[elem.id] = { read, cur };
+    body.appendChild(el("label", { class: "field" }, elem.name, control));
   });
-  openModal("Instanzdaten eingeben", body, async () => {
-    const values = {};
-    for (const [eid, { input, elem }] of Object.entries(inputs)) {
-      const raw = input.value;
-      if (raw === "") continue;
-      let val = raw;
-      if (elem.data_type === "INTEGER") val = parseInt(raw, 10);
-      else if (elem.data_type === "FLOAT") val = parseFloat(raw);
-      else if (elem.data_type === "BOOLEAN") val = raw === "true" || raw === "1";
-      values[eid] = val;
-    }
-    if (!Object.keys(values).length) { toast("info", "Keine Werte eingegeben."); return; }
+  const submit = async (values, reason) => {
     try {
-      await api.put(`/instances/${inst.id}/data`, { values });
+      const payload = { values };
+      if (reason) payload.reason = reason;
+      await api.put(`/instances/${inst.id}/data`, payload);
       toast("ok", "Instanzdaten gespeichert");
       await loadInstance(inst.id);
       render();
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) {
+      if (isSupervisionRequired(err)) { askDataCorrectionReason((text) => submit(values, text)); return false; }
+      const d = describeError(err); toast("err", d.title, d.lines); return false;
+    }
+  };
+  openModal("Instanzdaten eingeben", body, async () => {
+    const values = {};
+    for (const [eid, { read, cur }] of Object.entries(inputs)) {
+      const val = read();
+      if (val === undefined || val === cur) continue;
+      values[eid] = val;
+    }
+    if (!Object.keys(values).length) { toast("info", "Keine ge\u00E4nderten Werte."); return; }
+    return submit(values, null);
   }, "Speichern");
+}
+
+/**
+ * Fragt die Begruendung einer Datenkorrektur ab (Aufsichtseingriff, VAL-01):
+ * Die Werte gehoeren zu keinem Schritt, den der Login gerade bearbeitet. Die
+ * Begruendung steht danach im Audit-Verlauf neben altem und neuem Wert.
+ * @param {(reason: string) => Promise<unknown>} onConfirm sendet erneut mit Begruendung
+ */
+function askDataCorrectionReason(onConfirm) {
+  const reason = el("textarea", { rows: "3", placeholder: "z. B. Tippfehler im Antrag, R\u00FCcksprache mit der Antragstellerin" });
+  const body = el("div", { class: "form-grid" },
+    el("div", { class: "card-hint" },
+      "Diese Werte geh\u00F6ren zu keinem Schritt, den du gerade bearbeitest. Die \u00C4nderung wird als Aufsichtseingriff mit altem und neuem Wert und deiner Begr\u00FCndung im Audit-Verlauf festgehalten."),
+    el("label", { class: "field" }, "Begr\u00FCndung *", reason));
+  openModal("Daten korrigieren", body, async () => {
+    const text = reason.value.trim();
+    if (!text) { toast("err", "Bitte eine Begr\u00FCndung angeben"); return false; }
+    return onConfirm(text);
+  }, "Korrektur speichern");
 }
 
 // Schliesst einen Schritt ueber seine Eingabemaske ab.
@@ -6986,8 +7410,7 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
     const writes = (schema.data_accesses || []).filter((a) => a.node_id === nodeId && (a.mode === "WRITE" || a.mode === "READ_WRITE"));
     writes.forEach((a) => {
       const elem = schema.data_elements[a.element_id];
-      const widget = elem && (elem.data_type === "INTEGER" || elem.data_type === "FLOAT") ? "NUMBER" : "TEXT";
-      const { control, read } = maskControl(elem, widget, null, values[a.element_id]);
+      const { control, read } = maskControl(elem, fallbackWidget(elem), null, values[a.element_id]);
       inputs[a.element_id] = { read, elem, label: elem ? elem.name : a.element_id, required: true };
       body.appendChild(el("label", { class: "field" }, (elem ? elem.name : a.element_id) + ` (${elem ? elem.data_type : "?"})`, control));
     });
@@ -7001,12 +7424,14 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
     // Pflicht bereits (FormField.required), also halten wir sie auch ein.
     const missing = [];
     for (const [eid, { read, elem, label: fieldLabel, required }] of Object.entries(inputs)) {
-      let val = read();
-      if (val === undefined || (typeof val === "number" && Number.isNaN(val))) {
+      const val = read();
+      if (val === undefined) {
         if (required) missing.push(fieldLabel);
         continue;
       }
-      if (typeof val === "string" && elem && elem.data_type === "BOOLEAN") val = val === "true" || val === "1";
+      // Kein Umwandeln hier: ``read()`` hat schon typisiert, was eindeutig ist
+      // (``coerceTypedInput``); der Rest geht roh an den Kern und kommt als
+      // D3-Meldung zurueck (VAL-04).
       data[eid] = val;
     }
     if (missing.length) {
@@ -7124,12 +7549,22 @@ async function conformancePanel(instances, pmap) {
   return panel;
 }
 
-/** Filterstufen der Instanzliste im Monitoring (Wert = InstanceState bzw. "all"). */
+/**
+ * Filterstufen der Instanzliste im Monitoring (Wert = InstanceState, "all"
+ * oder "UNSTAFFED" = laufend, aber ein offener Schritt hat niemanden, VAL-09).
+ */
 const INSTANCE_FILTERS = [
   { key: "all", label: "Alle" },
   { key: "RUNNING", label: "Laufend" },
   { key: "COMPLETED", label: "Abgeschlossen" },
+  { key: "UNSTAFFED", label: "Niemand zust\u00E4ndig" },
 ];
+
+/** Grund aus ``GET /monitoring/unstaffed`` als Satzteil. */
+const UNSTAFFED_REASONS = {
+  no_rule: "keine Bearbeiterzuordnung",
+  nobody: "Regel findet aktuell niemanden",
+};
 
 async function viewMonitor() {
   const content = byId("content");
@@ -7148,6 +7583,13 @@ async function viewMonitor() {
   let pmap = null;
   try { report = await api.get("/monitoring/kpis"); } catch (e) { /* ignore */ }
   try { pmap = await api.get("/monitoring/process-map"); } catch (e) { /* ignore */ }
+
+  // VAL-09: offene Schritte, die niemand bearbeiten darf -- der Vorgang steht
+  // still, zeigte aber „ueberfaellig 0, eskaliert 0“. Die Rechnung liegt im Kern
+  // (GET /monitoring/unstaffed); hier nur Kachel, Liste und Filter.
+  let unstaffed = [];
+  try { unstaffed = await api.get("/monitoring/unstaffed"); } catch (e) { /* best-effort */ }
+  const unstaffedIds = new Set(unstaffed.map((u) => u.instance_id));
 
   // Z4 (Priorisierungs-Konzept \u00A77): \u00DCberf\u00E4llig-Zusammenfassung \u00FCber alle
   // laufenden Vorg\u00E4nge \u2013 best-effort aus den vorhandenen Task-Endpunkten.
@@ -7170,6 +7612,7 @@ async function viewMonitor() {
     kpi("Abgeschlossen", done),
     kpi("\u00DCberf\u00E4llige Aufgaben", overdueTasks),
     kpi("Eskalierte Aufgaben", escalatedTasks.length),
+    kpi("Niemand zust\u00E4ndig", unstaffedIds.size),
     kpi("\u00D8 Durchlaufzeit", report ? fmtDuration(report.avg_cycle_seconds) : "\u2013"));
   content.appendChild(kpis);
 
@@ -7193,14 +7636,32 @@ async function viewMonitor() {
           el("tbody", null, ...escRows)))));
   }
 
+  // „Niemand zustaendig“ (VAL-09): nur sichtbar, wenn es etwas zu zeigen gibt.
+  if (unstaffed.length) {
+    const rowsU = unstaffed.map((u) => el("tr",
+      { class: "clickable", onClick: () => openInstanceFromMonitor(u.instance_id) },
+      el("td", null, u.instance_id),
+      el("td", null, schemaLabel(u.schema_id, u.schema_version)),
+      el("td", null, u.label || u.node_id),
+      el("td", null, UNSTAFFED_REASONS[u.reason] || u.reason)));
+    content.appendChild(el("div", { class: "panel" },
+      el("div", { class: "panel-h" }, el("h2", null, "Niemand zust\u00E4ndig"),
+        el("span", { class: "sub" }, "Diese Vorg\u00E4nge stehen still, bis jemand zugeordnet wird oder per Aufsicht abschlie\u00DFt")),
+      el("div", { class: "panel-b" },
+        el("table", null,
+          el("thead", null, el("tr", null, ...["Instanz", "Schema", "Schritt", "Grund"].map((h) => el("th", null, h)))),
+          el("tbody", null, ...rowsU)))));
+  }
+
   // Filter der Instanzliste: die Liste hiess
   // „Aktive Instanzen“, zeigte aber auch abgeschlossene. Rein clientseitig,
   // transient (state.monitorFilter), Standard "alle".
   const filter = INSTANCE_FILTERS.some((f) => f.key === state.monitorFilter) ? state.monitorFilter : "all";
-  const shown = filter === "all" ? instances : instances.filter((i) => i.state === filter);
+  const matches = (i, key) => key === "all" || (key === "UNSTAFFED" ? unstaffedIds.has(i.id) : i.state === key);
+  const shown = instances.filter((i) => matches(i, filter));
   const filterBar = el("div", { class: "seg-filter", role: "group", "aria-label": "Instanzen filtern" },
     ...INSTANCE_FILTERS.map((f) => {
-      const n = f.key === "all" ? instances.length : instances.filter((i) => i.state === f.key).length;
+      const n = instances.filter((i) => matches(i, f.key)).length;
       return el("button", {
         class: "seg-btn" + (f.key === filter ? " active" : ""),
         "aria-pressed": f.key === filter ? "true" : "false",
@@ -7611,6 +8072,7 @@ const EVENT_LABELS = {
   ADHOC_DELETED: "Ad-hoc gel\u00F6scht",
   ADHOC_RENAMED: "Ad-hoc umbenannt",
   INSTANCE_MIGRATED: "Instanz migriert",
+  INSTANCE_DATA_SET: "Daten ge\u00E4ndert",
   INSTANCE_COMPLETED: "Instanz abgeschlossen",
 };
 
@@ -7638,8 +8100,22 @@ function auditActorLabel(ev) {
  * @returns {string}
  */
 function auditDetailText(ev) {
-  const base = ev.label || ev.node_id || "\u2013";
-  const reason = ev.detail && ev.detail.reason;
+  let base = ev.label || ev.node_id || "\u2013";
+  const detail = ev.detail || {};
+  // Datenaenderung (VAL-01): Element mit altem und neuem Wert. Beide reisen als
+  // JSON im Detail; ``null`` heisst „war noch nicht gesetzt".
+  if (ev.event_type === "INSTANCE_DATA_SET" && "new" in detail) {
+    const show = (raw) => {
+      let v;
+      try { v = JSON.parse(raw); } catch (e) { v = raw; }
+      if (v === null || v === undefined) return "leer";
+      if (v === true) return "Ja";
+      if (v === false) return "Nein";
+      return String(v);
+    };
+    base = `${base}: ${show(detail.old)} \u2192 ${show(detail.new)}`;
+  }
+  const reason = detail.reason;
   return reason ? `${base} \u2013 Begr\u00FCndung: ${reason}` : base;
 }
 
@@ -9841,9 +10317,13 @@ function showLoginOverlay() {
         await boot();
       }
     } catch (err) {
+      // 429: zu viele Fehlversuche (Drosselung im Kern, VAL-06) -- der Kern
+      // nennt die Wartezeit, der Text wird unveraendert gezeigt.
       errBox.textContent = err && err.status === 401
         ? "Login oder Passwort ist falsch."
-        : "Anmeldung fehlgeschlagen.";
+        : err && err.status === 429 && typeof err.detail === "string"
+          ? err.detail
+          : "Anmeldung fehlgeschlagen.";
     }
   };
   const form = el("form", { onSubmit: submit },

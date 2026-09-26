@@ -98,6 +98,15 @@ curl -X PUT https://host/v1/instances/instance_42/data \
 
 * Nur **freigegebene** Schemata sind über `/v1` startbar (Entwürfe → `409`).
 * `PUT …/data` prüft jeden Wert gegen den Datentyp des Elements (`422` bei Typfehler).
+* Jede Änderung über `PUT …/data` steht im Audit-Verlauf (Ereignis
+  `INSTANCE_DATA_SET` mit altem und neuem Wert und dem Token als Absender);
+  Kennzahlen und Process Mining bleiben davon unberührt. Ein **abgeschlossener**
+  Vorgang nimmt keine Daten mehr an (`409`).
+* Service-Tokens behalten diesen Weg unverändert. **Persönliche Logins**
+  (Passwort, persönliches Firmenkonto) setzen über den Endpunkt nur die Werte
+  ihres eigenen offenen Schritts (`403` sonst); Modellierer und Administratoren
+  dürfen darüber hinaus korrigieren, dann aber nur mit Begründung im Feld
+  `reason` (`422`, wenn sie fehlt).
 * Der **`Idempotency-Key`** macht einen wiederholten Start einmal-wirksam (gleiche Antwort).
 
 ### 2.2 Aufgabe abschließen / Entscheidung treffen
@@ -350,7 +359,11 @@ curl -X POST https://host/v1/connectors/erp/sample-read \
 ```
 
 `entities` und `columns` lesen ausschließlich den **Katalog** des Systems (keine Zeile) und
-speisen die Auswahllisten der Oberfläche. Ein Treiber ohne Katalog-Auskunft liefert eine leere
+speisen die Auswahllisten der Oberfläche. `sample-read` liest nur Tabellen, die der Katalog
+anbietet (oder schemaqualifizierte Namen außerhalb der Systemschemata), nie Systemtabellen.
+Ein unzulässiger Tabellenname ergibt `422`, ein Fehler des angebundenen Systems `502`. Als
+Modellierhilfe steht es Modellierern, Administratoren und Service-Tokens mit `data:read`
+offen, nicht der Bearbeiter-Rolle. Ein Treiber ohne Katalog-Auskunft liefert eine leere
 Liste — die Eingabe von Hand bleibt immer möglich.
 
 Konfiguration über `PROCWORKS_CONNECTIONS` (Dateipfad oder Inline-JSON-Array). Secrets stehen
@@ -383,7 +396,7 @@ geprüft (kein Injection-Risiko).
 | `POST /v1/incidents/{id}/resolve` | `tasks:complete` (operator/admin) | Inzident lösen + Aufgabe neu einreihen |
 | `GET /v1/connectors` | `data:read` | Connector-Metadaten |
 | `POST /v1/connectors/{id}/test` | `data:read` | Verbindungstest |
-| `POST /v1/connectors/{id}/sample-read` | `data:read` | Beispieldatensätze |
+| `POST /v1/connectors/{id}/sample-read` | `data:read` (modeler/admin) | Beispieldatensätze aus einer angebotenen Tabelle |
 | `GET /v1/connectors/{id}/entities` | `data:read` | Lesbare Tabellen/Sichten (Katalog, keine Zeilen) |
 | `GET /v1/connectors/{id}/columns?entity=…` | `data:read` | Spalten einer Tabelle mit Datentyp |
 | `GET · POST /v1/webhooks` | `events:subscribe` | Abonnements auflisten/anlegen |

@@ -25,11 +25,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import math
 import os
 import re
 import secrets
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
@@ -437,3 +438,104 @@ class PasswordAuthBackend:
             )
         )
         return initial
+
+
+# -- brute-force throttling (Validierung 2026-09-25, VAL-06) ------------------
+
+
+class _Strikes(BaseModel):
+    """Failure record of one throttle key (a login name or a client address)."""
+
+    count: int = 0
+    last_failure: datetime | None = None
+    locked_until: datetime | None = None
+
+
+class LoginThrottle:
+    """Slow down password guessing per login **and** per client address.
+
+    Before this, 26 wrong passwords against the admin account in a row were all
+    answered at once with 401 (VAL-06). The policy:
+
+    * ``free_attempts`` consecutive failures per key cost nothing (typos);
+    * every further failure locks the key for ``base_lock`` doubled per extra
+      failure, capped at ``max_lock`` (30 s, 60 s, 120 s ... 15 min);
+    * a key's record is forgotten after ``forget_after`` without a failure;
+    * login keys are case-folded, so ``Admin``/``admin`` share one counter;
+    * a successful login clears the **login** key only -- an attacker who owns
+      one account must not be able to reset the address counter with it.
+
+    The address key has a higher allowance (``free_attempts_per_address``),
+    because an office behind one NAT address shares it.
+
+    In-memory and per process, like the sessions (a restart forgets the
+    strikes -- acceptable for a speed bump, and it never locks anybody out
+    permanently). ``now`` is injectable for tests.
+    """
+
+    def __init__(
+        self,
+        *,
+        free_attempts: int = 5,
+        free_attempts_per_address: int = 20,
+        base_lock: timedelta = timedelta(seconds=30),
+        max_lock: timedelta = timedelta(minutes=15),
+        forget_after: timedelta = timedelta(minutes=15),
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._free = free_attempts
+        self._free_address = free_attempts_per_address
+        self._base = base_lock
+        self._max = max_lock
+        self._forget = forget_after
+        self._now = now or (lambda: datetime.now(UTC))
+        self._strikes: dict[str, _Strikes] = {}
+
+    @staticmethod
+    def _keys(login: str, address: str | None) -> list[tuple[str, bool]]:
+        keys = [("login:" + login.strip().casefold(), False)]
+        if address:
+            keys.append(("addr:" + address, True))
+        return keys
+
+    def _current(self, key: str) -> _Strikes | None:
+        record = self._strikes.get(key)
+        if record is None:
+            return None
+        if record.last_failure is not None and self._now() - record.last_failure > self._forget:
+            if record.locked_until is None or record.locked_until <= self._now():
+                del self._strikes[key]
+                return None
+        return record
+
+    def retry_after(self, login: str, address: str | None) -> int:
+        """Seconds until the next attempt is allowed (0 = allowed now)."""
+
+        now = self._now()
+        wait = 0.0
+        for key, _ in self._keys(login, address):
+            record = self._current(key)
+            if record is not None and record.locked_until is not None:
+                wait = max(wait, (record.locked_until - now).total_seconds())
+        return math.ceil(wait) if wait > 0 else 0
+
+    def failure(self, login: str, address: str | None) -> None:
+        """Record one failed attempt against both keys."""
+
+        now = self._now()
+        for key, is_address in self._keys(login, address):
+            record = self._current(key) or _Strikes()
+            record.count += 1
+            record.last_failure = now
+            free = self._free_address if is_address else self._free
+            if record.count > free:
+                extra = record.count - free - 1
+                lock = min(self._base * (2 ** min(extra, 20)), self._max)
+                record.locked_until = now + lock
+                _logger.warning("login throttled: %s locked for %s", key, lock)
+            self._strikes[key] = record
+
+    def success(self, login: str) -> None:
+        """Clear the login key after a successful login (not the address)."""
+
+        self._strikes.pop("login:" + login.strip().casefold(), None)

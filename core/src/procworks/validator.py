@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Sequence
+from typing import Protocol
 
 from pydantic import BaseModel, Field
 
@@ -73,11 +74,16 @@ class ValidationFinding(BaseModel):
     logs, tests and API consumers. ``code`` and ``params`` are an **additive**,
     language-neutral description of the same finding for user-facing clients:
     ``code`` names the case (``"D1.read-before-write"``), ``params`` carries the
-    human-readable parts (step and element *names*, never ids) the client's
-    message catalog fills into its own wording. Language is a boundary concern
-    -- the core stays language-neutral and every existing consumer keeps
-    working. Not every finding has a code yet; clients fall back to
-    ``message``.
+    variable parts the client's message catalog fills into its own wording --
+    step and element *names* where the check has them at hand, otherwise the
+    ids the ``message`` names (the client resolves those against the model it
+    shows). Language is a boundary concern -- the core stays language-neutral
+    and every existing consumer keeps working.
+
+    **Every finding carries a code** since the Validierung 2026-09-25 (VAL-07);
+    ``tests/test_every_finding_has_a_code.py`` guards it, the ``fail`` helpers of the rule
+    checks take ``code`` as a required keyword (:class:`_Fail`). ``message``
+    stays unchanged -- never edit it to improve a display text.
     """
 
     rule: str
@@ -298,7 +304,20 @@ def _check_k2_endpoints_and_degrees(schema: ProcessSchema) -> list[ValidationFin
 
 
 def _deg(node_id: str, msg: str, ind: int, outd: int) -> ValidationFinding:
-    return ValidationFinding(rule="K2", node_id=node_id, message=f"{msg} (in={ind}, out={outd})")
+    """K2 degree finding; ``msg`` reads ``"<KIND> must have <expected>"``.
+
+    The params split it into the node kind and the expected degrees, so the
+    client can word it ("ACTIVITY must have in=1, out=1" was shown raw, VAL-07).
+    """
+
+    kind, _, expected = msg.partition(" must have ")
+    return ValidationFinding(
+        rule="K2",
+        node_id=node_id,
+        message=f"{msg} (in={ind}, out={outd})",
+        code="K2.degree",
+        params={"node_type": kind, "expected": expected, "in": str(ind), "out": str(outd)},
+    )
 
 
 # --- K1: balanced, matching gateways -------------------------------------
@@ -438,8 +457,18 @@ def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
 
     findings: list[ValidationFinding] = []
 
-    def fail(message: str, node_id: str | None = None) -> None:
-        findings.append(ValidationFinding(rule="K6", node_id=node_id, message=message))
+    def fail(
+        message: str,
+        node_id: str | None = None,
+        *,
+        code: str,
+        params: dict[str, str] | None = None,
+    ) -> None:
+        findings.append(
+            ValidationFinding(
+                rule="K6", node_id=node_id, message=message, code=code, params=params or {}
+            )
+        )
 
     starts = [n.id for n in schema.nodes.values() if n.type is NodeType.LOOP_START]
     ends = {n.id for n in schema.nodes.values() if n.type is NodeType.LOOP_END}
@@ -449,10 +478,18 @@ def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
     for node_id in schema.loop_decisions:
         node = schema.nodes.get(node_id)
         if node is None or node.type is not NodeType.LOOP_END:
-            fail("loop decision references a node that is not a LOOP_END", node_id)
+            fail(
+                "loop decision references a node that is not a LOOP_END",
+                node_id,
+                code="K6.decision-not-loop-end",
+            )
 
     if len(starts) != len(ends):
-        fail(f"unbalanced loops: {len(starts)} x LOOP_START vs {len(ends)} x LOOP_END")
+        fail(
+            f"unbalanced loops: {len(starts)} x LOOP_START vs {len(ends)} x LOOP_END",
+            code="K6.unbalanced",
+            params={"starts": str(len(starts)), "ends": str(len(ends))},
+        )
 
     claimed: dict[str, str] = {}
     blocks: list[tuple[str, str, set[str]]] = []
@@ -460,13 +497,23 @@ def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
         try:
             end_id, body = loop_block(schema, start_id)
         except ValueError:
-            fail("LOOP_START has no matching LOOP_END", start_id)
+            fail(
+                "LOOP_START has no matching LOOP_END",
+                start_id,
+                code="K6.start-unpaired",
+            )
             continue
         if end_id in claimed:
             fail(
                 f"LOOP_END '{end_id}' is claimed by two loop starts "
                 f"('{claimed[end_id]}' and '{start_id}')",
                 end_id,
+                code="K6.end-claimed-twice",
+                params={
+                    "node": str(end_id),
+                    "other": str(claimed[end_id]),
+                    "other_start": str(start_id),
+                },
             )
             continue
         claimed[end_id] = start_id
@@ -474,7 +521,11 @@ def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
         findings += _check_single_loop(schema, start_id, end_id, body)
 
     for end_id in ends - set(claimed):
-        fail("LOOP_END has no matching LOOP_START", end_id)
+        fail(
+            "LOOP_END has no matching LOOP_START",
+            end_id,
+            code="K6.end-unpaired",
+        )
 
     if not findings and not _check_k1_gateways(schema):
         findings += _check_loop_branch_nesting(schema, blocks)
@@ -554,28 +605,50 @@ def _check_single_loop(
 
     findings: list[ValidationFinding] = []
 
-    def fail(message: str, node_id: str | None = None) -> None:
-        findings.append(ValidationFinding(rule="K6", node_id=node_id, message=message))
+    def fail(
+        message: str,
+        node_id: str | None = None,
+        *,
+        code: str,
+        params: dict[str, str] | None = None,
+    ) -> None:
+        findings.append(
+            ValidationFinding(
+                rule="K6", node_id=node_id, message=message, code=code, params=params or {}
+            )
+        )
 
     if not body:
-        fail("loop body is empty (K6d)", start_id)
+        fail(
+            "loop body is empty (K6d)",
+            start_id,
+            code="K6.empty-body",
+        )
         return findings
 
     decision = schema.loop_decisions.get(end_id)
     if decision is None:
-        fail("LOOP_END has no loop decision (K6b)", end_id)
+        fail(
+            "LOOP_END has no loop decision (K6b)",
+            end_id,
+            code="K6.no-decision",
+        )
         return findings
     element = schema.data_elements.get(decision.discriminator)
     if element is None:
         fail(
             f"loop discriminator '{decision.discriminator}' does not exist (K6b)",
             end_id,
+            code="K6.discriminator-missing",
+            params={"element": str(decision.discriminator)},
         )
         return findings
     if element.source is not DataSourceKind.INSTANCE:
         fail(
             f"loop discriminator '{element.name}' must be an INSTANCE element (K6b)",
             end_id,
+            code="K6.discriminator-not-instance",
+            params={"element": str(element.name)},
         )
     if not decision.cells:
         # Boolean shorthand (stage S1): repeat while value == repeat_value.
@@ -584,9 +657,15 @@ def _check_single_loop(
                 f"loop discriminator '{element.name}' must be BOOLEAN "
                 f"(is {element.data_type.value}; K6b)",
                 end_id,
+                code="K6.discriminator-not-boolean",
+                params={"element": str(element.name), "type": str(element.data_type.value)},
             )
         if decision.kind is not XorDecisionKind.BOOLEAN:
-            fail("a loop decision without cells must be of kind BOOLEAN (K6b)", end_id)
+            fail(
+                "a loop decision without cells must be of kind BOOLEAN (K6b)",
+                end_id,
+                code="K6.cells-need-boolean",
+            )
     else:
         # Partitioned decision (stage S3): the cells must tile the domain like
         # a K7 partition and classify it into at least one repeat and one exit
@@ -598,18 +677,30 @@ def _check_single_loop(
                 f"data type {element.data_type.value} cannot be used as a "
                 "loop discriminator (K6b)",
                 end_id,
+                code="K6.discriminator-type",
+                params={"type": str(element.data_type.value)},
             )
         elif expected_kind is not decision.kind:
             fail(
                 f"loop decision kind {decision.kind.value} does not match "
                 f"discriminator type {element.data_type.value} (K6b)",
                 end_id,
+                code="K6.kind-mismatch",
+                params={"kind": str(decision.kind.value), "type": str(element.data_type.value)},
             )
         _check_partition(end_id, decision.kind, decision.cells, fail, noun="loop")
         if all(cell.repeat for cell in decision.cells):
-            fail("a loop partition needs at least one exit cell (K6b)", end_id)
+            fail(
+                "a loop partition needs at least one exit cell (K6b)",
+                end_id,
+                code="K6.no-exit-cell",
+            )
         if all(not cell.repeat for cell in decision.cells):
-            fail("a loop partition needs at least one repeat cell (K6b)", end_id)
+            fail(
+                "a loop partition needs at least one repeat cell (K6b)",
+                end_id,
+                code="K6.no-repeat-cell",
+            )
 
     if decision.max_iterations is not None and decision.max_iterations < 2:
         # A bound of 1 (or less) would forbid every repetition -- the loop
@@ -618,6 +709,8 @@ def _check_single_loop(
             f"max_iterations must allow at least one repetition (>= 2), "
             f"got {decision.max_iterations} (K6b)",
             end_id,
+            code="K6.max-iterations",
+            params={"value": str(decision.max_iterations)},
         )
 
     if decision.discriminator not in _written_through_body(schema, start_id, end_id, body):
@@ -625,6 +718,8 @@ def _check_single_loop(
             f"loop discriminator '{element.name}' is not written on every path "
             f"through the loop body (K6c)",
             end_id,
+            code="K6.discriminator-not-written",
+            params={"element": str(element.name)},
         )
     return findings
 
@@ -691,8 +786,18 @@ def _check_k4_sync_edges(schema: ProcessSchema) -> list[ValidationFinding]:
 
     findings: list[ValidationFinding] = []
 
-    def fail(message: str, node_id: str | None = None) -> None:
-        findings.append(ValidationFinding(rule="K4", node_id=node_id, message=message))
+    def fail(
+        message: str,
+        node_id: str | None = None,
+        *,
+        code: str,
+        params: dict[str, str] | None = None,
+    ) -> None:
+        findings.append(
+            ValidationFinding(
+                rule="K4", node_id=node_id, message=message, code=code, params=params or {}
+            )
+        )
 
     syncs = [e for e in schema.edges if e.type is EdgeType.SYNC]
     if not syncs:
@@ -702,20 +807,32 @@ def _check_k4_sync_edges(schema: ProcessSchema) -> list[ValidationFinding]:
         source = schema.nodes.get(edge.source)
         target = schema.nodes.get(edge.target)
         if source is None or target is None:
-            fail("sync edge references an unknown node", edge.source)
+            fail(
+                "sync edge references an unknown node",
+                edge.source,
+                code="K4.unknown-node",
+            )
             continue
         if source.type is not NodeType.ACTIVITY or target.type is not NodeType.ACTIVITY:
-            fail("a sync edge connects only ACTIVITY nodes (K4)", edge.source)
+            fail(
+                "a sync edge connects only ACTIVITY nodes (K4)",
+                edge.source,
+                code="K4.not-activity",
+            )
             continue
         if not _in_different_and_branches(schema, edge.source, edge.target):
             fail(
                 "sync edge must connect activities of different branches of "
                 "the same AND block (K4)",
                 edge.source,
+                code="K4.not-parallel",
             )
 
     if _cycle_with_sync(schema):
-        fail("sync edges must not create a cycle with the control flow (K4)")
+        fail(
+            "sync edges must not create a cycle with the control flow (K4)",
+            code="K4.cycle",
+        )
     return findings
 
 
@@ -802,35 +919,65 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
 
     findings: list[ValidationFinding] = []
 
-    def fail(message: str, node_id: str | None = None) -> None:
-        findings.append(ValidationFinding(rule="K7", node_id=node_id, message=message))
+    def fail(
+        message: str,
+        node_id: str | None = None,
+        *,
+        code: str,
+        params: dict[str, str] | None = None,
+    ) -> None:
+        findings.append(
+            ValidationFinding(
+                rule="K7", node_id=node_id, message=message, code=code, params=params or {}
+            )
+        )
 
     splits = {n.id for n in schema.nodes.values() if n.type is NodeType.XOR_SPLIT}
 
     # Stale decisions for nodes that are not (or no longer) XOR splits.
     for node_id in schema.xor_decisions:
         if node_id not in splits:
-            fail("branch decision references a node that is not an XOR split", node_id)
+            fail(
+                "branch decision references a node that is not an XOR split",
+                node_id,
+                code="K7.decision-not-split",
+            )
 
     # A branch predicate may only ever sit on an edge leaving an XOR split.
     for edge in schema.edges:
         if edge.condition is not None and edge.source not in splits:
-            fail("only edges leaving an XOR split may carry a branch condition", edge.source)
+            fail(
+                "only edges leaving an XOR split may carry a branch condition",
+                edge.source,
+                code="K7.condition-not-on-split",
+            )
 
     written_before = _must_written_before(schema)
 
     for split_id in splits:
         decision = schema.xor_decisions.get(split_id)
         if decision is None:
-            fail("XOR split has no branch decision", split_id)
+            fail(
+                "XOR split has no branch decision",
+                split_id,
+                code="K7.no-decision",
+            )
             continue
 
         out_targets = sorted(e.target for e in schema.outgoing(split_id))
         branch_targets = sorted(b.target for b in decision.branches)
         if branch_targets != out_targets:
-            fail("branch targets do not match the split's outgoing edges", split_id)
+            fail(
+                "branch targets do not match the split's outgoing edges",
+                split_id,
+                code="K7.targets-mismatch",
+            )
         if len(decision.branches) < 2:
-            fail("an XOR split needs at least two branches", split_id)
+            fail(
+                "an XOR split needs at least two branches",
+                split_id,
+                code="K7.too-few-branches",
+            )
 
         # An *empty* branch is a direct split -> join edge (its body was deleted
         # but its partition cell is kept). At most one is allowed: the runtime
@@ -846,31 +993,48 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
             and target.type is NodeType.XOR_JOIN
         ]
         if len(empty_branches) > 1:
-            fail("an XOR split may carry at most one empty branch", split_id)
+            fail(
+                "an XOR split may carry at most one empty branch",
+                split_id,
+                code="K7.two-empty-branches",
+            )
 
         element = schema.data_elements.get(decision.discriminator)
         if element is None:
-            fail("discriminator data element does not exist", split_id)
+            fail(
+                "discriminator data element does not exist",
+                split_id,
+                code="K7.discriminator-missing",
+            )
             continue
         if element.source is not DataSourceKind.INSTANCE:
-            fail("discriminator must be an instance data element", split_id)
+            fail(
+                "discriminator must be an instance data element",
+                split_id,
+                code="K7.discriminator-not-instance",
+            )
         expected_kind = discriminator_kind(element.data_type)
         if expected_kind is None:
             fail(
                 f"data type {element.data_type.value} cannot be used as an XOR discriminator",
                 split_id,
+                code="K7.discriminator-type",
+                params={"type": str(element.data_type.value)},
             )
         elif expected_kind is not decision.kind:
             fail(
                 f"decision kind {decision.kind.value} does not match "
                 f"discriminator type {element.data_type.value}",
                 split_id,
+                code="K7.kind-mismatch",
+                params={"kind": str(decision.kind.value), "type": str(element.data_type.value)},
             )
         if decision.discriminator not in written_before.get(split_id, set()):
             fail(
                 "discriminator may be unset when the split is reached "
                 "(no guaranteed prior write)",
                 split_id,
+                code="K7.discriminator-unset",
             )
 
         _check_partition(split_id, decision.kind, decision.branches, fail)
@@ -878,11 +1042,28 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
     return findings
 
 
+class _Fail(Protocol):
+    """The ``fail`` callback of a rule check: every finding carries a ``code``.
+
+    ``code`` is keyword-only and required, so mypy rejects a finding without
+    one -- the client words every finding from its catalogue (VAL-07).
+    """
+
+    def __call__(
+        self,
+        message: str,
+        node_id: str | None = None,
+        *,
+        code: str,
+        params: dict[str, str] | None = None,
+    ) -> None: ...
+
+
 def _check_partition(
     node_id: str,
     kind: XorDecisionKind,
     cells: Sequence[PartitionCell],
-    fail: Callable[[str, str | None], None],
+    fail: _Fail,
     *,
     noun: str = "split",
 ) -> None:
@@ -899,34 +1080,73 @@ def _check_partition(
         for i, cell in enumerate(cells):
             if i == last:
                 if cell.upper is not None:
-                    fail("the last threshold branch must be unbounded (+inf)", node_id)
+                    fail(
+                        "the last threshold branch must be unbounded (+inf)",
+                        node_id,
+                        code="K7.threshold-last-unbounded",
+                    )
             elif cell.upper is None:
-                fail("only the last threshold branch may be unbounded", node_id)
+                fail(
+                    "only the last threshold branch may be unbounded",
+                    node_id,
+                    code="K7.threshold-only-last-unbounded",
+                )
             else:
                 if prev is not None and cell.upper <= prev:
-                    fail("threshold bounds must be strictly ascending", node_id)
+                    fail(
+                        "threshold bounds must be strictly ascending",
+                        node_id,
+                        code="K7.threshold-ascending",
+                    )
                 prev = cell.upper
     elif kind is XorDecisionKind.BOOLEAN:
         if len(cells) != 2:
-            fail(f"a boolean {noun} must have exactly two branches", node_id)
+            fail(
+                f"a boolean {noun} must have exactly two branches",
+                node_id,
+                code="K7.boolean-two-branches",
+                params={"noun": str(noun)},
+            )
         truths = {c.bool_value for c in cells}
         if truths != {True, False}:
-            fail("boolean branches must cover both true and false exactly once", node_id)
+            fail(
+                "boolean branches must cover both true and false exactly once",
+                node_id,
+                code="K7.boolean-cover",
+            )
     else:  # ENUM
         else_count = sum(1 for c in cells if c.is_else)
         if else_count != 1:
-            fail(f"an enum {noun} must have exactly one catch-all (otherwise) branch", node_id)
+            fail(
+                f"an enum {noun} must have exactly one catch-all (otherwise) branch",
+                node_id,
+                code="K7.enum-one-otherwise",
+                params={"noun": str(noun)},
+            )
         seen: set[str] = set()
         for cell in cells:
             if cell.is_else:
                 if cell.values:
-                    fail("the catch-all branch must not list values", node_id)
+                    fail(
+                        "the catch-all branch must not list values",
+                        node_id,
+                        code="K7.otherwise-values",
+                    )
                 continue
             if not cell.values:
-                fail("each enum branch must list at least one value", node_id)
+                fail(
+                    "each enum branch must list at least one value",
+                    node_id,
+                    code="K7.enum-empty-branch",
+                )
             for value in cell.values:
                 if value in seen:
-                    fail(f"enum value {value!r} is matched by more than one branch", node_id)
+                    fail(
+                        f"enum value {value!r} is matched by more than one branch",
+                        node_id,
+                        code="K7.enum-duplicate",
+                        params={"value": str(value)},
+                    )
                 seen.add(value)
 
 
@@ -1041,6 +1261,8 @@ def _check_d4_wellformed(schema: ProcessSchema) -> list[ValidationFinding]:
                     rule="D4",
                     node_id=access.node_id,
                     message=f"data access references unknown node '{access.node_id}'",
+                    code="D4.unknown-node",
+                    params={"node": str(access.node_id)},
                 )
             )
         elif node.type is not NodeType.ACTIVITY:
@@ -1049,6 +1271,8 @@ def _check_d4_wellformed(schema: ProcessSchema) -> list[ValidationFinding]:
                     rule="D4",
                     node_id=access.node_id,
                     message=f"only ACTIVITY nodes may access data, not {node.type.value}",
+                    code="D4.not-activity",
+                    params={"node_type": str(node.type.value)},
                 )
             )
         if access.element_id not in schema.data_elements:
@@ -1057,6 +1281,8 @@ def _check_d4_wellformed(schema: ProcessSchema) -> list[ValidationFinding]:
                     rule="D4",
                     node_id=access.node_id,
                     message=f"data access references unknown element '{access.element_id}'",
+                    code="D4.unknown-element",
+                    params={"element": str(access.element_id)},
                 )
             )
     return findings
@@ -1075,10 +1301,14 @@ def _check_d3_types(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="D3",
                     node_id=access.node_id,
-                    message=(
-                        f"parameter type {access.param_type.value} does not match "
-                        f"element '{element.name}' type {element.data_type.value}"
-                    ),
+                    message=f"parameter type {access.param_type.value} does not match "
+                        f"element '{element.name}' type {element.data_type.value}",
+                    code="D3.param-type",
+                    params={
+                        "param_type": str(access.param_type.value),
+                        "element": str(element.name),
+                        "type": str(element.data_type.value),
+                    },
                 )
             )
     return findings
@@ -1332,6 +1562,8 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                     rule="U1",
                     node_id=node_id,
                     message=f"input mask references unknown node '{node_id}'",
+                    code="U1.unknown-node",
+                    params={"node": str(node_id)},
                 )
             )
             continue
@@ -1341,6 +1573,7 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                     rule="U1",
                     node_id=node_id,
                     message="input masks are only allowed on ACTIVITY nodes",
+                    code="U1.not-activity",
                 )
             )
 
@@ -1354,6 +1587,8 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                         rule="U2",
                         node_id=node_id,
                         message=f"duplicate field id '{field.id}' in input mask",
+                        code="U2.duplicate-field",
+                        params={"field": str(field.id)},
                     )
                 )
             seen_field_ids.add(field.id)
@@ -1362,10 +1597,10 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                     ValidationFinding(
                         rule="U2",
                         node_id=node_id,
-                        message=(
-                            f"element '{field.element_id}' is bound by more than one "
-                            "field in the same mask"
-                        ),
+                        message=f"element '{field.element_id}' is bound by more than one "
+                            "field in the same mask",
+                        code="U2.element-twice",
+                        params={"element": str(field.element_id)},
                     )
                 )
             seen_elements.add(field.element_id)
@@ -1375,6 +1610,8 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                         rule="U2",
                         node_id=node_id,
                         message=f"field '{field.id}' has an empty label",
+                        code="U2.empty-label",
+                        params={"field": str(field.id)},
                     )
                 )
 
@@ -1384,10 +1621,10 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                     ValidationFinding(
                         rule="U1",
                         node_id=node_id,
-                        message=(
-                            f"field '{field.id}' references unknown data element "
-                            f"'{field.element_id}'"
-                        ),
+                        message=f"field '{field.id}' references unknown data element "
+                            f"'{field.element_id}'",
+                        code="U1.unknown-element",
+                        params={"field": str(field.id), "element": str(field.element_id)},
                     )
                 )
                 continue
@@ -1397,10 +1634,14 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                     ValidationFinding(
                         rule="U2",
                         node_id=node_id,
-                        message=(
-                            f"widget '{field.widget}' cannot present element "
-                            f"'{field.element_id}' of type '{element.data_type}'"
-                        ),
+                        message=f"widget '{field.widget}' cannot present element "
+                            f"'{field.element_id}' of type '{element.data_type}'",
+                        code="U2.widget-type",
+                        params={
+                            "widget": str(field.widget),
+                            "element": str(field.element_id),
+                            "type": str(element.data_type),
+                        },
                     )
                 )
 
@@ -1411,10 +1652,10 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                         ValidationFinding(
                             rule="U2",
                             node_id=node_id,
-                            message=(
-                                f"dropdown field '{field.id}' needs at least two "
-                                "non-empty options"
-                            ),
+                            message=f"dropdown field '{field.id}' needs at least two "
+                                "non-empty options",
+                            code="U2.dropdown-options",
+                            params={"field": str(field.id)},
                         )
                     )
                 elif len(set(options)) != len(options):
@@ -1423,6 +1664,8 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                             rule="U2",
                             node_id=node_id,
                             message=f"dropdown field '{field.id}' has duplicate options",
+                            code="U2.duplicate-options",
+                            params={"field": str(field.id)},
                         )
                     )
             elif field.options:
@@ -1430,10 +1673,10 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                     ValidationFinding(
                         rule="U2",
                         node_id=node_id,
-                        message=(
-                            f"field '{field.id}' carries options but its widget is "
-                            f"not a dropdown"
-                        ),
+                        message=f"field '{field.id}' carries options but its widget is "
+                            f"not a dropdown",
+                        code="U2.options-not-dropdown",
+                        params={"field": str(field.id)},
                     )
                 )
 
@@ -1445,10 +1688,10 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                     ValidationFinding(
                         rule="U3",
                         node_id=node_id,
-                        message=(
-                            f"input field '{field.id}' has no write access for element "
-                            f"'{field.element_id}'"
-                        ),
+                        message=f"input field '{field.id}' has no write access for element "
+                            f"'{field.element_id}'",
+                        code="U3.input-no-write",
+                        params={"field": str(field.id), "element": str(field.element_id)},
                     )
                 )
             if field.mode in READ_MODES and not any(m in READ_MODES for m in modes):
@@ -1456,10 +1699,10 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                     ValidationFinding(
                         rule="U3",
                         node_id=node_id,
-                        message=(
-                            f"display field '{field.id}' has no read access for element "
-                            f"'{field.element_id}'"
-                        ),
+                        message=f"display field '{field.id}' has no read access for element "
+                            f"'{field.element_id}'",
+                        code="U3.display-no-read",
+                        params={"field": str(field.id), "element": str(field.element_id)},
                     )
                 )
     return findings
@@ -1489,10 +1732,10 @@ def _check_connectors(schema: ProcessSchema) -> list[ValidationFinding]:
                 findings.append(
                     ValidationFinding(
                         rule="C1",
-                        message=(
-                            f"INSTANCE element '{element.id}' must not carry an "
-                            f"external binding"
-                        ),
+                        message=f"INSTANCE element '{element.id}' must not carry an "
+                            f"external binding",
+                        code="C1.instance-with-binding",
+                        params={"element": str(element.id)},
                     )
                 )
             continue
@@ -1500,10 +1743,10 @@ def _check_connectors(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="C1",
-                    message=(
-                        f"element '{element.id}' must carry exactly one external "
-                        f"binding kind (record, scalar-select or scalar-write)"
-                    ),
+                    message=f"element '{element.id}' must carry exactly one external "
+                        f"binding kind (record, scalar-select or scalar-write)",
+                    code="C1.binding-kinds",
+                    params={"element": str(element.id)},
                 )
             )
             continue
@@ -1517,6 +1760,8 @@ def _check_connectors(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="C1",
                     message=f"EXTERNAL element '{element.id}' is missing its external binding",
+                    code="C1.binding-missing",
+                    params={"element": str(element.id)},
                 )
             )
             continue
@@ -1524,10 +1769,10 @@ def _check_connectors(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="C1",
-                    message=(
-                        f"element '{element.id}' references unknown connector "
-                        f"'{binding.connector_id}'"
-                    ),
+                    message=f"element '{element.id}' references unknown connector "
+                        f"'{binding.connector_id}'",
+                    code="C1.unknown-connector",
+                    params={"element": str(element.id), "connector": str(binding.connector_id)},
                 )
             )
         if not binding.entity.strip():
@@ -1535,6 +1780,8 @@ def _check_connectors(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="C3",
                     message=f"element '{element.id}' has an empty connector entity",
+                    code="C3.empty-entity",
+                    params={"element": str(element.id)},
                 )
             )
         if binding.key_element_id == element.id:
@@ -1542,6 +1789,8 @@ def _check_connectors(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="C2",
                     message=f"element '{element.id}' uses itself as its lookup key",
+                    code="C2.self-key",
+                    params={"element": str(element.id)},
                 )
             )
             continue
@@ -1550,20 +1799,20 @@ def _check_connectors(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="C2",
-                    message=(
-                        f"element '{element.id}' uses unknown key element "
-                        f"'{binding.key_element_id}'"
-                    ),
+                    message=f"element '{element.id}' uses unknown key element "
+                        f"'{binding.key_element_id}'",
+                    code="C2.unknown-key",
+                    params={"element": str(element.id), "key": str(binding.key_element_id)},
                 )
             )
         elif key_element.source is not DataSourceKind.INSTANCE:
             findings.append(
                 ValidationFinding(
                     rule="C2",
-                    message=(
-                        f"key element '{binding.key_element_id}' of '{element.id}' must be "
-                        f"an INSTANCE element"
-                    ),
+                    message=f"key element '{binding.key_element_id}' of '{element.id}' must be "
+                        f"an INSTANCE element",
+                    code="C2.key-not-instance",
+                    params={"key": str(binding.key_element_id), "element": str(element.id)},
                 )
             )
         else:
@@ -1606,11 +1855,14 @@ def _check_key_supplied_before_readers(
                 ValidationFinding(
                     rule="C2",
                     node_id=node_id,
-                    message=(
-                        f"lookup key '{key.name if key else key_element_id}' of external "
+                    message=f"lookup key '{key.name if key else key_element_id}' of external "
                         f"element '{element_id}' is not guaranteed to be set on every "
-                        f"path to this reader"
-                    ),
+                        f"path to this reader",
+                    code="C2.key-not-set",
+                    params={
+                        "key": str(key.name if key else key_element_id),
+                        "element": str(element_id),
+                    },
                 )
             )
     return findings
@@ -1647,10 +1899,10 @@ def _check_query_cardinality(
             findings.append(
                 ValidationFinding(
                     rule="C6",
-                    message=(
-                        f"element '{element_id}' uses KEY_UNIQUE but declares no "
-                        f"unique column"
-                    ),
+                    message=f"element '{element_id}' uses KEY_UNIQUE but declares no "
+                        f"unique column",
+                    code="C6.no-unique-column",
+                    params={"element": str(element_id)},
                 )
             )
         elif not any(
@@ -1660,10 +1912,10 @@ def _check_query_cardinality(
             findings.append(
                 ValidationFinding(
                     rule="C6",
-                    message=(
-                        f"element '{element_id}' uses KEY_UNIQUE but has no equality "
-                        f"filter on unique column '{binding.unique_column}'"
-                    ),
+                    message=f"element '{element_id}' uses KEY_UNIQUE but has no equality "
+                        f"filter on unique column '{binding.unique_column}'",
+                    code="C6.no-unique-filter",
+                    params={"element": str(element_id), "column": str(binding.unique_column)},
                 )
             )
     elif binding.cardinality is Cardinality.AGGREGATE:
@@ -1671,20 +1923,20 @@ def _check_query_cardinality(
             findings.append(
                 ValidationFinding(
                     rule="C6",
-                    message=(
-                        f"element '{element_id}' uses AGGREGATE cardinality but "
-                        f"projects a plain column"
-                    ),
+                    message=f"element '{element_id}' uses AGGREGATE cardinality but "
+                        f"projects a plain column",
+                    code="C6.aggregate-plain-column",
+                    params={"element": str(element_id)},
                 )
             )
     elif not binding.order_by:  # FIRST_ORDERED
         findings.append(
             ValidationFinding(
                 rule="C6",
-                message=(
-                    f"element '{element_id}' uses FIRST_ORDERED but has an empty "
-                    f"ORDER BY"
-                ),
+                message=f"element '{element_id}' uses FIRST_ORDERED but has an empty "
+                    f"ORDER BY",
+                code="C6.empty-order",
+                params={"element": str(element_id)},
             )
         )
     return findings
@@ -1725,10 +1977,14 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="C4",
-                    message=(
-                        f"element '{element.id}' is {element.data_type.value} but its "
-                        f"select projection yields {result_type.value}"
-                    ),
+                    message=f"element '{element.id}' is {element.data_type.value} but its "
+                        f"select projection yields {result_type.value}",
+                    code="C4.type-mismatch",
+                    params={
+                        "element": str(element.id),
+                        "type": str(element.data_type.value),
+                        "result_type": str(result_type.value),
+                    },
                 )
             )
 
@@ -1737,10 +1993,10 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="C5",
-                    message=(
-                        f"element '{element.id}' references unknown connector "
-                        f"'{binding.connector_id}'"
-                    ),
+                    message=f"element '{element.id}' references unknown connector "
+                        f"'{binding.connector_id}'",
+                    code="C5.unknown-connector",
+                    params={"element": str(element.id), "connector": str(binding.connector_id)},
                 )
             )
         if not binding.entity.strip():
@@ -1748,6 +2004,8 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="C5",
                     message=f"element '{element.id}' has an empty select entity",
+                    code="C5.empty-entity",
+                    params={"element": str(element.id)},
                 )
             )
         if not binding.column.strip():
@@ -1755,6 +2013,8 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="C5",
                     message=f"element '{element.id}' has an empty projection column",
+                    code="C5.empty-column",
+                    params={"element": str(element.id)},
                 )
             )
 
@@ -1769,10 +2029,14 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
                 findings.append(
                     ValidationFinding(
                         rule="C5",
-                        message=(
-                            f"element '{element.id}' uses operator {item.operator.value} "
-                            f"on a {item.column_type.value} filter column"
-                        ),
+                        message=f"element '{element.id}' uses operator {item.operator.value} "
+                            f"on a {item.column_type.value} filter column",
+                        code="C5.operator-type",
+                        params={
+                            "element": str(element.id),
+                            "operator": str(item.operator.value),
+                            "column_type": str(item.column_type.value),
+                        },
                     )
                 )
             source = schema.data_elements.get(item.key_element_id)
@@ -1780,10 +2044,10 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
                 findings.append(
                     ValidationFinding(
                         rule="C5",
-                        message=(
-                            f"element '{element.id}' uses unknown filter source "
-                            f"'{item.key_element_id}'"
-                        ),
+                        message=f"element '{element.id}' uses unknown filter source "
+                            f"'{item.key_element_id}'",
+                        code="C5.unknown-source",
+                        params={"element": str(element.id), "source": str(item.key_element_id)},
                     )
                 )
                 continue
@@ -1791,10 +2055,10 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
                 findings.append(
                     ValidationFinding(
                         rule="C5",
-                        message=(
-                            f"filter source '{item.key_element_id}' of '{element.id}' "
-                            f"must be an INSTANCE element"
-                        ),
+                        message=f"filter source '{item.key_element_id}' of '{element.id}' "
+                            f"must be an INSTANCE element",
+                        code="C5.source-not-instance",
+                        params={"source": str(item.key_element_id), "element": str(element.id)},
                     )
                 )
                 continue
@@ -1802,11 +2066,16 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
                 findings.append(
                     ValidationFinding(
                         rule="C5",
-                        message=(
-                            f"filter column type {item.column_type.value} of "
+                        message=f"filter column type {item.column_type.value} of "
                             f"'{element.id}' does not match source "
-                            f"'{item.key_element_id}' ({source.data_type.value})"
-                        ),
+                            f"'{item.key_element_id}' ({source.data_type.value})",
+                        code="C5.source-type",
+                        params={
+                            "column_type": str(item.column_type.value),
+                            "element": str(element.id),
+                            "source": str(item.key_element_id),
+                            "source_type": str(source.data_type.value),
+                        },
                     )
                 )
             for node_id in reading_nodes:
@@ -1815,11 +2084,11 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
                         ValidationFinding(
                             rule="C5",
                             node_id=node_id,
-                            message=(
-                                f"filter source '{item.key_element_id}' of "
+                            message=f"filter source '{item.key_element_id}' of "
                                 f"'{element.id}' may be read before it is written on "
-                                f"some execution path"
-                            ),
+                                f"some execution path",
+                            code="C5.source-unset",
+                            params={"source": str(item.key_element_id), "element": str(element.id)},
                         )
                     )
 
@@ -1861,10 +2130,14 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="C7",
-                    message=(
-                        f"element '{element.id}' is {element.data_type.value} but its "
-                        f"write target column is {binding.column_type.value}"
-                    ),
+                    message=f"element '{element.id}' is {element.data_type.value} but its "
+                        f"write target column is {binding.column_type.value}",
+                    code="C7.type-mismatch",
+                    params={
+                        "element": str(element.id),
+                        "type": str(element.data_type.value),
+                        "column_type": str(binding.column_type.value),
+                    },
                 )
             )
 
@@ -1873,10 +2146,10 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="C8",
-                    message=(
-                        f"element '{element.id}' references unknown connector "
-                        f"'{binding.connector_id}'"
-                    ),
+                    message=f"element '{element.id}' references unknown connector "
+                        f"'{binding.connector_id}'",
+                    code="C8.unknown-connector",
+                    params={"element": str(element.id), "connector": str(binding.connector_id)},
                 )
             )
         if not binding.entity.strip():
@@ -1884,6 +2157,8 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="C8",
                     message=f"element '{element.id}' has an empty write entity",
+                    code="C8.empty-entity",
+                    params={"element": str(element.id)},
                 )
             )
         if not binding.column.strip():
@@ -1891,6 +2166,8 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="C8",
                     message=f"element '{element.id}' has an empty target column",
+                    code="C8.empty-column",
+                    params={"element": str(element.id)},
                 )
             )
 
@@ -1905,10 +2182,14 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
                 findings.append(
                     ValidationFinding(
                         rule="C8",
-                        message=(
-                            f"element '{element.id}' uses operator {item.operator.value} "
-                            f"on a {item.column_type.value} filter column"
-                        ),
+                        message=f"element '{element.id}' uses operator {item.operator.value} "
+                            f"on a {item.column_type.value} filter column",
+                        code="C8.operator-type",
+                        params={
+                            "element": str(element.id),
+                            "operator": str(item.operator.value),
+                            "column_type": str(item.column_type.value),
+                        },
                     )
                 )
             source = schema.data_elements.get(item.key_element_id)
@@ -1916,10 +2197,10 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
                 findings.append(
                     ValidationFinding(
                         rule="C8",
-                        message=(
-                            f"element '{element.id}' uses unknown filter source "
-                            f"'{item.key_element_id}'"
-                        ),
+                        message=f"element '{element.id}' uses unknown filter source "
+                            f"'{item.key_element_id}'",
+                        code="C8.unknown-source",
+                        params={"element": str(element.id), "source": str(item.key_element_id)},
                     )
                 )
                 continue
@@ -1927,10 +2208,10 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
                 findings.append(
                     ValidationFinding(
                         rule="C8",
-                        message=(
-                            f"filter source '{item.key_element_id}' of '{element.id}' "
-                            f"must be an INSTANCE element"
-                        ),
+                        message=f"filter source '{item.key_element_id}' of '{element.id}' "
+                            f"must be an INSTANCE element",
+                        code="C8.source-not-instance",
+                        params={"source": str(item.key_element_id), "element": str(element.id)},
                     )
                 )
                 continue
@@ -1938,11 +2219,16 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
                 findings.append(
                     ValidationFinding(
                         rule="C8",
-                        message=(
-                            f"filter column type {item.column_type.value} of "
+                        message=f"filter column type {item.column_type.value} of "
                             f"'{element.id}' does not match source "
-                            f"'{item.key_element_id}' ({source.data_type.value})"
-                        ),
+                            f"'{item.key_element_id}' ({source.data_type.value})",
+                        code="C8.source-type",
+                        params={
+                            "column_type": str(item.column_type.value),
+                            "element": str(element.id),
+                            "source": str(item.key_element_id),
+                            "source_type": str(source.data_type.value),
+                        },
                     )
                 )
             for node_id in writing_nodes:
@@ -1951,11 +2237,11 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
                         ValidationFinding(
                             rule="C8",
                             node_id=node_id,
-                            message=(
-                                f"filter source '{item.key_element_id}' of "
+                            message=f"filter source '{item.key_element_id}' of "
                                 f"'{element.id}' may be used before it is written on "
-                                f"some execution path"
-                            ),
+                                f"some execution path",
+                            code="C8.source-unset",
+                            params={"source": str(item.key_element_id), "element": str(element.id)},
                         )
                     )
 
@@ -1964,10 +2250,10 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="C9",
-                    message=(
-                        f"write of '{element.id}' declares no unique column -- an "
-                        f"UPDATE must target exactly one row"
-                    ),
+                    message=f"write of '{element.id}' declares no unique column -- an "
+                        f"UPDATE must target exactly one row",
+                    code="C9.no-unique-column",
+                    params={"element": str(element.id)},
                 )
             )
         elif not any(
@@ -1977,10 +2263,10 @@ def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="C9",
-                    message=(
-                        f"write of '{element.id}' has no equality filter on unique "
-                        f"column '{binding.unique_column}'"
-                    ),
+                    message=f"write of '{element.id}' has no equality filter on unique "
+                        f"column '{binding.unique_column}'",
+                    code="C9.no-unique-filter",
+                    params={"element": str(element.id), "column": str(binding.unique_column)},
                 )
             )
     return findings
@@ -2024,6 +2310,8 @@ def _check_org_master_data(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="Z1",
                     message=f"org unit '{unit.id}' has unknown manager '{unit.manager_id}'",
+                    code="Z1.unknown-manager",
+                    params={"unit": str(unit.id), "manager": str(unit.manager_id)},
                 )
             )
     for agent in org.agents.values():
@@ -2034,6 +2322,8 @@ def _check_org_master_data(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="Z1",
                     message=f"agent '{agent.id}' cannot be its own deputy",
+                    code="Z1.own-deputy",
+                    params={"agent": str(agent.id)},
                 )
             )
         elif agent.deputy_id not in org.agents:
@@ -2041,6 +2331,8 @@ def _check_org_master_data(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="Z1",
                     message=f"agent '{agent.id}' has unknown deputy '{agent.deputy_id}'",
+                    code="Z1.unknown-deputy",
+                    params={"agent": str(agent.id), "deputy": str(agent.deputy_id)},
                 )
             )
     return findings
@@ -2055,7 +2347,11 @@ def _check_z1_wellformed(schema: ProcessSchema) -> list[ValidationFinding]:
         if node is None:
             findings.append(
                 ValidationFinding(
-                    rule="Z1", node_id=node_id, message=f"staff rule on unknown node '{node_id}'"
+                    rule="Z1",
+                    node_id=node_id,
+                    message=f"staff rule on unknown node '{node_id}'",
+                    code="Z1.unknown-node",
+                    params={"node": str(node_id)},
                 )
             )
         elif node.type is not NodeType.ACTIVITY:
@@ -2063,10 +2359,10 @@ def _check_z1_wellformed(schema: ProcessSchema) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="Z1",
                     node_id=node_id,
-                    message=(
-                        f"staff rules are only allowed on ACTIVITY nodes, "
-                        f"not {node.type.value}"
-                    ),
+                    message=f"staff rules are only allowed on ACTIVITY nodes, "
+                        f"not {node.type.value}",
+                    code="Z1.not-activity",
+                    params={"node_type": str(node.type.value)},
                 )
             )
         findings += _check_staff_rule_node(schema, node_id, rule)
@@ -2084,6 +2380,8 @@ def _check_staff_rule_node(
                     rule="Z1",
                     node_id=node_id,
                     message=f"{rule.kind.value} term must have no operands",
+                    code="Z1.no-operands-allowed",
+                    params={"rule_kind": str(rule.kind.value)},
                 )
             )
         if rule.ref is None:
@@ -2092,6 +2390,8 @@ def _check_staff_rule_node(
                     rule="Z1",
                     node_id=node_id,
                     message=f"{rule.kind.value} term requires a reference",
+                    code="Z1.reference-missing",
+                    params={"rule_kind": str(rule.kind.value)},
                 )
             )
         else:
@@ -2101,7 +2401,10 @@ def _check_staff_rule_node(
         if rule.kind is StaffRuleKind.EXCEPT and len(rule.operands) != 2:
             findings.append(
                 ValidationFinding(
-                    rule="Z1", node_id=node_id, message="EXCEPT requires exactly two operands"
+                    rule="Z1",
+                    node_id=node_id,
+                    message="EXCEPT requires exactly two operands",
+                    code="Z1.except-two",
                 )
             )
         elif len(rule.operands) < min_operands:
@@ -2110,6 +2413,8 @@ def _check_staff_rule_node(
                     rule="Z1",
                     node_id=node_id,
                     message=f"{rule.kind.value} requires at least {min_operands} operand(s)",
+                    code="Z1.too-few-operands",
+                    params={"rule_kind": str(rule.kind.value), "count": str(min_operands)},
                 )
             )
         for operand in rule.operands:
@@ -2124,15 +2429,33 @@ def _check_staff_ref(
     ref = rule.ref
     if rule.kind is StaffRuleKind.ROLE and ref not in org.roles:
         return [
-            ValidationFinding(rule="Z1", node_id=node_id, message=f"unknown role '{ref}'")
+            ValidationFinding(
+                rule="Z1",
+                node_id=node_id,
+                message=f"unknown role '{ref}'",
+                code="Z1.unknown-role",
+                params={"ref": str(ref)},
+            )
         ]
     if rule.kind is StaffRuleKind.ORG_UNIT and ref not in org.org_units:
         return [
-            ValidationFinding(rule="Z1", node_id=node_id, message=f"unknown org unit '{ref}'")
+            ValidationFinding(
+                rule="Z1",
+                node_id=node_id,
+                message=f"unknown org unit '{ref}'",
+                code="Z1.unknown-unit",
+                params={"ref": str(ref)},
+            )
         ]
     if rule.kind is StaffRuleKind.AGENT and ref not in org.agents:
         return [
-            ValidationFinding(rule="Z1", node_id=node_id, message=f"unknown agent '{ref}'")
+            ValidationFinding(
+                rule="Z1",
+                node_id=node_id,
+                message=f"unknown agent '{ref}'",
+                code="Z1.unknown-agent",
+                params={"ref": str(ref)},
+            )
         ]
     if rule.kind in STAFF_NODE_REF_KINDS and ref not in schema.nodes:
         return [
@@ -2140,6 +2463,8 @@ def _check_staff_ref(
                 rule="Z1",
                 node_id=node_id,
                 message=f"{rule.kind.value} references unknown node '{ref}'",
+                code="Z1.unknown-node-ref",
+                params={"rule_kind": str(rule.kind.value), "ref": str(ref)},
             )
         ]
     return []
@@ -2157,6 +2482,7 @@ def _check_z4_service(schema: ProcessSchema) -> list[ValidationFinding]:
                     rule="Z4",
                     node_id=node_id,
                     message="service binding is only allowed on ACTIVITY nodes",
+                    code="Z4.not-activity",
                 )
             )
             continue
@@ -2195,6 +2521,8 @@ def _check_activity_repository(schema: ProcessSchema) -> list[ValidationFinding]
                     rule="A1",
                     node_id=node_id,
                     message=f"service binding references unknown template '{binding.template_id}'",
+                    code="A1.unknown-template",
+                    params={"template": str(binding.template_id)},
                 )
             )
             continue
@@ -2203,10 +2531,14 @@ def _check_activity_repository(schema: ProcessSchema) -> list[ValidationFinding]
                 ValidationFinding(
                     rule="A2",
                     node_id=node_id,
-                    message=(
-                        f"binding 'automatic' ({binding.automatic}) does not match the "
-                        f"{template.executor.value} executor of template '{template.id}'"
-                    ),
+                    message=f"binding 'automatic' ({binding.automatic}) does not match the "
+                        f"{template.executor.value} executor of template '{template.id}'",
+                    code="A2.executor-mismatch",
+                    params={
+                        "automatic": str(binding.automatic),
+                        "executor": str(template.executor.value),
+                        "template": str(template.id),
+                    },
                 )
             )
         findings += _check_template_interface(schema, node_id, binding, template)
@@ -2230,6 +2562,8 @@ def _check_template_interface(
                     rule="A3",
                     node_id=node_id,
                     message=f"mandatory parameter '{param.name}' is not bound",
+                    code="A3.param-unbound",
+                    params={"param": str(param.name)},
                 )
             )
     for param_name, element_id in binding.parameter_mapping.items():
@@ -2240,6 +2574,8 @@ def _check_template_interface(
                     rule="A3",
                     node_id=node_id,
                     message=f"template '{template.id}' has no parameter '{param_name}'",
+                    code="A3.unknown-param",
+                    params={"template": str(template.id), "param": str(param_name)},
                 )
             )
             continue
@@ -2250,6 +2586,8 @@ def _check_template_interface(
                     rule="A3",
                     node_id=node_id,
                     message=f"parameter '{param_name}' is bound to unknown element '{element_id}'",
+                    code="A3.unknown-element",
+                    params={"param": str(param_name), "element": str(element_id)},
                 )
             )
         elif element.data_type is not mapped_param.data_type:
@@ -2258,9 +2596,16 @@ def _check_template_interface(
                     rule="A3",
                     node_id=node_id,
                     message=(
-                        f"parameter '{param_name}' ({mapped_param.data_type.value}) does not match "
-                        f"element '{element_id}' ({element.data_type.value})"
+                        f"parameter '{param_name}' ({mapped_param.data_type.value}) "
+                        f"does not match element '{element_id}' ({element.data_type.value})"
                     ),
+                    code="A3.type-mismatch",
+                    params={
+                        "param": str(param_name),
+                        "param_type": str(mapped_param.data_type.value),
+                        "element": str(element_id),
+                        "type": str(element.data_type.value),
+                    },
                 )
             )
     return findings
@@ -2309,6 +2654,7 @@ def _check_integration_binding(
                     rule="I1",
                     node_id=node_id,
                     message="EXTERNAL_TASK binding requires a non-empty topic",
+                    code="I1.no-topic",
                 )
             )
         if binding.endpoint_ref is not None:
@@ -2317,6 +2663,7 @@ def _check_integration_binding(
                     rule="I2",
                     node_id=node_id,
                     message="EXTERNAL_TASK binding must not set an endpoint_ref",
+                    code="I2.topic-with-endpoint",
                 )
             )
     elif kind is AutomationKind.HTTP_PUSH:
@@ -2326,6 +2673,7 @@ def _check_integration_binding(
                     rule="I1",
                     node_id=node_id,
                     message="HTTP_PUSH binding requires a non-empty endpoint_ref",
+                    code="I1.no-endpoint",
                 )
             )
         if binding.topic is not None:
@@ -2334,6 +2682,7 @@ def _check_integration_binding(
                     rule="I2",
                     node_id=node_id,
                     message="HTTP_PUSH binding must not set a topic",
+                    code="I2.endpoint-with-topic",
                 )
             )
 
@@ -2344,6 +2693,7 @@ def _check_integration_binding(
                 rule="I2",
                 node_id=node_id,
                 message="automated binding must be marked automatic",
+                code="I2.automated-not-automatic",
             )
         )
 
@@ -2354,10 +2704,10 @@ def _check_integration_binding(
                 ValidationFinding(
                     rule="I3",
                     node_id=node_id,
-                    message=(
-                        f"parameter '{param}' maps to unknown data element "
-                        f"'{element_id}'"
-                    ),
+                    message=f"parameter '{param}' maps to unknown data element "
+                        f"'{element_id}'",
+                    code="I3.unknown-element",
+                    params={"param": str(param), "element": str(element_id)},
                 )
             )
 
@@ -2381,10 +2731,10 @@ def _check_no_inline_secret(
             ValidationFinding(
                 rule="I4",
                 node_id=node_id,
-                message=(
-                    f"{field} must be a bare reference without an inline URL or "
-                    f"credentials"
-                ),
+                message=f"{field} must be a bare reference without an inline URL or "
+                    f"credentials",
+                code="I4.inline-reference",
+                params={"field_name": str(field)},
             )
         ]
     return []
@@ -2408,13 +2758,23 @@ def _check_t3_escalations(schema: ProcessSchema) -> list[ValidationFinding]:
 
     findings: list[ValidationFinding] = []
 
-    def fail(message: str, node_id: str) -> None:
-        findings.append(ValidationFinding(rule="T3", node_id=node_id, message=message))
+    def fail(
+        message: str, node_id: str, *, code: str, params: dict[str, str] | None = None
+    ) -> None:
+        findings.append(
+            ValidationFinding(
+                rule="T3", node_id=node_id, message=message, code=code, params=params or {}
+            )
+        )
 
     for node_id, policy in schema.escalation_policies.items():
         node = schema.nodes.get(node_id)
         if node is None or node.type is not NodeType.ACTIVITY:
-            fail("escalation policy must sit on an ACTIVITY node (T3a)", node_id)
+            fail(
+                "escalation policy must sit on an ACTIVITY node (T3a)",
+                node_id,
+                code="T3.not-activity",
+            )
             continue
         binding = schema.service_bindings.get(node_id)
         if binding is not None and binding.automatic:
@@ -2422,21 +2782,35 @@ def _check_t3_escalations(schema: ProcessSchema) -> list[ValidationFinding]:
                 "an automatic activity cannot carry an escalation policy "
                 "(incidents/retries cover machines; T3a)",
                 node_id,
+                code="T3.automatic",
             )
         if target_seconds(schema.time_constraints.get(node_id)) is None:
             fail(
                 "escalation requires a resolvable target time on the node "
                 "(target_lead_seconds or max_duration_seconds; T3a)",
                 node_id,
+                code="T3.no-target-time",
             )
         if not policy.stages:
-            fail("escalation policy needs at least one stage (T3b)", node_id)
+            fail(
+                "escalation policy needs at least one stage (T3b)",
+                node_id,
+                code="T3.no-stages",
+            )
         previous: float | None = None
         for stage in policy.stages:
             if stage.after_seconds < 0:
-                fail("stage offset must be >= 0 seconds (T3b)", node_id)
+                fail(
+                    "stage offset must be >= 0 seconds (T3b)",
+                    node_id,
+                    code="T3.negative-offset",
+                )
             if previous is not None and stage.after_seconds <= previous:
-                fail("stage offsets must be strictly ascending (T3b)", node_id)
+                fail(
+                    "stage offsets must be strictly ascending (T3b)",
+                    node_id,
+                    code="T3.offsets-ascending",
+                )
             previous = stage.after_seconds
             findings += _check_staff_rule_node(schema, node_id, stage.rule)
             if _contains_node_ref(stage.rule):
@@ -2444,6 +2818,7 @@ def _check_t3_escalations(schema: ProcessSchema) -> list[ValidationFinding]:
                     "escalation targets must not use node-referencing staff "
                     "rule kinds (T3c)",
                     node_id,
+                    code="T3.node-ref-target",
                 )
                 continue
             possible = _possible_agents(schema.org_model, stage.rule)
@@ -2452,6 +2827,7 @@ def _check_t3_escalations(schema: ProcessSchema) -> list[ValidationFinding]:
                     "escalation target cannot resolve to any agent in the "
                     "org model (T3c)",
                     node_id,
+                    code="T3.nobody",
                 )
     return findings
 
@@ -2489,8 +2865,21 @@ def _possible_agents(org: OrgModel, rule: StaffRule) -> set[str] | None:
     Returns ``None`` for the unbounded 'universe' (a NodePerformingAgent is
     bound to some agent at runtime, so it is always potentially non-empty,
     even against an empty org model). A concrete empty set means the rule is
-    definitely unsatisfiable. EXCEPT only removes, so its upper bound is the
-    left operand's possible set.
+    definitely unsatisfiable.
+
+    EXCEPT: removing agents cannot add any, so the left operand's bound is
+    always safe. It used to be the *whole* answer -- and an over-approximation
+    can never prove emptiness, so ``EXCEPT(ROLE x, ROLE x)`` passed Z2, was
+    released, and its step stood in nobody's worklist (Validierung 2026-09-25,
+    VAL-02). When the right operand depends on the org model only, its runtime
+    set is known exactly (:func:`_exact_agents`), and ``left − right`` is still
+    a sound upper bound: nothing in that exact set can ever survive the
+    subtraction. With a runtime leaf on the right (a performer reference) the
+    removed set is unknown, and the bound stays at the left operand.
+
+    Callers besides Z2 (N3 recipients, T3 stage targets, the licensing
+    guard's ``_required_agent_ids``) only gain from the tighter bound -- it is
+    still an over-approximation.
     """
 
     if rule.kind is StaffRuleKind.ROLE:
@@ -2517,8 +2906,47 @@ def _possible_agents(org: OrgModel, rule: StaffRule) -> set[str] | None:
         return _intersect_bounds(operand_sets)
     if rule.kind is StaffRuleKind.OR:
         return _union_bounds(operand_sets)
-    # EXCEPT: upper bound is the left operand (removing agents cannot add any).
-    return operand_sets[0]
+    # EXCEPT: upper bound is the left operand minus whatever the right operand
+    # removes for certain (only known when the right side is exact).
+    left = operand_sets[0]
+    removed = _exact_agents(org, rule.operands[1]) if len(rule.operands) >= 2 else None
+    if left is None or removed is None:
+        return left
+    return left - removed
+
+
+def _exact_agents(org: OrgModel, rule: StaffRule) -> set[str] | None:
+    """The exact agent set a rule resolves to, if the org model alone decides it.
+
+    ROLE, ORG_UNIT and AGENT, and any AND/OR/EXCEPT built only from them,
+    resolve at runtime exactly as here (same formulas as
+    ``assignment._resolve``, including its handling of operand-less
+    combinations). As soon as a runtime leaf is involved
+    (``NODE_PERFORMING_AGENT[_SUPERVISOR]``) the result depends on who performed
+    an earlier step, and the answer is ``None`` -- "not statically known".
+
+    Deputies and FUNCTIONAL escalation stages only ever *add* agents at runtime
+    and are deliberately not part of this set; Z2 asks whether the rule itself
+    can find anyone (VAL-02).
+    """
+
+    if rule.kind in STAFF_NODE_REF_KINDS:
+        return None
+    if rule.kind in (StaffRuleKind.ROLE, StaffRuleKind.ORG_UNIT, StaffRuleKind.AGENT):
+        return _possible_agents(org, rule)  # exact for these leaf kinds
+    operands: list[set[str]] = []
+    for op in rule.operands:
+        exact = _exact_agents(org, op)
+        if exact is None:
+            return None
+        operands.append(exact)
+    if not operands:
+        return set()
+    if rule.kind is StaffRuleKind.AND:
+        return set.intersection(*operands)
+    if rule.kind is StaffRuleKind.OR:
+        return set.union(*operands)
+    return operands[0] - operands[1] if len(operands) >= 2 else operands[0]
 
 
 def _intersect_bounds(bounds: list[set[str] | None]) -> set[str] | None:
@@ -2633,6 +3061,8 @@ def _check_n1_addresses(org: OrgModel) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="N1",
                     message=f"agent '{agent.id}' has a malformed e-mail address",
+                    code="N1.agent-mail",
+                    params={"agent": str(agent.id)},
                 )
             )
     for role in org.roles.values():
@@ -2641,6 +3071,8 @@ def _check_n1_addresses(org: OrgModel) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="N1",
                     message=f"role '{role.id}' has a malformed group mailbox",
+                    code="N1.role-mail",
+                    params={"role": str(role.id)},
                 )
             )
     for unit in org.org_units.values():
@@ -2649,6 +3081,8 @@ def _check_n1_addresses(org: OrgModel) -> list[ValidationFinding]:
                 ValidationFinding(
                     rule="N1",
                     message=f"org unit '{unit.id}' has a malformed mailbox",
+                    code="N1.unit-mail",
+                    params={"unit": str(unit.id)},
                 )
             )
     return findings
@@ -2668,7 +3102,10 @@ def _check_mail_binding(
     if node is None:
         return [
             ValidationFinding(
-                rule="N2", node_id=node_id, message="mail binding on unknown node"
+                rule="N2",
+                node_id=node_id,
+                message="mail binding on unknown node",
+                code="N2.unknown-node",
             )
         ]
     if node.type is not NodeType.ACTIVITY:
@@ -2677,6 +3114,7 @@ def _check_mail_binding(
                 rule="N2",
                 node_id=node_id,
                 message="mail notifications are only allowed on ACTIVITY nodes",
+                code="N2.not-activity",
             )
         ]
     rule = schema.staff_rules.get(node_id)
@@ -2685,10 +3123,9 @@ def _check_mail_binding(
             ValidationFinding(
                 rule="N2",
                 node_id=node_id,
-                message=(
-                    "mail notification requires a staff rule (BZR) on the node -- "
-                    "there is no assignee to address"
-                ),
+                message="mail notification requires a staff rule (BZR) on the node -- "
+                    "there is no assignee to address",
+                code="N2.no-staff-rule",
             )
         ]
     policy = schema.escalation_policies.get(node_id)
@@ -2736,11 +3173,10 @@ def _check_n3_addresses(
                 ValidationFinding(
                     rule="N3",
                     node_id=node_id,
-                    message=(
-                        "recipient set is not statically determinable (the staff "
+                    message="recipient set is not statically determinable (the staff "
                         "rule depends on a prior node's performer); a per-agent mail "
-                        "notification cannot be modelled here -- use a group mailbox"
-                    ),
+                        "notification cannot be modelled here -- use a group mailbox",
+                    code="N3.not-static",
                 )
             ]
         recipients = _with_deputies(org, possible) if binding.include_deputies else possible
@@ -2753,6 +3189,8 @@ def _check_n3_addresses(
                         rule="N3",
                         node_id=node_id,
                         message=f"possible assignee '{who}' has no e-mail address",
+                        code="N3.no-address",
+                        params={"agent": str(who)},
                     )
                 )
         return findings
@@ -2764,10 +3202,9 @@ def _check_n3_addresses(
             ValidationFinding(
                 rule="N3",
                 node_id=node_id,
-                message=(
-                    "staff rule addresses no role or org unit, so there is no group "
-                    "mailbox to notify"
-                ),
+                message="staff rule addresses no role or org unit, so there is no group "
+                    "mailbox to notify",
+                code="N3.no-group",
             )
         )
     for kind, ref in groups:
@@ -2776,7 +3213,11 @@ def _check_n3_addresses(
             if role is None or not (role.mailbox or "").strip():
                 findings.append(
                     ValidationFinding(
-                        rule="N3", node_id=node_id, message=f"role '{ref}' has no group mailbox"
+                        rule="N3",
+                        node_id=node_id,
+                        message=f"role '{ref}' has no group mailbox",
+                        code="N3.role-no-mailbox",
+                        params={"ref": str(ref)},
                     )
                 )
         else:
@@ -2784,7 +3225,11 @@ def _check_n3_addresses(
             if unit is None or not (unit.mailbox or "").strip():
                 findings.append(
                     ValidationFinding(
-                        rule="N3", node_id=node_id, message=f"org unit '{ref}' has no mailbox"
+                        rule="N3",
+                        node_id=node_id,
+                        message=f"org unit '{ref}' has no mailbox",
+                        code="N3.unit-no-mailbox",
+                        params={"ref": str(ref)},
                     )
                 )
     if _node_refs(rule):
@@ -2792,10 +3237,9 @@ def _check_n3_addresses(
             ValidationFinding(
                 rule="N3",
                 node_id=node_id,
-                message=(
-                    "staff rule includes a prior-node performer, which has no group "
-                    "mailbox; use the per-agent mode for it"
-                ),
+                message="staff rule includes a prior-node performer, which has no group "
+                    "mailbox; use the per-agent mode for it",
+                code="N3.performer-no-mailbox",
             )
         )
     return findings
@@ -2819,10 +3263,10 @@ def _check_n4_template(
                     ValidationFinding(
                         rule="N4",
                         node_id=node_id,
-                        message=(
-                            f"{field} placeholder '{{{ref}}}' refers to unknown data "
-                            f"element '{ref}'"
-                        ),
+                        message=f"{field} placeholder '{{{ref}}}' refers to unknown data "
+                            f"element '{ref}'",
+                        code="N4.unknown-element",
+                        params={"field_name": str(field), "ref": str(ref)},
                     )
                 )
                 continue
@@ -2831,10 +3275,10 @@ def _check_n4_template(
                     ValidationFinding(
                         rule="N4",
                         node_id=node_id,
-                        message=(
-                            f"{field} placeholder '{{{ref}}}' refers to a non-INSTANCE data "
-                            f"element that is not available in the mail text"
-                        ),
+                        message=f"{field} placeholder '{{{ref}}}' refers to a non-INSTANCE data "
+                            f"element that is not available in the mail text",
+                        code="N4.not-instance",
+                        params={"field_name": str(field), "ref": str(ref)},
                     )
                 )
                 continue
@@ -2843,10 +3287,10 @@ def _check_n4_template(
                     ValidationFinding(
                         rule="N4",
                         node_id=node_id,
-                        message=(
-                            f"{field} placeholder '{{{ref}}}' is not guaranteed to be set "
-                            f"when this task becomes ready"
-                        ),
+                        message=f"{field} placeholder '{{{ref}}}' is not guaranteed to be set "
+                            f"when this task becomes ready",
+                        code="N4.not-set",
+                        params={"field_name": str(field), "ref": str(ref)},
                     )
                 )
     return findings
@@ -2936,6 +3380,7 @@ def _check_subprocesses(
                     rule="H1",
                     node_id=node.id,
                     message="SUBPROCESS node has no sub-process binding",
+                    code="H1.no-binding",
                 )
             )
     for node_id, binding in schema.sub_process_bindings.items():
@@ -2946,6 +3391,7 @@ def _check_subprocesses(
                     rule="H1",
                     node_id=node_id,
                     message="sub-process binding does not reference a SUBPROCESS node",
+                    code="H1.not-subprocess",
                 )
             )
             continue
@@ -2957,6 +3403,8 @@ def _check_subprocesses(
                         rule="H2",
                         node_id=node_id,
                         message=f"mapping references unknown parent data element '{parent_eid}'",
+                        code="H2.unknown-parent-element",
+                        params={"parent_element": str(parent_eid)},
                     )
                 )
         # H2 (local part): a mapped INPUT is copied into the child when it
@@ -2975,6 +3423,7 @@ def _check_subprocesses(
             ValidationFinding(
                 rule="H3",
                 message="sub-process hierarchy is cyclic (a process cannot contain itself)",
+                code="H3.cycle",
             )
         )
     return findings
@@ -2993,10 +3442,13 @@ def _check_subprocess_target(
             ValidationFinding(
                 rule="H1",
                 node_id=node_id,
-                message=(
-                    f"sub-process target '{binding.target_schema_id}' "
-                    f"v{binding.target_version} not found"
-                ),
+                message=f"sub-process target '{binding.target_schema_id}' "
+                    f"v{binding.target_version} not found",
+                code="H1.target-missing",
+                params={
+                    "target": str(binding.target_schema_id),
+                    "version": str(binding.target_version),
+                },
             )
         )
         return findings
@@ -3005,10 +3457,13 @@ def _check_subprocess_target(
             ValidationFinding(
                 rule="H1",
                 node_id=node_id,
-                message=(
-                    f"sub-process target '{binding.target_schema_id}' is "
-                    f"{target.lifecycle_state.value}, must be RELEASED"
-                ),
+                message=f"sub-process target '{binding.target_schema_id}' is "
+                    f"{target.lifecycle_state.value}, must be RELEASED",
+                code="H1.target-not-released",
+                params={
+                    "target": str(binding.target_schema_id),
+                    "state": str(target.lifecycle_state.value),
+                },
             )
         )
     # H2 (type conformance): each mapped target element must exist and match.
@@ -3026,6 +3481,8 @@ def _check_subprocess_target(
                         rule="H2",
                         node_id=node_id,
                         message=f"{kind} maps unknown target element '{target_eid}'",
+                        code="H2.unknown-target-element",
+                        params={"direction": str(kind), "target_element": str(target_eid)},
                     )
                 )
                 continue
@@ -3034,11 +3491,17 @@ def _check_subprocess_target(
                     ValidationFinding(
                         rule="H2",
                         node_id=node_id,
-                        message=(
-                            f"{kind} type mismatch: target '{target_eid}' is "
+                        message=f"{kind} type mismatch: target '{target_eid}' is "
                             f"{target_el.data_type.value}, parent '{parent_eid}' is "
-                            f"{parent_el.data_type.value}"
-                        ),
+                            f"{parent_el.data_type.value}",
+                        code="H2.type-mismatch",
+                        params={
+                            "direction": str(kind),
+                            "target_element": str(target_eid),
+                            "target_type": str(target_el.data_type.value),
+                            "parent_element": str(parent_eid),
+                            "parent_type": str(parent_el.data_type.value),
+                        },
                     )
                 )
     # H2 (data-passing soundness): a mapped OUTPUT is written back into the
@@ -3052,11 +3515,15 @@ def _check_subprocess_target(
                     ValidationFinding(
                         rule="H2",
                         node_id=node_id,
-                        message=(
-                            f"output '{target_eid}' is not written on every path of "
+                        message=f"output '{target_eid}' is not written on every path of "
                             f"sub-process '{binding.target_schema_id}', so parent "
-                            f"element '{parent_eid}' would be undefined"
-                        ),
+                            f"element '{parent_eid}' would be undefined",
+                        code="H2.output-not-written",
+                        params={
+                            "target_element": str(target_eid),
+                            "target": str(binding.target_schema_id),
+                            "parent_element": str(parent_eid),
+                        },
                     )
                 )
     return findings
@@ -3096,11 +3563,11 @@ def _check_subprocess_inputs_supplied(
             ValidationFinding(
                 rule="H2",
                 node_id=node_id,
-                message=(
-                    f"input '{target_eid}' is mapped from parent element "
+                message=f"input '{target_eid}' is mapped from parent element "
                     f"'{parent_el.name}', which is not guaranteed to be written "
-                    f"on every path to this sub-process"
-                ),
+                    f"on every path to this sub-process",
+                code="H2.input-not-written",
+                params={"target_element": str(target_eid), "parent_element": str(parent_el.name)},
             )
         )
     return findings
@@ -3143,6 +3610,8 @@ def _check_follow_up_condition(
             ValidationFinding(
                 rule="F4",
                 message=f"conditional follow-up '{link_id}' has no condition",
+                code="F4.no-condition",
+                params={"link": str(link_id)},
             )
         ]
     try:
@@ -3152,6 +3621,8 @@ def _check_follow_up_condition(
             ValidationFinding(
                 rule="F4",
                 message=f"follow-up '{link_id}' has an invalid condition: {exc}",
+                code="F4.invalid-condition",
+                params={"link": str(link_id), "error": str(exc)},
             )
         ]
     findings: list[ValidationFinding] = []
@@ -3160,10 +3631,10 @@ def _check_follow_up_condition(
             findings.append(
                 ValidationFinding(
                     rule="F4",
-                    message=(
-                        f"follow-up '{link_id}' condition references unknown data "
-                        f"element '{name}'"
-                    ),
+                    message=f"follow-up '{link_id}' condition references unknown data "
+                        f"element '{name}'",
+                    code="F4.unknown-element",
+                    params={"link": str(link_id), "element": str(name)},
                 )
             )
     if findings or _structure_broken(schema):
@@ -3184,10 +3655,10 @@ def _check_follow_up_condition(
         findings.append(
             ValidationFinding(
                 rule="F4",
-                message=(
-                    f"follow-up '{link_id}' condition reads '{element.name}', which "
-                    f"is not written on every path to the end of the process"
-                ),
+                message=f"follow-up '{link_id}' condition reads '{element.name}', which "
+                    f"is not written on every path to the end of the process",
+                code="F4.condition-not-written",
+                params={"link": str(link_id), "element": str(element.name)},
             )
         )
     return findings
@@ -3204,10 +3675,10 @@ def _check_follow_ups(
                 findings.append(
                     ValidationFinding(
                         rule="F2",
-                        message=(
-                            f"follow-up '{link.id}' handover references unknown source "
-                            f"element '{source_eid}'"
-                        ),
+                        message=f"follow-up '{link.id}' handover references unknown source "
+                            f"element '{source_eid}'",
+                        code="F2.unknown-source",
+                        params={"link": str(link.id), "source_element": str(source_eid)},
                     )
                 )
         # F4: a CONDITIONAL trigger needs a well-formed condition that only
@@ -3222,10 +3693,10 @@ def _check_follow_ups(
             findings.append(
                 ValidationFinding(
                     rule="F1",
-                    message=(
-                        f"follow-up target '{link.target_schema_id}' has no "
-                        f"matching released version"
-                    ),
+                    message=f"follow-up target '{link.target_schema_id}' has no "
+                        f"matching released version",
+                    code="F1.no-released-version",
+                    params={"target": str(link.target_schema_id)},
                 )
             )
             continue
@@ -3233,10 +3704,13 @@ def _check_follow_ups(
             findings.append(
                 ValidationFinding(
                     rule="F1",
-                    message=(
-                        f"follow-up target '{link.target_schema_id}' is "
-                        f"{target.lifecycle_state.value}, must be RELEASED"
-                    ),
+                    message=f"follow-up target '{link.target_schema_id}' is "
+                        f"{target.lifecycle_state.value}, must be RELEASED",
+                    code="F1.not-released",
+                    params={
+                        "target": str(link.target_schema_id),
+                        "state": str(target.lifecycle_state.value),
+                    },
                 )
             )
         # F2 (type conformance): each mapped target start element must match.
@@ -3247,10 +3721,10 @@ def _check_follow_ups(
                 findings.append(
                     ValidationFinding(
                         rule="F2",
-                        message=(
-                            f"follow-up '{link.id}' handover maps unknown target "
-                            f"element '{target_eid}'"
-                        ),
+                        message=f"follow-up '{link.id}' handover maps unknown target "
+                            f"element '{target_eid}'",
+                        code="F2.unknown-target",
+                        params={"link": str(link.id), "target_element": str(target_eid)},
                     )
                 )
                 continue
@@ -3258,11 +3732,17 @@ def _check_follow_ups(
                 findings.append(
                     ValidationFinding(
                         rule="F2",
-                        message=(
-                            f"follow-up '{link.id}' type mismatch: target "
+                        message=f"follow-up '{link.id}' type mismatch: target "
                             f"'{target_eid}' is {target_el.data_type.value}, source "
-                            f"'{source_eid}' is {source_el.data_type.value}"
-                        ),
+                            f"'{source_eid}' is {source_el.data_type.value}",
+                        code="F2.type-mismatch",
+                        params={
+                            "link": str(link.id),
+                            "target_element": str(target_eid),
+                            "target_type": str(target_el.data_type.value),
+                            "source_element": str(source_eid),
+                            "source_type": str(source_el.data_type.value),
+                        },
                     )
                 )
     return findings
@@ -3295,9 +3775,9 @@ def _check_temporal(schema: ProcessSchema) -> list[ValidationFinding]:
         findings.append(
             ValidationFinding(
                 rule="T1",
-                message=(
-                    f"deadline_seconds must be >= 0, got {schema.deadline_seconds}"
-                ),
+                message=f"deadline_seconds must be >= 0, got {schema.deadline_seconds}",
+                code="T1.negative-deadline",
+                params={"value": str(schema.deadline_seconds)},
             )
         )
     for node_id, constraint in schema.time_constraints.items():
@@ -3307,6 +3787,8 @@ def _check_temporal(schema: ProcessSchema) -> list[ValidationFinding]:
                     rule="T1",
                     message=f"time constraint references unknown node '{node_id}'",
                     node_id=node_id,
+                    code="T1.unknown-node",
+                    params={"node": str(node_id)},
                 )
             )
             continue
@@ -3315,11 +3797,11 @@ def _check_temporal(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="T1",
-                    message=(
-                        f"max_duration_seconds of '{node_id}' must be >= 0, "
-                        f"got {duration}"
-                    ),
+                    message=f"max_duration_seconds of '{node_id}' must be >= 0, "
+                        f"got {duration}",
                     node_id=node_id,
+                    code="T1.negative-duration",
+                    params={"node": str(node_id), "value": str(duration)},
                 )
             )
         lead = constraint.target_lead_seconds
@@ -3327,11 +3809,11 @@ def _check_temporal(schema: ProcessSchema) -> list[ValidationFinding]:
             findings.append(
                 ValidationFinding(
                     rule="T1",
-                    message=(
-                        f"target_lead_seconds of '{node_id}' must be >= 0, "
-                        f"got {lead}"
-                    ),
+                    message=f"target_lead_seconds of '{node_id}' must be >= 0, "
+                        f"got {lead}",
                     node_id=node_id,
+                    code="T1.negative-lead",
+                    params={"node": str(node_id), "value": str(lead)},
                 )
             )
 

@@ -25,7 +25,14 @@ from procworks import (
     serial_insert,
     worklist,
 )
-from procworks.model import InstanceState, NodeState, NodeType, ProcessSchema
+from procworks.model import (
+    InstanceState,
+    NodeState,
+    NodeType,
+    ProcessSchema,
+    StaffRule,
+    StaffRuleKind,
+)
 from procworks.store import InMemoryInstanceStore
 from procworks.validator import CorrectnessError
 
@@ -80,8 +87,9 @@ def test_insert_into_unexecuted_region_runs_through_variant() -> None:
     instance = instantiate(schema, context=context)
 
     # A is ready, edge A->B not signaled, B not yet activated -> R1 holds.
+    # The new step is worked by the same people as A (B2, VAL-03).
     instance = adhoc_insert_activity(
-        instance, schema, a_id, "Zusatzpruefung"
+        instance, schema, a_id, "Zusatzpruefung", staff_rule=schema.staff_rules[a_id]
     )
     assert instance.ad_hoc_schema is not None
     assert len(instance.ad_hoc_deltas) == 1
@@ -99,6 +107,42 @@ def test_insert_into_unexecuted_region_runs_through_variant() -> None:
     instance = complete_activity(instance, variant, new_id, context=context)
     instance = complete_activity(instance, variant, b_id, context=context)
     assert instance.state is InstanceState.COMPLETED
+
+
+def test_insert_without_staff_rule_is_rejected_by_b2() -> None:
+    """VAL-03 (Validierung 2026-09-25): an ad-hoc step without a staff rule was
+    structurally correct, got activated -- and stood in nobody's worklist.
+
+    The core now demands the rule for the *new* step (``check_executable``
+    restricted to that node; B2 itself stays outside ``validate()``).
+    """
+
+    schema = _released_serial()
+    a_id = _ordered_activities(schema)[0]
+    context = ExecutionContext(_resolver_for(schema), InMemoryInstanceStore())
+    instance = instantiate(schema, context=context)
+
+    with pytest.raises(CorrectnessError, match=r"\[B2\]") as exc:
+        adhoc_insert_activity(instance, schema, a_id, "Ohne Bearbeiter")
+
+    [finding] = exc.value.findings
+    assert (finding.rule, finding.code) == ("B2", "B2.no-staff")
+    assert finding.node_id not in schema.nodes  # it is the new step, nothing else
+
+
+def test_insert_with_an_unresolvable_staff_rule_is_rejected_by_z() -> None:
+    # The rule travels through validate() like every other rule: an unknown
+    # role is Z1 -- so an ad-hoc step cannot smuggle in a broken assignment.
+    schema = _released_serial()
+    a_id = _ordered_activities(schema)[0]
+    context = ExecutionContext(_resolver_for(schema), InMemoryInstanceStore())
+    instance = instantiate(schema, context=context)
+
+    with pytest.raises(CorrectnessError, match=r"\[Z1\]"):
+        adhoc_insert_activity(
+            instance, schema, a_id, "Falsch besetzt",
+            staff_rule=StaffRule(kind=StaffRuleKind.ROLE, ref="ghost"),
+        )
 
 
 def test_insert_after_executed_node_violates_r1() -> None:

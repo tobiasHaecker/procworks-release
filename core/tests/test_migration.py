@@ -216,7 +216,9 @@ def test_m5_adhoc_instance_blocks_migration() -> None:
     a_id, b_id = _ordered_activities(source)
 
     # Give the instance an ad-hoc delta.
-    instance = adhoc_insert_activity(instance, source, a_id, "Sonderschritt")
+    instance = adhoc_insert_activity(
+        instance, source, a_id, "Sonderschritt", staff_rule=source.staff_rules[a_id]
+    )
     assert instance.ad_hoc_deltas
 
     target = new_revision(source)

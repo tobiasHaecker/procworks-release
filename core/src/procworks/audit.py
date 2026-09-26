@@ -57,6 +57,13 @@ class EventType(StrEnum):
     ADHOC_DELETED = "ADHOC_DELETED"
     ADHOC_RENAMED = "ADHOC_RENAMED"
     INSTANCE_MIGRATED = "INSTANCE_MIGRATED"
+    #: A process variable was set directly on an instance (``PUT …/data``),
+    #: outside an activity completion. One event per changed element; ``detail``
+    #: carries ``element``, ``old``/``new`` (JSON) and, where known, ``actor``
+    #: and a supervision ``reason``. Type-filtered like the claim events -- no
+    #: KPI/mining impact, so the audit need not stay silent to keep the figures
+    #: clean (Validierung 2026-09, VAL-01).
+    INSTANCE_DATA_SET = "INSTANCE_DATA_SET"
     INSTANCE_COMPLETED = "INSTANCE_COMPLETED"
     MAIL_SENT = "MAIL_SENT"          # modelled notification delivered (metadata only)
     MAIL_FAILED = "MAIL_FAILED"      # notification dead-lettered after retries (metadata)

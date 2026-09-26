@@ -128,7 +128,8 @@ Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt s
   Login-Fenster, Aufgabenliste und Bearbeitung sind alle dort enthalten.
 - Mit der Rolle **Bearbeiter** (operator) blendet die Navigation automatisch nur
   **„Meine Aufgaben"** (und **Monitoring**) ein – Modellier- und Admin-Sichten
-  bleiben verborgen.
+  bleiben verborgen. Im Monitoring sieht ein Bearbeiter die Kennzahlen aller
+  Vorgänge, einzeln aber nur die Vorgänge, an denen er beteiligt ist oder war.
 - Ein **Modellierer** (modeler) ist zugleich Bearbeiter: er sieht „Meine
   Aufgaben" und „Ausführung" zusätzlich zu den Modellier-Sichten und kann eigene
   **Entwürfe als Test-Instanz** starten (diese Testläufe zählen nicht ins

@@ -452,3 +452,48 @@ def test_full_stack_compose_passes_the_seed_switches_through_defaulting_to_off()
     for var in ("PROCWORKS_LOAD_DEMO", "PROCWORKS_LOAD_O2C"):
         assert f'{var}: "${{{var}:-}}"' in compose, f"{var} is not passed through"
         assert f"{var}: 1" not in compose, f"{var} must not default to on"
+
+
+def test_co_served_spa_carries_csp_but_the_api_and_swagger_do_not() -> None:
+    """VAL-06: the SPA gets CSP and X-Frame-Options, also in the demo container.
+
+    Behind Caddy the Caddyfile sets them; the single-container demo serves the
+    SPA itself, so ``_SpaSecurityHeaders`` does. API calls and Swagger (CDN
+    scripts) stay without the CSP, or the API docs would break.
+    """
+    if not (WEB_DIR / "index.html").is_file():  # pragma: no cover - repo layout guard
+        pytest.skip("web/ SPA not present in this checkout")
+    from procworks.api import SPA_SECURITY_HEADERS
+
+    probe = FastAPI()
+
+    @probe.get("/auth/config")
+    def _cfg() -> dict[str, bool]:
+        return {"ok": True}
+
+    assert _maybe_mount_web(probe, str(WEB_DIR)) is True
+
+    with TestClient(probe) as c:
+        page = c.get("/")
+        api = c.get("/api/auth/config")
+        docs = c.get("/docs")
+
+    for name, value in SPA_SECURITY_HEADERS.items():
+        assert page.headers[name] == value
+    assert "content-security-policy" not in api.headers
+    assert "content-security-policy" not in docs.headers
+
+
+def test_spa_headers_match_the_caddyfile() -> None:
+    """One CSP for both ways the SPA is served (Caddy and demo container)."""
+    from procworks.api import SPA_SECURITY_HEADERS
+
+    caddyfile = (Path(__file__).resolve().parents[2] / "deploy" / "Caddyfile").read_text()
+    spa_block = caddyfile.split("handle {", 1)[1]
+    csp = SPA_SECURITY_HEADERS["Content-Security-Policy"]
+    assert f'Content-Security-Policy "{csp}"' in spa_block
+    assert "X-Frame-Options DENY" in spa_block
+    assert "frame-ancestors 'none'" in csp and "script-src 'self'" in csp
+    # Only in the SPA block, never in the global one: /api/docs (Swagger) loads
+    # CDN scripts and would break.
+    assert caddyfile.count("Content-Security-Policy") == 1

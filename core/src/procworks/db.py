@@ -376,10 +376,12 @@ class SqlAlchemyAuditLog:
         """Return the newest recorded timestamp as epoch seconds (0.0 if empty).
 
         A monotone lower bound on real time for the licensing ratchet.
+        The explicit annotation matters: since SQLAlchemy 2.1 ``func.max``
+        is typed as ``Any``, which ``mypy --strict`` rejects on return.
         """
 
         with Session(self._engine) as session:
-            value = session.scalar(select(func.max(AuditEventRow.timestamp)))
+            value: datetime | None = session.scalar(select(func.max(AuditEventRow.timestamp)))
             if value is None:
                 return 0.0
             if value.tzinfo is None:

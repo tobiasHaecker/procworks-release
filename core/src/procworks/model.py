@@ -448,6 +448,15 @@ class FormField(BaseModel):
     options: list[str] = Field(default_factory=list)
     help_text: str | None = None
     group: str = ""
+    #: Optional input checks (Validierung 2026-09-25, VAL-22). ``min_value`` /
+    #: ``max_value`` bound a NUMBER field, ``pattern`` (a regular expression the
+    #: whole value must match) and ``max_length`` a TEXT/TEXTAREA field. U2
+    #: checks at modelling time that they fit the field; the boundary enforces
+    #: them on every completion (rule U4), the client marks the field before.
+    min_value: float | None = None
+    max_value: float | None = None
+    pattern: str | None = None
+    max_length: int | None = None
 
 
 class Form(BaseModel):
@@ -1417,6 +1426,11 @@ class ProcessSchema(BaseModel):
     #: Optional work-item priorities per interactive node (roadmap E8). Absent
     #: entries default to ``MEDIUM/MEDIUM`` when a worklist is rendered.
     node_priorities: dict[str, WorkItemPriority] = Field(default_factory=dict)
+    #: Up to two INSTANCE data elements whose values name an instance and its
+    #: tasks -- "Bestellung 4711 · Müller GmbH" instead of ``instance_14``
+    #: (Validierung 2026-09-25, VAL-17). Presentation only: no correctness rule
+    #: reads the values; U5 only checks that the elements exist.
+    display_fields: list[str] = Field(default_factory=list)
     #: Optional modelled e-mail notifications per ACTIVITY node id (rule group
     #: N). Empty by default so the mail rules N1-N4 stay silent for models
     #: without notifications (fully additive). An entry means "send a mail when

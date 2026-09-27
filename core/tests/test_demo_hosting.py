@@ -497,3 +497,21 @@ def test_spa_headers_match_the_caddyfile() -> None:
     # Only in the SPA block, never in the global one: /api/docs (Swagger) loads
     # CDN scripts and would break.
     assert caddyfile.count("Content-Security-Policy") == 1
+
+
+def test_full_stack_uses_the_released_images_of_this_version() -> None:
+    """VAL-12: Compose built API and web from source; the Trivy-scanned ghcr
+    images were never used, and "update via container image" meant git pull +
+    rebuild. The stack now names the release images, defaulting to the version
+    of this checkout -- which must move with every release, hence this guard.
+    """
+    import tomllib
+
+    root = Path(__file__).resolve().parents[2]
+    compose = (root / "deploy" / "docker-compose.full.yml").read_text(encoding="utf-8")
+    version = tomllib.loads((root / "core" / "pyproject.toml").read_text())["project"]["version"]
+    for image in ("procworks-api", "procworks-web"):
+        expected = f"image: ghcr.io/tobiashaecker/{image}:${{PROCWORKS_VERSION:-{version}}}"
+        assert expected in compose, (
+            f"{image}: Compose-Standardversion passt nicht zu pyproject ({version})"
+        )

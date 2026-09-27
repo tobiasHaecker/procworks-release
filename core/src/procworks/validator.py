@@ -37,6 +37,7 @@ from procworks.model import (
     EscalationKind,
     FilterOperator,
     FollowUpTrigger,
+    FormField,
     LifecycleState,
     MailBinding,
     MailRecipientMode,
@@ -160,6 +161,7 @@ def validate(
     findings += _check_k3_reachability(schema)
     findings += _check_data_flow(schema)
     findings += _check_forms(schema)
+    findings += _check_display_fields(schema)
     findings += _check_connectors(schema)
     findings += _check_scalar_queries(schema)
     findings += _check_scalar_writes(schema)
@@ -245,6 +247,127 @@ def check_executable(schema: ProcessSchema) -> list[ValidationFinding]:
 
 # --- K2: single start/end, well-formed in/out degrees --------------------
 
+
+#: Widgets that take free text -- the only ones a pattern or length can bound.
+_TEXT_WIDGETS = frozenset({WidgetKind.TEXT, WidgetKind.TEXTAREA})
+
+
+def _check_field_constraints(node_id: str, field: FormField) -> list[ValidationFinding]:
+    """U2 for the optional input checks of a mask field (VAL-22).
+
+    ``min_value``/``max_value`` only on a NUMBER field and not crossed;
+    ``pattern`` and ``max_length`` only on TEXT/TEXTAREA, the pattern a valid
+    regular expression, the length at least 1. The checks themselves run on
+    every completion (U4, :func:`form_value_findings`).
+    """
+
+    import re
+
+    findings: list[ValidationFinding] = []
+
+    def fail(message: str, *, code: str) -> None:
+        findings.append(
+            ValidationFinding(
+                rule="U2",
+                node_id=node_id,
+                message=f"field '{field.id}': {message}",
+                code=code,
+                params={"field": field.label or field.id},
+            )
+        )
+
+    bounded = field.min_value is not None or field.max_value is not None
+    if bounded and field.widget is not WidgetKind.NUMBER:
+        fail("bounds are only allowed on a number field", code="U2.bounds-not-number")
+    if (
+        field.min_value is not None
+        and field.max_value is not None
+        and field.min_value > field.max_value
+    ):
+        fail("min_value is greater than max_value", code="U2.bounds-order")
+    textual = field.pattern is not None or field.max_length is not None
+    if textual and field.widget not in _TEXT_WIDGETS:
+        fail(
+            "pattern/max_length are only allowed on a text field",
+            code="U2.text-rule-not-text",
+        )
+    if field.pattern is not None:
+        try:
+            re.compile(field.pattern)
+        except re.error:
+            fail("pattern is not a valid regular expression", code="U2.pattern-invalid")
+    if field.max_length is not None and field.max_length < 1:
+        fail("max_length must be at least 1", code="U2.length-invalid")
+    return findings
+
+
+def form_value_findings(
+    schema: ProcessSchema, node_id: str, values: dict[str, object]
+) -> list[ValidationFinding]:
+    """U4: check submitted values against the input checks of the step's mask.
+
+    Runs at the boundary on every completion (web and ``/v1`` alike), so a
+    bound cannot be bypassed by calling the API directly (VAL-22). Only
+    values that are present are checked -- whether a required field must be
+    present stays the client's matter, as before. Values of the wrong type
+    are left to D3.
+    """
+
+    import re
+
+    form = schema.forms.get(node_id)
+    if form is None:
+        return []
+    findings: list[ValidationFinding] = []
+    for field in form.fields:
+        if field.element_id not in values:
+            continue
+        value = values[field.element_id]
+        params = {"field": field.label or field.id}
+
+        def fail(message: str, *, code: str, extra: dict[str, str]) -> None:
+            findings.append(
+                ValidationFinding(
+                    rule="U4",
+                    node_id=node_id,
+                    message=message,
+                    code=code,
+                    params={**params, **extra},  # noqa: B023 - used right away
+                )
+            )
+
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if field.min_value is not None and value < field.min_value:
+                fail(
+                    f"'{field.id}' is below {field.min_value}",
+                    code="U4.below-min",
+                    extra={"min": f"{field.min_value:g}"},
+                )
+            if field.max_value is not None and value > field.max_value:
+                fail(
+                    f"'{field.id}' is above {field.max_value}",
+                    code="U4.above-max",
+                    extra={"max": f"{field.max_value:g}"},
+                )
+        if isinstance(value, str):
+            if field.max_length is not None and len(value) > field.max_length:
+                fail(
+                    f"'{field.id}' is longer than {field.max_length}",
+                    code="U4.too-long",
+                    extra={"max": str(field.max_length)},
+                )
+            if field.pattern is not None:
+                try:
+                    matches = re.fullmatch(field.pattern, value) is not None
+                except re.error:
+                    matches = True  # U2 rejects such a pattern at modelling time
+                if not matches:
+                    fail(
+                        f"'{field.id}' does not match the required pattern",
+                        code="U4.pattern",
+                        extra={},
+                    )
+    return findings
 
 def _check_k2_endpoints_and_degrees(schema: ProcessSchema) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
@@ -1540,6 +1663,52 @@ def _must_executed_before(schema: ProcessSchema) -> dict[str, set[str]]:
 # --- U1-U3: input-mask (form designer) well-formedness -------------------
 
 
+#: How many data elements may name an instance (VAL-17) -- more no longer fits
+#: a worklist row.
+MAX_DISPLAY_FIELDS = 2
+
+
+def _check_display_fields(schema: ProcessSchema) -> list[ValidationFinding]:
+    """U5: the elements that name an instance exist and are INSTANCE data.
+
+    Presentation only (VAL-17): the check keeps the list meaningful, no rule
+    depends on the values. EXTERNAL elements are excluded because their value
+    is fetched per step and is not part of the instance data a worklist shows.
+    """
+
+    findings: list[ValidationFinding] = []
+    if len(schema.display_fields) > MAX_DISPLAY_FIELDS:
+        findings.append(
+            ValidationFinding(
+                rule="U5",
+                message=f"at most {MAX_DISPLAY_FIELDS} display fields are allowed",
+                code="U5.too-many",
+                params={"max": str(MAX_DISPLAY_FIELDS)},
+            )
+        )
+    for element_id in schema.display_fields:
+        element = schema.data_elements.get(element_id)
+        if element is None:
+            findings.append(
+                ValidationFinding(
+                    rule="U5",
+                    message=f"display field '{element_id}' is no data element",
+                    code="U5.unknown-element",
+                    params={"element": element_id},
+                )
+            )
+        elif element.source is not DataSourceKind.INSTANCE:
+            findings.append(
+                ValidationFinding(
+                    rule="U5",
+                    message=f"display field '{element_id}' must be an INSTANCE element",
+                    code="U5.not-instance",
+                    params={"element": element.name},
+                )
+            )
+    return findings
+
+
 def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
     """Input-mask rules U1-U3 (additive; silent for models without masks).
 
@@ -1679,6 +1848,10 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                         params={"field": str(field.id)},
                     )
                 )
+
+            # U2 (VAL-22): input checks fit the field -- bounds on a number,
+            # pattern/length on text, bounds in order, pattern compiles.
+            findings += _check_field_constraints(node_id, field)
 
             # U3: the field must be backed by a matching data access. This is the
             # bridge that lets D1 govern "no read without a prior write".

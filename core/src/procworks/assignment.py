@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import UTC, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from procworks import worklist_priority
 from procworks.model import (
@@ -50,6 +50,40 @@ from procworks.worklist_priority import TimeContext
 
 #: Default work-item priority when a node carries no explicit annotation.
 _DEFAULT_PRIORITY = WorkItemPriority()
+
+
+class DisplayValue(BaseModel):
+    """One value that names an instance (``ProcessSchema.display_fields``, VAL-17).
+
+    ``value`` is the raw instance value (``None`` while unset); wording and
+    number/date formatting are the client's matter, as everywhere.
+    """
+
+    element_id: str
+    name: str
+    value: object | None = None
+
+
+def display_values(schema: ProcessSchema, instance: ProcessInstance) -> list[DisplayValue]:
+    """The naming values of an instance, in the order the model lists them.
+
+    Pure read. Elements that no longer exist are skipped (U5 prevents that on
+    the current schema; an instance may still run on an older revision).
+    """
+
+    result: list[DisplayValue] = []
+    for element_id in schema.display_fields:
+        element = schema.data_elements.get(element_id)
+        if element is None:
+            continue
+        result.append(
+            DisplayValue(
+                element_id=element_id,
+                name=element.name,
+                value=instance.data_values.get(element_id),
+            )
+        )
+    return result
 
 
 class OpenTask(BaseModel):
@@ -99,6 +133,9 @@ class OpenTask(BaseModel):
     detail: NodeDetailState | None = None
     #: Reason text of a FAILED detail (empty otherwise).
     detail_reason: str = ""
+    #: The values that name the instance (``display_fields``, VAL-17) -- two
+    #: equal tasks of different instances were indistinguishable in a worklist.
+    context: list[DisplayValue] = Field(default_factory=list)
 
 
 def absent_agent_ids(
@@ -224,6 +261,7 @@ def open_tasks(
     tasks: list[OpenTask] = []
     if instance.state is not InstanceState.RUNNING:
         return tasks
+    context = display_values(schema, instance)
     for node_id, node_state in instance.node_states.items():
         if node_state not in (NodeState.ACTIVATED, NodeState.RUNNING):
             continue
@@ -248,6 +286,7 @@ def open_tasks(
             escalated_stage=instance.escalated_stages.get(node_id, 0),
             detail=instance.node_details.get(node_id),
             detail_reason=instance.node_detail_reason.get(node_id, ""),
+            context=context,
         )
         if ctx is not None:
             view = worklist_priority.assess(schema, node_id, ctx)

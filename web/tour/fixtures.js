@@ -66,6 +66,7 @@ const TOUR_FIXTURES = {
           }
         },
         "deadline_seconds": null,
+        "display_fields": [],
         "edges": [
           {
             "condition": null,
@@ -228,6 +229,7 @@ const TOUR_FIXTURES = {
           }
         },
         "deadline_seconds": null,
+        "display_fields": [],
         "edges": [
           {
             "condition": null,
@@ -402,6 +404,7 @@ const TOUR_FIXTURES = {
           }
         },
         "deadline_seconds": null,
+        "display_fields": [],
         "edges": [
           {
             "condition": null,

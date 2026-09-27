@@ -204,11 +204,15 @@ Datei speichern und schließen.
 Aus `C:\ProcWorks`:
 
 ```powershell
-docker compose -f deploy/docker-compose.full.yml up --build -d
+docker compose -f deploy/docker-compose.full.yml up -d
 ```
 
-- `--build` baut die Images beim ersten Mal (dauert ein paar Minuten).
+- Beim ersten Start lädt Docker die fertigen Images von `ghcr.io` (die Version
+  dieses Checkouts, vom Release geprüft auf Sicherheitslücken). Gebaut wird
+  nichts; eine andere Version wählt `PROCWORKS_VERSION`, etwa
+  `$env:PROCWORKS_VERSION="1.24.0"` vor dem Aufruf.
 - `-d` startet im Hintergrund.
+- Nur wer den Quelltext selbst ändert, baut mit `up --build -d` aus dem Checkout.
 
 Der API-Container wendet beim Start automatisch die Datenbank-Migrationen an und
 legt den Initial-Admin an.
@@ -329,10 +333,13 @@ docker compose -f deploy/docker-compose.full.yml up -d
 ```powershell
 cd C:\ProcWorks
 git pull
-docker compose -f deploy/docker-compose.full.yml up --build -d
+docker compose -f deploy/docker-compose.full.yml pull
+docker compose -f deploy/docker-compose.full.yml up -d
 ```
 
-Migrationen werden beim Start automatisch angewendet.
+`git pull` bringt die Compose-Datei der neuen Version mit, `pull` lädt deren
+Images, `up -d` tauscht die Container aus. Migrationen werden beim Start
+automatisch angewendet.
 
 ### Datensicherung (automatisch)
 
@@ -392,7 +399,7 @@ New-NetFirewallRule -DisplayName "ProcWorks HTTPS" -Direction Inbound -Protocol 
 | `docker` wird nicht gefunden | Neue PowerShell öffnen; Docker Desktop gestartet und „Engine running"? |
 | Container startet nicht, Logs zeigen DB-Fehler | DB-Passwort in `POSTGRES_PASSWORD` und `DATABASE_URL` müssen identisch sein. |
 | `wsl --install` schlägt fehl | Virtualisierung im BIOS/UEFI bzw. in der VM aktivieren; danach neu starten. |
-| Login-Fenster erscheint nicht | `PROCWORKS_AUTH: "password"` im `api`-Block gesetzt? Container nach Änderung neu bauen (`up --build -d`). |
+| Login-Fenster erscheint nicht | `PROCWORKS_AUTH: "password"` im `api`-Block gesetzt? Container nach der Änderung neu erzeugen (`up -d`). |
 | Anmeldung als `admin` schlägt fehl | `PROCWORKS_ADMIN_LOGIN`/`PROCWORKS_ADMIN_PASSWORD` waren beim **ersten** Start nicht gesetzt. Setzen und Stack neu starten – der Admin wird dann angelegt. |
 | HTTPS-Zertifikat wird nicht ausgestellt | Domain muss per DNS auf den Server zeigen, Ports 80+443 aus dem Internet erreichbar; gültige `ACME_EMAIL` setzen. |
 

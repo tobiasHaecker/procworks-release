@@ -37,7 +37,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from procworks.audit import AuditEvent, EventType, chain_hash
-from procworks.auth_password import User
+from procworks.auth_password import User, _SessionInfo
 from procworks.licensing import AgentBinding, License, PendingClaim, TimeAnchor
 from procworks.model import (
     AbsenceEntry,
@@ -464,6 +464,64 @@ class SqlAlchemyCredentialStore:
             if row is not None:
                 session.delete(row)
                 session.commit()
+
+
+class SessionRow(Base):
+    """One login session (password mode); keyed by the token's SHA-256 digest.
+
+    VAL-11: sessions used to live only in memory, so a restart or update logged
+    everybody out. The clear token is never stored -- only its digest.
+    """
+
+    __tablename__ = "auth_session"
+
+    digest: Mapped[str] = mapped_column(String, primary_key=True)
+    login: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SqlAlchemySessionStore:
+    """Login sessions in the database (``auth_session``), see ``SessionStore``.
+
+    Same engine/URL conventions as the credential store. ``expires_at`` is
+    stored timezone-aware; SQLite returns it naive, so it is re-attached as UTC
+    on read.
+    """
+
+    def __init__(self, url: str, *, create_tables: bool = False) -> None:
+        self._engine = create_engine(url, future=True)
+        if create_tables:
+            Base.metadata.create_all(self._engine)
+
+    def get(self, digest: str) -> _SessionInfo | None:
+        with Session(self._engine) as session:
+            row = session.get(SessionRow, digest)
+            if row is None:
+                return None
+            expires = row.expires_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=UTC)
+            return _SessionInfo(login=row.login, expires_at=expires)
+
+    def put(self, digest: str, info: _SessionInfo) -> None:
+        with Session(self._engine) as session:
+            session.merge(SessionRow(digest=digest, login=info.login, expires_at=info.expires_at))
+            session.commit()
+
+    def delete(self, digest: str) -> None:
+        with Session(self._engine) as session:
+            session.execute(delete(SessionRow).where(SessionRow.digest == digest))
+            session.commit()
+
+    def delete_for_login(self, login: str) -> None:
+        with Session(self._engine) as session:
+            session.execute(delete(SessionRow).where(SessionRow.login == login))
+            session.commit()
+
+    def purge_expired(self, now: datetime) -> None:
+        with Session(self._engine) as session:
+            session.execute(delete(SessionRow).where(SessionRow.expires_at <= now))
+            session.commit()
 
 
 class ExternalTaskRow(Base):

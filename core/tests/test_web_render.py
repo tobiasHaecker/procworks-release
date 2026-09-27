@@ -1278,7 +1278,24 @@ def test_insert_dialog_blocks_variants_without_their_data_element() -> None:
     assert "function syncInsertEnabled()" in body
     assert 'dialog = openModal("Schritt einf' in body
     assert "dialog.confirmBtn.disabled = blocked" in body
-    assert body.count("insert-blocked") == 2  # Verzweigung + Schleife
+    # Nur noch die Schleife: Fuer die Verzweigung legt der Dialog das Merkmal
+    # seit VAL-15 selbst an, statt den Nutzer wegzuschicken.
+    assert body.count("insert-blocked") == 1
+
+
+def test_xor_insert_offers_to_create_and_bind_its_discriminator() -> None:
+    """VAL-15: Das Entscheidungsmerkmal musste vorher woanders entstehen und an
+    einem Schritt davor geschrieben werden."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = _function_body(src, "function openInsertModal(")
+    assert "Neues Merkmal anlegen" in body
+    assert "setzt dieses Merkmal (Schreibbindung ergänzen)" in body
+    assert "insertConditionalWithDiscriminator(afterNodeId, branches, {" in body
+    helper = _function_body(src, "async function insertConditionalWithDiscriminator(")
+    order = [helper.index(x) for x in ("/data-elements`", "/data-access`", "/conditional-insert`")]
+    assert order == sorted(order)  # anlegen, binden, einfuegen
+    assert "api.del(`/schemas/${sid}/data-elements/${created.id}`)" in helper  # Aufraeumen
 
 
 def test_created_schemas_open_in_the_modelling_view() -> None:
@@ -1469,7 +1486,7 @@ def test_staff_rule_can_be_applied_to_several_steps_in_both_surfaces() -> None:
     assert "applyStaffRuleTo(nodeId, others.selected(), rule)" in dialog
     resource = _function_body(src, "function addStaffRule(")
     assert "otherStepsBox(schema, " in resource and "othersHost" in resource
-    assert "applyStaffRuleTo(nodeId || nodeSel.value, others.selected(), rule)" in resource
+    assert "applyStaffRuleTo(target(), others.selected(), rule)" in resource
     apply = _function_body(src, "async function applyStaffRuleTo(")
     assert "for (const other of extra)" in apply  # one request per step, no bulk shortcut
     box = _function_body(src, "function otherStepsBox(")
@@ -1710,3 +1727,101 @@ def test_monitoring_shows_steps_nobody_may_work() -> None:
     assert 'kpi("Niemand zust\\u00E4ndig", unstaffedIds.size)' in view
     assert 'key === "UNSTAFFED" ? unstaffedIds.has(i.id)' in view
     assert '{ key: "UNSTAFFED", label: "Niemand zust\\u00E4ndig" }' in src
+
+
+# ---------------------------------------------------------------------------
+# Validierung aus Aussensicht 2026-09-25, P2-Welle (VAL-13 bis VAL-22)
+# ---------------------------------------------------------------------------
+
+
+def test_error_toasts_close_after_success_expiry_and_login_change() -> None:
+    """VAL-13: Fehlermeldungen blieben stehen -- neben Erfolgsmeldungen und ueber
+    einen Benutzerwechsel hinweg (Maras Fehler bei Erika und Tom)."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    toast = _function_body(src, "function toast(")
+    assert 'if (kind === "ok") clearToasts("err");' in toast
+    assert "setTimeout(() => t.remove(), TOAST_ERROR_MS)" in toast
+    assert "clearToasts();" in _function_body(src, "async function logout(")
+    assert "clearToasts();" in _function_body(src, "async function loadPrincipal(")
+
+
+def test_monitor_reloads_the_selected_instance() -> None:
+    """VAL-14: Das Monitoring zeigte die gewaehlte Instanz im Startzustand."""
+
+    view = _function_body(APP_JS.read_text(encoding="utf-8"), "async function viewMonitor(")
+    assert "await loadInstance(state.instanceId)" in view
+
+
+def test_data_types_are_shown_with_business_names() -> None:
+    """VAL-16: INTEGER/FLOAT/STRING standen roh in Dialogen und Tabellen."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert 'INTEGER: "Ganzzahl", FLOAT: "Kommazahl"' in src
+    assert "el(\"option\", { value: t }, t)" not in src  # Typauswahl zeigt Namen
+    assert not re.search(r"\(\$\{\w+\.data_type\}\)", src), "roher Datentyp in einer Beschriftung"
+
+
+def test_combined_staff_rules_can_be_built_in_the_dialog() -> None:
+    """VAL-18: UND/ODER/AUSSER gab es nur per API."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    dialog = _function_body(src, "function addStaffRule(")
+    assert "rule = { kind: combSel.value, operands: [a, b] };" in dialog
+    assert "staffTermPicker(schema, target)" in dialog
+    assert '{ value: "EXCEPT", label: "AUSSER' in src
+    assert '" au\\u00DFer "' in _function_body(src, "function describeRule(")
+
+
+def test_demo_bar_and_tour_offer_do_not_get_in_the_way() -> None:
+    """VAL-19: Die Leiste schien durch die Tour-Aussparung, und nach jedem
+    Rollenwechsel fragte die Tour erneut."""
+
+    css = (APP_JS.parent / "tour" / "tour.css").read_text(encoding="utf-8")
+    assert "html[data-tour-active] .demo-banner" in css
+    engine = (APP_JS.parent / "tour" / "engine.js").read_text(encoding="utf-8")
+    assert 'if (sessionGet(OFFERED_KEY) === "1") return;' in engine
+    switch = _function_body(APP_JS.read_text(encoding="utf-8"), "async function switchDemoRole(")
+    assert "DEMO_BANNER_COLLAPSED_KEY" in switch
+
+
+def test_lost_demo_session_logs_the_same_person_back_in() -> None:
+    """VAL-20: Nach einer Pause landete man ohne Hinweis auf der Anmeldung."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    req = _function_body(src, "async function request(")
+    assert 'resp.status === 401 && state.demo && state.token && path !== "/auth/login"' in req
+    recover = _function_body(src, "async function recoverDemoSession(")
+    assert "DEMO_LAST_LOGIN_KEY" in recover and "await boot();" in recover
+
+
+def test_modelling_buttons_are_hidden_from_operators() -> None:
+    """VAL-21: Bearbeiter sahen „+ Neu“, „Aus Vorlage“, „BPMN-Import“."""
+
+    picker = _function_body(APP_JS.read_text(encoding="utf-8"), "function renderSchemaPicker(")
+    guard = picker.index('if (!hasRole("modeler", "admin")) return;')
+    assert guard < picker.index('"+ Neu"')
+
+
+def test_mask_fields_carry_input_rules_and_show_errors_at_the_field() -> None:
+    """VAL-22: keine Pruefregeln, Pflichtfehler nur als Meldung."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    complete = _function_body(src, "async function promptComplete(")
+    assert 'markField(wrap, required ? "Pflichtfeld" : null);' in complete
+    assert "fieldRuleProblem(field, val)" in complete
+    designer = _function_body(src, "function openFormDesigner(")
+    assert "...fieldRulesFor(f)" in designer
+    assert "pattern: f.pattern || null" in designer  # Oeffnen + Speichern verliert nichts
+
+
+def test_tasks_and_instances_are_named_by_their_data() -> None:
+    """VAL-17: Vorgaenge hiessen ``instance_14``; zwei gleiche Aufgaben waren
+    in der Arbeitsliste nicht zu unterscheiden."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "contextTitle(t.context)" in _function_body(src, "async function viewTasks(")
+    monitor = _function_body(src, "async function viewMonitor(")
+    assert 'api.get("/instance-titles")' in monitor and "contextTitle(titles[i.id])" in monitor
+    assert "toggleDisplayField(d.id)" in _function_body(src, "function viewData(")
+    assert "/display-fields`" in _function_body(src, "async function toggleDisplayField(")

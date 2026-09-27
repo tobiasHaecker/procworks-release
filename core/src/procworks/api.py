@@ -170,6 +170,7 @@ from procworks.validator import (
     ValidationFinding,
     _possible_agents,
     check_executable,
+    form_value_findings,
     validate,
 )
 from procworks.worklist_priority import TimeContext
@@ -1035,6 +1036,12 @@ class FormFieldRequest(BaseModel):
     options: list[str] = Field(default_factory=list)
     help_text: str | None = None
     group: str = ""
+    #: Optional input checks (VAL-22): bounds for numbers, pattern and maximum
+    #: length for text. U2 checks they fit the field; completions enforce them.
+    min_value: float | None = None
+    max_value: float | None = None
+    pattern: str | None = None
+    max_length: int | None = None
 
 
 class SetFormRequest(BaseModel):
@@ -2171,6 +2178,7 @@ def delete_user(login: str) -> Response:
 
     backend = _password_backend()
     backend.store.delete_user(login)
+    backend.revoke_sessions(login)  # sessions persist now (VAL-11) -- end them
     return Response(status_code=204)
 
 
@@ -2187,6 +2195,7 @@ def _wipe_users(keep_logins: set[str]) -> None:
     for user in _auth_backend.store.list_users():
         if user.login not in keep_logins:
             _auth_backend.store.delete_user(user.login)
+            _auth_backend.revoke_sessions(user.login)
 
 
 def _user_count() -> int:
@@ -2834,6 +2843,10 @@ def post_set_form(
             options=tuple(f.options),
             help_text=f.help_text,
             group=f.group,
+            min_value=f.min_value,
+            max_value=f.max_value,
+            pattern=f.pattern,
+            max_length=f.max_length,
         )
         for f in req.fields
     ]
@@ -4064,6 +4077,59 @@ def _readable_instance_or_404(instance_id: str, principal: Principal) -> Process
     return instance
 
 
+class DisplayFieldsRequest(BaseModel):
+    element_ids: list[str] = Field(default_factory=list, examples=[["bestellnr", "lieferant"]])
+
+
+@app.post(
+    "/schemas/{schema_id}/display-fields",
+    response_model=ProcessSchema,
+    dependencies=[_model],
+)
+def post_display_fields(schema_id: str, req: DisplayFieldsRequest) -> ProcessSchema:
+    """Choose up to two data elements that name instances and tasks (VAL-17).
+
+    Validated like every change (U5: existing INSTANCE elements, at most two).
+    """
+
+    schema = _get_or_404(schema_id)
+    return _commit_or_422(lambda: ops.set_display_fields(schema, req.element_ids))
+
+
+@app.get(
+    "/instance-titles",
+    response_model=dict[str, list[assignment.DisplayValue]],
+)
+def get_instance_titles(
+    principal: Principal = Depends(get_principal),
+) -> dict[str, list[assignment.DisplayValue]]:
+    """The naming values of every readable instance (VAL-17).
+
+    One call for the monitoring list instead of ``instance_14``. Readability
+    follows the instance list (a limited operator only sees its own, VAL-05);
+    instances without display fields are left out.
+    """
+
+    _read_gate(principal)
+    ids = list_instances(principal)
+    titles: dict[str, list[assignment.DisplayValue]] = {}
+    for instance_id in ids:
+        instance = _instances.get(instance_id)
+        if instance is None:
+            continue
+        values = assignment.display_values(_effective_schema_for(instance), instance)
+        if values:
+            titles[instance_id] = values
+    return titles
+
+
+def _read_gate(principal: Principal) -> None:
+    """The read floor (viewer and up) for endpoints that need the principal."""
+
+    if not principal.roles & {"viewer", "operator", "modeler", "admin"}:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+
 @app.get("/instances", dependencies=[_read])
 def list_instances(principal: Principal = Depends(get_principal)) -> list[str]:
     """All instance ids -- for a limited operator only its own (VAL-05)."""
@@ -4867,6 +4933,14 @@ def post_complete_activity(
     supervision = _require_supervision_reason(
         principal, acting_agent, before, schema, req.node_id, req.supervision_reason
     )
+    # U4 (VAL-22): the input checks of the step's mask hold for every caller,
+    # not only for the web form that marks the field.
+    form_findings = form_value_findings(schema, req.node_id, req.data)
+    if form_findings:
+        raise HTTPException(
+            status_code=422,
+            detail={"findings": [f.model_dump() for f in form_findings]},
+        )
     after = _run_or_409(
         lambda: exe.complete_activity(
             before,

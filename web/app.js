@@ -355,13 +355,33 @@ function toast(kind, title, lines) {
           onClick: () => t.remove() }, "\u00D7")
       : null,
     el("div", { class: "t-title" }, title), list);
+  // Eine erfolgreiche Folgeaktion erledigt die offenen Fehler: Sie standen
+  // sonst neben der Erfolgsmeldung, als waere noch etwas falsch (VAL-13).
+  if (kind === "ok") clearToasts("err");
   root.appendChild(t);
   if (sticky) {
     const open = [...root.querySelectorAll(".toast.err")];
     open.slice(0, Math.max(0, open.length - 3)).forEach((o) => o.remove());
+    // Fehler bleiben lesbar stehen, aber nicht ewig (VAL-13).
+    setTimeout(() => t.remove(), TOAST_ERROR_MS);
   } else {
     setTimeout(() => t.remove(), 3500);
   }
+}
+
+/** Wie lange eine Fehlermeldung ohne Zutun stehen bleibt (VAL-13). */
+const TOAST_ERROR_MS = 20000;
+
+/**
+ * Schliesst offene Meldungen -- alle oder nur einer Art (``"err"``).
+ * Aufgerufen nach einer erfolgreichen Aktion (nur Fehler) und beim Wechsel des
+ * Logins (alle): Maras Z3-Fehler stand sonst bei Erika und Tom noch da (VAL-13).
+ * @param {string} [kind] nur Meldungen dieser Art schliessen
+ */
+function clearToasts(kind) {
+  const root = byId("toast-root");
+  if (!root) return;
+  root.querySelectorAll(kind ? `.toast.${kind}` : ".toast").forEach((t) => t.remove());
 }
 
 // --------------------------------------------------------------------------
@@ -834,6 +854,18 @@ const FINDING_TEXTS = {
   "R1.not-serial": () => ({ text: "Dieser Schritt liegt nicht auf einer einfachen Strecke und lässt sich ad hoc nicht entfernen." }),
   "R1.rename-not-step": () => ({ text: "Ad hoc lassen sich nur Schritte und Teilprozesse umbenennen." }),
   "OP.own-deputy": () => ({ text: "Eine Person kann nicht ihre eigene Vertretung sein." }),
+  "U2.bounds-not-number": (p) => ({ text: `„${p.field}“: Unter- und Obergrenze gibt es nur bei Zahlenfeldern.` }),
+  "U2.bounds-order": (p) => ({ text: `„${p.field}“: Die Untergrenze liegt über der Obergrenze.` }),
+  "U2.text-rule-not-text": (p) => ({ text: `„${p.field}“: Muster und Höchstlänge gibt es nur bei Textfeldern.` }),
+  "U2.pattern-invalid": (p) => ({ text: `„${p.field}“: Das Muster ist kein gültiger regulärer Ausdruck.` }),
+  "U2.length-invalid": (p) => ({ text: `„${p.field}“: Die Höchstlänge muss mindestens 1 sein.` }),
+  "U4.below-min": (p) => ({ text: `„${p.field}“ muss mindestens ${p.min} sein.` }),
+  "U4.above-max": (p) => ({ text: `„${p.field}“ darf höchstens ${p.max} sein.` }),
+  "U4.too-long": (p) => ({ text: `„${p.field}“ darf höchstens ${p.max} Zeichen lang sein.` }),
+  "U4.pattern": (p) => ({ text: `„${p.field}“ passt nicht zum vorgegebenen Format.` }),
+  "U5.too-many": (p) => ({ text: `Höchstens ${p.max} Datenelemente können einen Vorgang benennen.` }),
+  "U5.unknown-element": (p) => ({ text: `Das Datenelement „${nm(p.element)}“ zur Benennung des Vorgangs gibt es nicht.` }),
+  "U5.not-instance": (p) => ({ text: `„${p.element}“ ist ein externes Datum und kann den Vorgang nicht benennen.` }),
 };
 
 /**
@@ -875,11 +907,46 @@ function nm(id) {
   return String(id);
 }
 
-/** Datentypen in Befundtexten mit fachlichem Namen statt INTEGER/FLOAT (VAL-07). */
-const FINDING_TYPE_NAMES = {
+/**
+ * Fachliche Namen der Datentypen fuer **jede** Anzeige (VAL-07, VAL-16).
+ * INTEGER/FLOAT/STRING/BOOLEAN/URI standen roh in Dialogen und Tabellen; die
+ * API-Werte bleiben unveraendert (``value`` der Auswahllisten), nur die
+ * Beschriftung ist deutsch.
+ */
+const DATA_TYPE_LABELS = {
   INTEGER: "Ganzzahl", FLOAT: "Kommazahl", STRING: "Text", DATE: "Datum", BOOLEAN: "Ja/Nein", URI: "Link",
 };
-function typeName(t) { return FINDING_TYPE_NAMES[t] || t || "?"; }
+function typeName(t) { return DATA_TYPE_LABELS[t] || t || "?"; }
+
+/**
+ * Titel eines Vorgangs aus seinen benennenden Werten (``display_fields``,
+ * VAL-17): „4711 · Müller GmbH“ statt ``instance_14``. Leere Werte fallen weg;
+ * ohne Werte ist der Titel leer und die Aufrufer zeigen die ID.
+ * @param {{name: string, value: *}[]|undefined} values ``context`` einer Aufgabe
+ *   bzw. ein Eintrag aus ``GET /instance-titles``
+ * @returns {string}
+ */
+function contextTitle(values) {
+  return (values || [])
+    .filter((v) => v.value !== null && v.value !== undefined && v.value !== "")
+    .map((v) => (v.value === true ? "Ja" : v.value === false ? "Nein" : String(v.value)))
+    .join(" \u00B7 ");
+}
+
+/**
+ * Anzeigename eines Vorgangs in seiner Detailansicht: benennende Werte plus ID
+ * (VAL-17), ohne Werte nur die ID.
+ * @param {object} inst Vorgang
+ * @param {object} schema Schema, gegen das er laeuft
+ * @returns {string}
+ */
+function instanceCaption(inst, schema) {
+  const values = ((schema && schema.display_fields) || []).map((eid) => ({
+    name: eid, value: (inst.data_values || {})[eid],
+  }));
+  const title = contextTitle(values);
+  return title ? `${title} (${inst.id})` : inst.id;
+}
 
 /** Name eines Schemas (Teilprozess, Folgeprozess) aus seiner ID, ohne Version. */
 function schemaName(id) { return (state.schemaNames && state.schemaNames[id]) || id; }
@@ -983,8 +1050,45 @@ async function request(method, path, body) {
   setConnected(true);
   const text = await resp.text();
   const data = text ? JSON.parse(text) : null;
-  if (!resp.ok) throw { status: resp.status, detail: data && data.detail };
+  if (!resp.ok) {
+    // Demo: Sitzung verloren (VAL-20) -- einmal still neu anmelden, statt den
+    // Besucher auf einer nackten Anmeldung abzusetzen. Nicht fuer den Login
+    // selbst, sonst ruft er sich endlos auf.
+    if (resp.status === 401 && state.demo && state.token && path !== "/auth/login") {
+      recoverDemoSession();
+    }
+    throw { status: resp.status, detail: data && data.detail };
+  }
   return data;
+}
+
+/** Laeuft gerade eine Wiederanmeldung der Demo? (nur eine zugleich) */
+let demoRecovering = false;
+
+/**
+ * Stellt eine verlorene Demo-Sitzung wieder her (VAL-20).
+ *
+ * Die Demo-Instanz haelt Sitzungen und Daten im Speicher. Startet die Maschine
+ * nach einer Leerlaufpause neu, ist beides weg -- der Besucher landete nach
+ * ~45 min ohne Hinweis und ohne Demo-Leiste auf der Anmeldung. Hier meldet sich
+ * der Client als dieselbe Demo-Person wieder an (Passwort kennt er aus
+ * ``/auth/config``) und sagt ehrlich, was passiert ist. Scheitert das, bleibt
+ * die normale Anmeldung.
+ * @returns {Promise<boolean>} true, wenn wieder angemeldet
+ */
+async function recoverDemoSession() {
+  if (demoRecovering || !state.demo || !state.demoPassword) return false;
+  demoRecovering = true;
+  try {
+    const login = storageGet(sessionStorage, DEMO_LAST_LOGIN_KEY) || state.demoAutologin;
+    if (!login || !(await demoLoginAs(login))) return false;
+    toast("info", "Die Demo wurde nach einer Pause neu gestartet",
+      ["Du bist wieder angemeldet. Was du vorher angelegt hattest, ist zur\u00FCckgesetzt."]);
+    await boot();
+    return true;
+  } finally {
+    demoRecovering = false;
+  }
 }
 
 // Build request headers, attaching the bearer token when the user is logged in.
@@ -2383,6 +2487,10 @@ function renderSchemaPicker() {
     select.disabled = true;
   }
   picker.appendChild(select);
+  // Anlegen, Vorlage und Import nur fuer Modellierer/Admin -- ein Bearbeiter
+  // bekam nach dem Klick nur „forbidden“ (VAL-21). Der Server bleibt
+  // maßgeblich; das hier blendet nur aus, was ohnehin abgelehnt wuerde.
+  if (!hasRole("modeler", "admin")) return;
   picker.appendChild(el("button", { class: "btn small", onClick: newSchema }, "+ Neu"));
   picker.appendChild(el("button", { class: "btn small ghost", onClick: newFromTemplate,
     title: "Neues Schema aus einer Vorlage erstellen" }, "Aus Vorlage"));
@@ -2985,7 +3093,7 @@ function dataPaletteTab(schema, draft, target) {
     wrap.appendChild(paletteChip({
       label: d.name,
       sub: d.data_type + (d.source === "EXTERNAL" ? " · extern" : ""),
-      title: `${d.name} (${d.data_type}) – klicken zeigt die Herkunft im Graph`,
+      title: `${d.name} (${typeName(d.data_type)}) – klicken zeigt die Herkunft im Graph`,
       active: state.dataElemFocus === d.id,
       onClick: () => { state.dataElemFocus = state.dataElemFocus === d.id ? null : d.id; render(); },
       actions,
@@ -3881,7 +3989,7 @@ function bindStaffDialog(nodeId) {
       others.node,
       el("div", { style: "margin-top:10px" },
         el("button", { class: "btn small ghost", type: "button", onClick: () => addStaffRule(nodeId) },
-          "Erweiterte Regel (Bearbeiter/Vorgesetzte:r eines früheren Schritts) …"))),
+          "Erweiterte Regel (UND/ODER/AUSSER, Bearbeiter eines früheren Schritts) …"))),
     async () => {
       const picked = picker.get();
       if (!picked) { toast("err", "Nichts gewählt"); return false; }
@@ -4329,7 +4437,7 @@ function templateMappingForm(template, schema, current) {
       ...elems.filter((e) => e.data_type === p.data_type).map((e) => el("option", { value: e.id }, e.name)));
     if (current && current[p.name]) sel.value = current[p.name];
     rows.push({ name: p.name, sel });
-    grid.appendChild(el("label", { class: "field" }, `${p.dir}: ${p.name} (${p.data_type})`, sel));
+    grid.appendChild(el("label", { class: "field" }, `${p.dir}: ${p.name} (${typeName(p.data_type)})`, sel));
   });
   const read = () => { const m = {}; rows.forEach((r) => { if (r.sel.value) m[r.name] = r.sel.value; }); return m; };
   return { grid, read };
@@ -5005,7 +5113,7 @@ function subprocessMappingForm(target, parentSchema) {
     const outSel = el("select", null, ...options());
     rows.push({ te, inSel, outSel });
     grid.appendChild(el("div", { class: "field" },
-      el("div", { style: "font-weight:600;font-size:13px" }, `${te.name} (${te.data_type})`),
+      el("div", { style: "font-weight:600;font-size:13px" }, `${te.name} (${typeName(te.data_type)})`),
       el("div", { class: "row", style: "gap:8px" },
         el("label", { class: "field", style: "flex:1" }, "Eingabe von", inSel),
         el("label", { class: "field", style: "flex:1" }, "Ergebnis nach", outSel))));
@@ -5168,6 +5276,100 @@ function maskControl(elem, widget, options, current) {
   return { control: input, read: () => (input.value === "" ? undefined : coerce(input.value)) };
 }
 
+/**
+ * Pruefregeln eines Maskenfelds, soweit sie zum Bedienelement passen (VAL-22):
+ * Unter-/Obergrenze fuer Zahlenfelder, Muster und Hoechstlaenge fuer Text.
+ * Nur fuer Eingabefelder -- ein Anzeigefeld prueft nichts.
+ * @param {object} f Feld des Designers
+ * @returns {{min_value: (number|null), max_value: (number|null), pattern: (string|null), max_length: (number|null)}}
+ */
+function fieldRulesFor(f) {
+  const writes = f.mode !== "READ";
+  const num = writes && f.widget === "NUMBER";
+  const text = writes && (f.widget === "TEXT" || f.widget === "TEXTAREA");
+  const n = (v) => (v === null || v === undefined || v === "" || Number.isNaN(Number(v)) ? null : Number(v));
+  return {
+    min_value: num ? n(f.min_value) : null,
+    max_value: num ? n(f.max_value) : null,
+    pattern: text && f.pattern ? f.pattern : null,
+    max_length: text ? n(f.max_length) : null,
+  };
+}
+
+/**
+ * Eingaben fuer die Pruefregeln eines Felds im Designer (VAL-22). Welche
+ * erscheinen, haengt am Bedienelement; ob sie zusammenpassen (Grenzen in der
+ * richtigen Reihenfolge, gueltiges Muster), prueft der Kern (U2).
+ * @param {object} f Feld des Designers (wird direkt beschrieben)
+ * @returns {HTMLElement[]} Zellen fuer die Feldzeile
+ */
+function fieldRuleCells(f) {
+  if (f.mode === "READ") return [];
+  const numInput = (key, placeholder) => {
+    const i = el("input", { type: "number", step: "any", placeholder, value: f[key] ?? "" });
+    i.addEventListener("input", () => { f[key] = i.value === "" ? null : Number(i.value); });
+    return i;
+  };
+  if (f.widget === "NUMBER") {
+    return [
+      el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Mindestens"), numInput("min_value", "optional")),
+      el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "H\u00F6chstens"), numInput("max_value", "optional")),
+    ];
+  }
+  if (f.widget === "TEXT" || f.widget === "TEXTAREA") {
+    const pat = el("input", { type: "text", value: f.pattern || "", placeholder: "optional, z. B. [A-Z]{2}-\\d{4}" });
+    pat.addEventListener("input", () => { f.pattern = pat.value.trim() || null; });
+    return [
+      el("div", { class: "fd-cell fd-wide" }, el("span", { class: "fd-cap" }, "Muster (regul\u00E4rer Ausdruck)"), pat),
+      el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "H\u00F6chstl\u00E4nge"), numInput("max_length", "optional")),
+    ];
+  }
+  return [];
+}
+
+/**
+ * Prueft einen Wert gegen die Pruefregeln eines Maskenfelds -- dieselben wie
+ * der Kern beim Abschliessen (U4). Nur Komfort: Der Nutzer sieht das Problem
+ * am Feld, bevor er absendet. Maßgeblich bleibt der Server.
+ * @param {object} f Maskenfeld (FormField)
+ * @param {*} val gelesener, typisierter Wert
+ * @returns {string|null} deutscher Hinweis oder null
+ */
+function fieldRuleProblem(f, val) {
+  if (typeof val === "number") {
+    if (f.min_value != null && val < f.min_value) return `mindestens ${f.min_value}`;
+    if (f.max_value != null && val > f.max_value) return `h\u00F6chstens ${f.max_value}`;
+  }
+  if (typeof val === "string") {
+    if (f.max_length != null && val.length > f.max_length) return `h\u00F6chstens ${f.max_length} Zeichen`;
+    if (f.pattern) {
+      try { if (!new RegExp(`^(?:${f.pattern})$`).test(val)) return "passt nicht zum vorgegebenen Format"; }
+      catch (e) { /* ungueltiges Muster: der Kern prueft */ }
+    }
+  }
+  return null;
+}
+
+/**
+ * Markiert ein Feld der Aufgabenmaske als fehlerhaft (oder hebt die Markierung
+ * auf). Pflicht- und Regelfehler standen bisher nur in einer Meldung, nicht am
+ * Feld (VAL-22).
+ * @param {HTMLElement|undefined} wrap das ``label.field`` des Felds
+ * @param {string|null} message Hinweis oder null zum Aufheben
+ */
+function markField(wrap, message) {
+  if (!wrap) return;
+  const old = wrap.querySelector(".field-error-msg");
+  if (old) old.remove();
+  wrap.classList.toggle("field-invalid", !!message);
+  const control = wrap.querySelector("input, select, textarea");
+  if (control) {
+    if (message) control.setAttribute("aria-invalid", "true");
+    else control.removeAttribute("aria-invalid");
+  }
+  if (message) wrap.appendChild(el("span", { class: "field-error-msg" }, message));
+}
+
 // Visueller Eingabemasken-Designer: Felder per Auswahl zusammenstellen; die
 // Anordnung entsteht automatisch (geordnete Liste -> Grid). Jedes Feld wird auf
 // einen Datenzugriff abgebildet, daher gilt Correctness by Construction (der
@@ -5189,6 +5391,9 @@ function openFormDesigner(nodeId) {
         element_id: f.element_id, widget: f.widget, label: f.label,
         mode: f.mode, required: f.required, options: (f.options || []).slice(),
         help_text: f.help_text || null, group: f.group || "",
+        // Pruefregeln (VAL-22) mitfuehren -- sonst loeschte Oeffnen + Speichern sie.
+        min_value: f.min_value ?? null, max_value: f.max_value ?? null,
+        pattern: f.pattern || null, max_length: f.max_length ?? null,
       }))
     : [];
   const container = el("div", { class: "form-designer" });
@@ -5215,7 +5420,7 @@ function openFormDesigner(nodeId) {
   function fieldRow(f, idx) {
     const elem = schema.data_elements[f.element_id];
     const elemSel = el("select", null,
-      ...elements.map((e) => el("option", { value: e.id }, `${e.name} (${e.data_type})`)));
+      ...elements.map((e) => el("option", { value: e.id }, `${e.name} (${typeName(e.data_type)})`)));
     elemSel.value = f.element_id;
     elemSel.addEventListener("change", () => {
       const prev = schema.data_elements[f.element_id];
@@ -5242,7 +5447,7 @@ function openFormDesigner(nodeId) {
       el("option", { value: "WRITE" }, "Eingabe (schreibt)"),
       el("option", { value: "READ" }, "Anzeige (liest)"));
     modeSel.value = f.mode;
-    modeSel.addEventListener("change", () => { f.mode = modeSel.value; });
+    modeSel.addEventListener("change", () => { f.mode = modeSel.value; renderDesigner(); });
     const reqBox = el("input", { type: "checkbox" });
     reqBox.checked = f.required;
     reqBox.addEventListener("change", () => { f.required = reqBox.checked; });
@@ -5268,6 +5473,7 @@ function openFormDesigner(nodeId) {
       cells.push(el("div", { class: "fd-cell fd-wide" },
         el("span", { class: "fd-cap" }, "Optionen (kommagetrennt)"), optInput));
     }
+    cells.push(...fieldRuleCells(f));
     cells.push(el("button", { class: "btn small danger fd-del", onClick: () => { fields.splice(idx, 1); renderDesigner(); } }, "Entfernen"));
     return el("div", { class: "fd-field" }, ...cells);
   }
@@ -5307,6 +5513,8 @@ function openFormDesigner(nodeId) {
         mode: f.mode, required: f.required,
         options: f.widget === "DROPDOWN" ? f.options : [],
         help_text: f.help_text || null, group: f.group || "",
+        // Pruefregeln nur, wo sie zum Bedienelement passen (sonst U2).
+        ...fieldRulesFor(f),
       })),
     };
     try {
@@ -5374,15 +5582,49 @@ function openInsertModal(afterNodeId) {
   // --- XOR partition builder (K7): a typed discriminator drives the branches.
   const partitionable = Object.values(state.schema.data_elements).filter(
     (d) => d.source === "INSTANCE" && ["INTEGER", "FLOAT", "BOOLEAN", "STRING"].includes(d.data_type));
+  // VAL-15: Das Merkmal musste vorher woanders angelegt UND an einem Schritt
+  // davor geschrieben werden; der Dialog schickte den Nutzer weg. Jetzt: Wahl
+  // „Neues Merkmal …“ legt es hier an, und der Schritt vor der Einfuegestelle
+  // bekommt die Schreibbindung gleich mit (``writerStep``). Ob das alles
+  // zusammen korrekt ist (D1, D2, K7), entscheidet weiterhin der Kern.
+  const NEW_DISC = "__new__";
+  const writerStep = node && node.type === "ACTIVITY" ? node : null;
   const condDisc = el("select", { class: "cond-disc" },
-    ...partitionable.map((d) => el("option", { value: d.id }, `${d.name} (${d.data_type})`)));
+    ...partitionable.map((d) => el("option", { value: d.id }, `${d.name} (${typeName(d.data_type)})`)),
+    el("option", { value: NEW_DISC }, "\uFF0B Neues Merkmal anlegen \u2026"));
+  const newDiscName = el("input", { type: "text", placeholder: "z. B. Betrag" });
+  const newDiscType = el("select", null,
+    el("option", { value: "FLOAT" }, "Zahl (Stufen nach Grenzwerten)"),
+    el("option", { value: "BOOLEAN" }, "Ja/Nein"),
+    el("option", { value: "STRING" }, "Text (Zweige nach Werten)"));
+  const newDiscBox = el("div", { class: "form-grid new-disc" },
+    el("label", { class: "field" }, "Name des Merkmals", newDiscName),
+    el("label", { class: "field" }, "Art", newDiscType));
+  const bindBox = el("input", { type: "checkbox" });
+  const bindRow = writerStep
+    ? el("label", { class: "row", style: "gap:8px;align-items:center;font-size:12px" }, bindBox,
+        `„${nodeCaption(writerStep)}“ setzt dieses Merkmal (Schreibbindung ergänzen)`)
+    : el("div", { class: "muted", style: "font-size:12px" },
+        "Vor dieser Stelle liegt kein Aufgaben-Schritt, der das Merkmal setzen könnte – es muss schon früher im Ablauf geschrieben werden.");
+  function writesAlready(eid) {
+    return !!writerStep && (state.schema.data_accesses || []).some((a) =>
+      a.node_id === writerStep.id && a.element_id === eid && (a.mode === "WRITE" || a.mode === "READ_WRITE"));
+  }
+  function syncDiscChoice() {
+    const isNew = condDisc.value === NEW_DISC;
+    newDiscBox.style.display = isNew ? "" : "none";
+    // Vorbelegung: binden, wenn der Schritt davor das Merkmal noch nicht schreibt.
+    bindBox.checked = isNew || !writesAlready(condDisc.value);
+    bindBox.disabled = isNew;  // ein neues Merkmal braucht einen Schreiber
+  }
   const condRows = el("div", { class: "row", style: "flex-direction:column;align-items:stretch;gap:8px" });
   function discKind() {
-    const elem = state.schema.data_elements[condDisc.value];
-    if (!elem) return null;
-    if (elem.data_type === "INTEGER" || elem.data_type === "FLOAT") return "THRESHOLD";
-    if (elem.data_type === "BOOLEAN") return "BOOLEAN";
-    if (elem.data_type === "STRING") return "ENUM";
+    const type = condDisc.value === NEW_DISC
+      ? newDiscType.value
+      : (state.schema.data_elements[condDisc.value] || {}).data_type;
+    if (type === "INTEGER" || type === "FLOAT") return "THRESHOLD";
+    if (type === "BOOLEAN") return "BOOLEAN";
+    if (type === "STRING") return "ENUM";
     return null;
   }
   function addThresholdRow(last) {
@@ -5425,14 +5667,16 @@ function openInsertModal(afterNodeId) {
       if (elseRow) condRows.insertBefore(condRows.lastChild, elseRow);
     }
   }
-  condDisc.addEventListener("change", rebuildCondRows);
-  addParRow(); addParRow(); rebuildCondRows();
-  const condPanel = partitionable.length
-    ? el("div", null,
-        el("label", { class: "field" }, "Diskriminator (Datenelement)", condDisc),
-        el("div", { class: "muted", style: "font-size:12px;margin:4px 0" }, "Die Engine w\u00E4hlt den Zweig automatisch anhand des Werts \u2013 vollst\u00E4ndig und \u00FCberschneidungsfrei (K7)."),
-        condRows, el("button", { class: "btn small ghost", onClick: () => addCondRow() }, "+ Zweig"))
-    : el("div", { class: "warn-banner insert-blocked" }, "Für eine Verzweigung fehlt ein Datenelement, nach dem entschieden wird (Zahl, Ja/Nein oder Text). Legen Sie es in der Datensicht an und lassen Sie es vor dieser Stelle schreiben – dann lässt sich hier einfügen.");
+  condDisc.addEventListener("change", () => { syncDiscChoice(); rebuildCondRows(); });
+  newDiscType.addEventListener("change", rebuildCondRows);
+  if (!partitionable.length) condDisc.value = NEW_DISC;
+  addParRow(); addParRow(); syncDiscChoice(); rebuildCondRows();
+  const condPanel = el("div", null,
+    el("label", { class: "field" }, "Entscheiden nach (Merkmal)", condDisc),
+    newDiscBox,
+    bindRow,
+    el("div", { class: "muted", style: "font-size:12px;margin:4px 0" }, "Die Engine w\u00E4hlt den Zweig automatisch anhand des Werts \u2013 vollst\u00E4ndig und \u00FCberschneidungsfrei (K7)."),
+    condRows, el("button", { class: "btn small ghost", onClick: () => addCondRow() }, "+ Zweig"));
   // --- Schleife (K6): Rumpf-Bezeichnung + entscheidbares Wiederholen-Merkmal.
   // BOOLEAN nutzt die Kurzform (repeat_value); Zahlen (Schwelle) und Text
   // (Wertemenge) bauen eine Wiederhol/Verlassen-Partition (Stufe S3, K6b).
@@ -5441,7 +5685,7 @@ function openInsertModal(afterNodeId) {
   const loopable = Object.values(state.schema.data_elements).filter(
     (d) => d.source === "INSTANCE" && ["BOOLEAN", "INTEGER", "FLOAT", "STRING"].includes(d.data_type));
   const loopDisc = el("select", { class: "loop-disc" },
-    ...loopable.map((d) => el("option", { value: d.id }, `${d.name} (${d.data_type})`)));
+    ...loopable.map((d) => el("option", { value: d.id }, `${d.name} (${typeName(d.data_type)})`)));
   const loopRepeat = el("select", null,
     el("option", { value: "true" }, "wahr (true)"),
     el("option", { value: "false" }, "falsch (false)"));
@@ -5518,8 +5762,7 @@ function openInsertModal(afterNodeId) {
   let dialog = null;
   function syncInsertEnabled() {
     if (!dialog) return;
-    const blocked = (active === "conditional" && !partitionable.length)
-      || (active === "loop" && !loopable.length);
+    const blocked = (active === "loop" && !loopable.length);
     dialog.confirmBtn.disabled = blocked;
     dialog.confirmBtn.title = blocked ? "Voraussetzung fehlt – siehe Hinweis im Dialog" : "";
   }
@@ -5599,7 +5842,12 @@ function openInsertModal(afterNodeId) {
           }).filter(Boolean);
           if (branches.length < 2) { toast("err", "Mindestens ein Wertzweig plus Sonst-Zweig n\u00F6tig"); return false; }
         }
-        await api.post(`/schemas/${state.schemaId}/conditional-insert`, { after_node_id: afterNodeId, discriminator: condDisc.value, branches });
+        await insertConditionalWithDiscriminator(afterNodeId, branches, {
+          existing: condDisc.value === NEW_DISC ? null : condDisc.value,
+          newName: newDiscName.value.trim(),
+          newType: newDiscType.value,
+          bindAt: writerStep && bindBox.checked ? writerStep.id : null,
+        });
       }
       await refreshSchema();
       render();
@@ -5607,6 +5855,54 @@ function openInsertModal(afterNodeId) {
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Einf\u00FCgen");
   syncInsertEnabled();
+}
+
+/**
+ * Fuegt eine Entscheidung ein und legt ihr Merkmal bei Bedarf gleich mit an
+ * (VAL-15).
+ *
+ * Reihenfolge: (1) neues Datenelement anlegen, (2) Schreibbindung am Schritt
+ * davor, (3) ``conditional-insert``. Jeder Schritt ist eine eigene
+ * Kern-Operation mit eigener Pruefung -- keine Abkuerzung. Scheitert (2) oder
+ * (3), werden die hier angelegten Teile wieder entfernt, damit kein halbes
+ * Merkmal im Modell zurueckbleibt; die Fehlermeldung des Kerns wird
+ * weitergereicht.
+ *
+ * @param {string} afterNodeId Einfuegestelle
+ * @param {object[]} branches Zweige fuer ``conditional-insert``
+ * @param {{existing: (string|null), newName: string, newType: string, bindAt: (string|null)}} opt
+ */
+async function insertConditionalWithDiscriminator(afterNodeId, branches, opt) {
+  const sid = state.schemaId;
+  let created = null;
+  let bound = false;
+  let disc = opt.existing;
+  try {
+    if (!disc) {
+      if (!opt.newName) throw { detail: "Bitte einen Namen f\u00FCr das neue Merkmal angeben." };
+      if (!opt.bindAt) throw { detail: "Ein neues Merkmal braucht einen Schritt davor, der es setzt." };
+      const before = new Set(Object.keys(state.schema.data_elements || {}));
+      const schema = await api.post(`/schemas/${sid}/data-elements`, { name: opt.newName, data_type: opt.newType });
+      created = Object.values(schema.data_elements || {}).find((d) => !before.has(d.id)) || null;
+      if (!created) throw { detail: "Das neue Merkmal wurde nicht angelegt." };
+      disc = created.id;
+    }
+    if (opt.bindAt) {
+      const already = (state.schema.data_accesses || []).some((a) => a.node_id === opt.bindAt
+        && a.element_id === disc && (a.mode === "WRITE" || a.mode === "READ_WRITE"));
+      if (!already) {
+        await api.post(`/schemas/${sid}/data-access`, { node_id: opt.bindAt, element_id: disc, mode: "WRITE", mandatory: true });
+        bound = true;
+      }
+    }
+    await api.post(`/schemas/${sid}/conditional-insert`, { after_node_id: afterNodeId, discriminator: disc, branches });
+  } catch (err) {
+    // Aufraeumen in umgekehrter Reihenfolge; Fehler dabei verschlucken, die
+    // eigentliche Ursache ist die Meldung von oben.
+    if (bound) { try { await api.del(`/schemas/${sid}/data-access/${opt.bindAt}/${disc}?mode=WRITE`); } catch (e) { /* egal */ } }
+    if (created) { try { await api.del(`/schemas/${sid}/data-elements/${created.id}`); } catch (e) { /* egal */ } }
+    throw err;
+  }
 }
 
 /**
@@ -5770,7 +6066,7 @@ async function openMigrationAssistant(targetId, onlyIds) {
     const elem = target.data_elements[eid];
     const { control, read } = maskControl(elem, startValueWidget(elem), null, undefined);
     inputs[eid] = { read, elem };
-    valueBox.appendChild(el("label", { class: "field" }, `${elem ? elem.name : eid} (${elem ? elem.data_type : "?"})`, control));
+    valueBox.appendChild(el("label", { class: "field" }, `${elem ? elem.name : eid} (${elem ? typeName(elem.data_type) : "?"})`, control));
   });
   const readMapping = () => {
     const mapping = {};
@@ -5866,6 +6162,24 @@ async function exportBpmn() {
 // View: Datensicht
 // --------------------------------------------------------------------------
 
+/**
+ * Nimmt ein Datenelement in die benennenden Werte des Vorgangs auf oder
+ * entfernt es (VAL-17). Geschrieben wird ueber den Kern
+ * (``POST /schemas/{id}/display-fields``), der U5 prueft -- beim dritten
+ * Element kommt dessen Meldung.
+ * @param {string} elementId Datenelement
+ */
+async function toggleDisplayField(elementId) {
+  const current = (state.schema.display_fields || []).slice();
+  const next = current.includes(elementId)
+    ? current.filter((e) => e !== elementId)
+    : [...current, elementId];
+  try {
+    await api.post(`/schemas/${state.schemaId}/display-fields`, { element_ids: next });
+    await refreshSchema(); render();
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+}
+
 function viewData() {
   const content = byId("content");
   clear(content);
@@ -5878,14 +6192,22 @@ function viewData() {
   const elemHeaders = draft ? ["Name", "Typ", "Quelle", "Aktionen"] : ["Name", "Typ", "Quelle"];
   const elemTable = elemRows.length
     ? table(elemHeaders, elemRows.map((d) => {
-        const cells = [d.name, d.data_type, d.source];
+        const cells = [d.name, typeName(d.data_type), d.source];
         if (draft) {
+          // Benennt den Vorgang in Listen (VAL-17); hoechstens zwei, nur
+          // Vorgangsdaten -- das prueft der Kern (U5).
+          const shown = (schema.display_fields || []).includes(d.id);
+          const nameBtn = d.source === "INSTANCE"
+            ? el("button", { class: "btn small" + (shown ? " primary" : " ghost"),
+                title: "Der Wert benennt Vorgang und Aufgaben in Listen (höchstens zwei Datenelemente)",
+                onClick: () => toggleDisplayField(d.id) }, shown ? "\u2713 benennt Vorgang" : "Benennt Vorgang")
+            : null;
           const editBtn = el("button", { class: "btn small", onClick: () => editDataElement(d) }, "Bearbeiten");
           const resetBtn = d.source === "EXTERNAL"
             ? el("button", { class: "btn small", onClick: () => resetDataElementSource(d) }, "Quelle zur\u00FCcksetzen")
             : null;
           const delBtn = el("button", { class: "btn small danger", onClick: () => deleteDataElement(d) }, "L\u00F6schen");
-          cells.push(el("div", { class: "row-actions" }, editBtn, resetBtn, delBtn));
+          cells.push(el("div", { class: "row-actions" }, nameBtn, editBtn, resetBtn, delBtn));
         }
         return cells;
       }))
@@ -5944,7 +6266,7 @@ function dFindingsPanel() {
  */
 function addDataElement(onCreated) {
   const name = el("input", { type: "text", placeholder: "z. B. betrag" });
-  const type = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t }, t)));
+  const type = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t }, typeName(t))));
   openModal("Datenelement", el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Name", name),
     el("label", { class: "field" }, "Typ", type)), async () => {
@@ -5983,7 +6305,7 @@ function addDataAccess(fixedNodeId) {
 
 function editDataElement(elem) {
   const name = el("input", { type: "text", value: elem.name });
-  const type = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t, selected: t === elem.data_type ? "selected" : null }, t)));
+  const type = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t, selected: t === elem.data_type ? "selected" : null }, typeName(t))));
   openModal("Datenelement bearbeiten", el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Name", name),
     el("label", { class: "field" }, "Typ", type)), async () => {
@@ -6429,7 +6751,12 @@ function describeRule(rule, schema) {
   }
   if (rule.kind === "NODE_PERFORMING_AGENT") return `Bearbeiter von \u201e${stepName(rule.ref)}\u201c`;
   if (rule.kind === "NODE_PERFORMING_AGENT_SUPERVISOR") return `Vorgesetzte:r des Bearbeiters von \u201e${stepName(rule.ref)}\u201c`;
-  if (rule.operands) return `${rule.kind}(${rule.operands.map((o) => describeRule(o, s)).join(", ")})`;
+  // Verknuepfungen im Wortlaut des Dialogs (VAL-18) statt „AND(…, …)“.
+  if (rule.operands) {
+    const parts = rule.operands.map((o) => (o.operands ? `(${describeRule(o, s)})` : describeRule(o, s)));
+    const word = { AND: " und ", OR: " oder ", EXCEPT: " au\u00DFer " }[rule.kind];
+    return word ? parts.join(word) : `${rule.kind}(${parts.join(", ")})`;
+  }
   return rule.kind;
 }
 
@@ -6728,30 +7055,35 @@ function showLoginCredentials(res) {
 
 // Bearbeiterregel (BZR) zuweisen. ``fixedNodeId`` (optional) fixiert den Schritt
 // fuer den „Bearbeiter zuordnen"-Knopf des Inspektors.
-function addStaffRule(fixedNodeId) {
-  const schema = state.schema;
-  const org = schema.org_model;
-  const nodeId = typeof fixedNodeId === "string" ? fixedNodeId : null;
-  const nodeSel = nodeId
-    ? null
-    : el("select", null, ...activitiesOf(schema).map((n) => el("option", { value: n.id }, nodeCaption(n))));
+/**
+ * Ein Teil einer Bearbeiterregel: Art (Rolle, Abteilung, Person, Bearbeiter
+ * bzw. Vorgesetzte:r eines frueheren Schritts) und Bezug.
+ *
+ * Eigene Funktion, damit ``addStaffRule`` zwei davon verknuepfen kann (VAL-18).
+ * Die node-bezogenen Arten bieten die uebrigen Aufgaben-Schritte an; ob der
+ * Rueckbezug gueltig ist (Z3), entscheidet der Kern.
+ *
+ * @param {object} schema das Schema
+ * @param {() => (string|null)} currentNode liefert den Zielschritt (nicht als Bezug anbieten)
+ * @returns {{node: HTMLElement, read: () => (object|null), refresh: () => void}}
+ */
+function staffTermPicker(schema, currentNode) {
+  const org = schema.org_model || {};
   const refSel = el("select");
   const kindSel = el("select", null,
     el("option", { value: "ROLE" }, "Rolle"),
-    el("option", { value: "ORG_UNIT" }, "OrgEinheit"),
-    el("option", { value: "AGENT" }, "Agent (konkrete Person)"),
+    el("option", { value: "ORG_UNIT" }, "Abteilung"),
+    el("option", { value: "AGENT" }, "Person"),
     el("option", { value: "NODE_PERFORMING_AGENT" }, "Bearbeiter eines Schritts"),
     el("option", { value: "NODE_PERFORMING_AGENT_SUPERVISOR" }, "Vorgesetzte:r des Bearbeiters eines Schritts"));
   const recBox = el("input", { type: "checkbox" });
   const recField = el("label", { class: "field" }, recBox, " Abteilung und alle Bereiche darunter");
-  // Node-bezogene Arten (Bearbeiter/Vorgesetzte:r eines Schritts) referenzieren
-  // einen vorherigen Schritt; der Kern erzwingt den gueltigen Rueckbezug (Z3).
   const NODE_KINDS = ["NODE_PERFORMING_AGENT", "NODE_PERFORMING_AGENT_SUPERVISOR"];
-  function syncKind() {
+  function refresh() {
     clear(refSel);
     if (NODE_KINDS.includes(kindSel.value)) {
       activitiesOf(schema)
-        .filter((n) => n.id !== (nodeId || (nodeSel && nodeSel.value)))
+        .filter((n) => n.id !== currentNode())
         .forEach((n) => refSel.appendChild(el("option", { value: n.id }, nodeCaption(n))));
     } else {
       const src = kindSel.value === "ROLE" ? org.roles
@@ -6760,15 +7092,64 @@ function addStaffRule(fixedNodeId) {
     }
     recField.style.display = kindSel.value === "ORG_UNIT" ? "" : "none";
   }
-  kindSel.addEventListener("change", syncKind); syncKind();
+  kindSel.addEventListener("change", refresh); refresh();
+  return {
+    node: el("div", { class: "form-grid" },
+      el("label", { class: "field" }, "Art", kindSel),
+      el("label", { class: "field" }, "Bezug", refSel),
+      recField),
+    read: () => {
+      if (!refSel.value) return null;
+      const term = { kind: kindSel.value, ref: refSel.value };
+      if (kindSel.value === "ORG_UNIT") term.recursive = recBox.checked;
+      return term;
+    },
+    refresh,
+  };
+}
+
+/** Verknuepfungen im Regeldialog (VAL-18) -- Wert = StaffRuleKind oder "". */
+const STAFF_COMBINATORS = [
+  { value: "", label: "keine – nur diese Angabe" },
+  { value: "AND", label: "UND – muss auch Folgendes erfüllen" },
+  { value: "OR", label: "ODER – alternativ auch" },
+  { value: "EXCEPT", label: "AUSSER – ohne Folgende" },
+];
+
+/**
+ * Der erweiterte Bearbeiter-Dialog: eine Angabe oder zwei verknuepfte.
+ *
+ * Kombinationen (UND/ODER/AUSSER) gab es bis 2026-09 nur ueber die API, obwohl
+ * die Modellierer-Anleitung sie im gefuehrten Dialog versprach (VAL-18). Die
+ * Regel entsteht hier als ``{kind: AND|OR|EXCEPT, operands: [a, b]}``; ob sie
+ * jemanden findet (Z2) oder einen gueltigen Rueckbezug hat (Z3), prueft der
+ * Kern und meldet es verstaendlich. Beide Oberflaechen erreichen den Dialog
+ * ueber ``bindStaffDialog``; geschrieben wird ueber ``applyStaffRuleTo``.
+ *
+ * @param {string} [fixedNodeId] Zielschritt; ohne ihn gibt es eine Auswahl
+ */
+function addStaffRule(fixedNodeId) {
+  const schema = state.schema;
+  const nodeId = typeof fixedNodeId === "string" ? fixedNodeId : null;
+  const nodeSel = nodeId
+    ? null
+    : el("select", null, ...activitiesOf(schema).map((n) => el("option", { value: n.id }, nodeCaption(n))));
+  const target = () => nodeId || (nodeSel && nodeSel.value);
+  const first = staffTermPicker(schema, target);
+  const second = staffTermPicker(schema, target);
+  const combSel = el("select", null, ...STAFF_COMBINATORS.map((c) => el("option", { value: c.value }, c.label)));
+  const secondHost = el("div", { class: "staff-term-second" }, second.node);
+  const syncComb = () => { secondHost.style.display = combSel.value ? "" : "none"; };
+  combSel.addEventListener("change", syncComb); syncComb();
   // Mehrfachzuordnung wie im Dialog der Schritt-Karte -- dieselbe Auswahl,
   // derselbe Schreibweg (Nachtest 2026-09-22, Mangel 10). Wechselt hier der
   // Schritt, wird die Liste neu gebaut: der gewaehlte Schritt darf nicht
   // zusaetzlich in ihr stehen.
-  let others = otherStepsBox(schema, nodeId || (nodeSel ? nodeSel.value : null));
+  let others = otherStepsBox(schema, target());
   const othersHost = el("div", null, others.node);
   if (nodeSel) {
     nodeSel.addEventListener("change", () => {
+      first.refresh(); second.refresh();
       clear(othersHost);
       others = otherStepsBox(schema, nodeSel.value);
       if (others.node) othersHost.appendChild(others.node);
@@ -6778,13 +7159,19 @@ function addStaffRule(fixedNodeId) {
     nodeId
       ? el("div", { class: "field" }, "Schritt: ", el("strong", null, nodeCaption(schema.nodes[nodeId])))
       : el("label", { class: "field" }, "Schritt", nodeSel),
-    el("label", { class: "field" }, "Art", kindSel),
-    el("label", { class: "field" }, "Referenz", refSel),
-    recField, othersHost), async () => {
-    if (!refSel.value) { toast("err", "Keine Referenz verf\u00FCgbar"); return false; }
-    const rule = { kind: kindSel.value, ref: refSel.value };
-    if (kindSel.value === "ORG_UNIT") rule.recursive = recBox.checked;
-    return applyStaffRuleTo(nodeId || nodeSel.value, others.selected(), rule);
+    first.node,
+    el("label", { class: "field" }, "Verknüpfen mit", combSel),
+    secondHost,
+    othersHost), async () => {
+    const a = first.read();
+    if (!a) { toast("err", "Keine Angabe verf\u00FCgbar"); return false; }
+    let rule = a;
+    if (combSel.value) {
+      const b = second.read();
+      if (!b) { toast("err", "Bitte auch die zweite Angabe w\u00E4hlen"); return false; }
+      rule = { kind: combSel.value, operands: [a, b] };
+    }
+    return applyStaffRuleTo(target(), others.selected(), rule);
   }, "Zuordnen");
 }
 
@@ -6839,7 +7226,7 @@ async function renderInstanceDetail(container, withActions) {
   const statePill = el("span", { class: "pill " + (inst.state === "COMPLETED" ? "pill-green" : "pill-blue") }, inst.state);
 
   const graphPanel = el("div", { class: "panel" },
-    el("div", { class: "panel-h" }, el("h2", null, "Live-Prozesslandkarte"), el("span", { class: "sub" }, inst.id), statePill,
+    el("div", { class: "panel-h" }, el("h2", null, "Live-Prozesslandkarte"), el("span", { class: "sub" }, instanceCaption(inst, runSchema)), statePill,
       inst.is_test ? el("span", { class: "pill pill-amber", title: "Test-Instanz \u2013 nicht im Monitoring gez\u00E4hlt" }, "TEST") : null),
     el("div", { class: "panel-b" }, renderGraph(runSchema, { instance: inst })));
 
@@ -7400,19 +7787,25 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       const elem = schema.data_elements[f.element_id];
       const writable = f.mode === "WRITE" || f.mode === "READ_WRITE";
       const { control, read } = maskControl(elem, f.widget, f.options, values[f.element_id]);
-      if (!writable) control.setAttribute("disabled", "disabled");
-      else inputs[f.element_id] = { read, elem, label: f.label, required: f.required !== false };
-      return { group: f.group, node: el("label", { class: "field" },
+      // Pruefregeln auch als HTML-Attribute (Tastatur, Browserhinweis), VAL-22.
+      if (f.min_value != null) control.setAttribute("min", String(f.min_value));
+      if (f.max_value != null) control.setAttribute("max", String(f.max_value));
+      if (f.max_length != null) control.setAttribute("maxlength", String(f.max_length));
+      const wrap = el("label", { class: "field" },
         f.label + (f.required && writable ? " *" : ""), control,
-        f.help_text ? el("span", { class: "field-help" }, f.help_text) : null) };
+        f.help_text ? el("span", { class: "field-help" }, f.help_text) : null);
+      if (!writable) control.setAttribute("disabled", "disabled");
+      else inputs[f.element_id] = { read, elem, label: f.label, required: f.required !== false, field: f, wrap };
+      return { group: f.group, node: wrap };
     }), form.columns || 1));
   } else {
     const writes = (schema.data_accesses || []).filter((a) => a.node_id === nodeId && (a.mode === "WRITE" || a.mode === "READ_WRITE"));
     writes.forEach((a) => {
       const elem = schema.data_elements[a.element_id];
       const { control, read } = maskControl(elem, fallbackWidget(elem), null, values[a.element_id]);
-      inputs[a.element_id] = { read, elem, label: elem ? elem.name : a.element_id, required: true };
-      body.appendChild(el("label", { class: "field" }, (elem ? elem.name : a.element_id) + ` (${elem ? elem.data_type : "?"})`, control));
+      const wrap = el("label", { class: "field" }, (elem ? elem.name : a.element_id) + ` (${elem ? typeName(elem.data_type) : "?"})`, control);
+      inputs[a.element_id] = { read, elem, label: elem ? elem.name : a.element_id, required: true, wrap };
+      body.appendChild(wrap);
     });
   }
   const doComplete = async () => {
@@ -7423,12 +7816,18 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
     // Laufzeitfehler an einem *anderen* Schritt. Das Modell erklaert die
     // Pflicht bereits (FormField.required), also halten wir sie auch ein.
     const missing = [];
-    for (const [eid, { read, elem, label: fieldLabel, required }] of Object.entries(inputs)) {
+    const invalid = [];
+    for (const [eid, { read, label: fieldLabel, required, field, wrap }] of Object.entries(inputs)) {
       const val = read();
       if (val === undefined) {
+        // Pflichtfehler am Feld zeigen, nicht nur in der Meldung (VAL-22).
+        markField(wrap, required ? "Pflichtfeld" : null);
         if (required) missing.push(fieldLabel);
         continue;
       }
+      const problem = field ? fieldRuleProblem(field, val) : null;
+      markField(wrap, problem);
+      if (problem) { invalid.push(`${fieldLabel}: ${problem}`); continue; }
       // Kein Umwandeln hier: ``read()`` hat schon typisiert, was eindeutig ist
       // (``coerceTypedInput``); der Rest geht roh an den Kern und kommt als
       // D3-Meldung zurueck (VAL-04).
@@ -7436,6 +7835,10 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
     }
     if (missing.length) {
       toast("err", "Bitte alle Pflichtfelder ausfüllen", missing);
+      return false;
+    }
+    if (invalid.length) {
+      toast("err", "Bitte die markierten Eingaben pr\u00FCfen", invalid);
       return false;
     }
     return submitCompletion(data, null);
@@ -7589,6 +7992,9 @@ async function viewMonitor() {
   // (GET /monitoring/unstaffed); hier nur Kachel, Liste und Filter.
   let unstaffed = [];
   try { unstaffed = await api.get("/monitoring/unstaffed"); } catch (e) { /* best-effort */ }
+  // Benennende Werte je Vorgang (VAL-17); fehlen sie, bleibt die ID.
+  let titles = {};
+  try { titles = await api.get("/instance-titles"); } catch (e) { /* best-effort */ }
   const unstaffedIds = new Set(unstaffed.map((u) => u.instance_id));
 
   // Z4 (Priorisierungs-Konzept \u00A77): \u00DCberf\u00E4llig-Zusammenfassung \u00FCber alle
@@ -7672,7 +8078,9 @@ async function viewMonitor() {
     const total = Object.keys(i.node_states || {}).length || 1;
     const completed = Object.values(i.node_states || {}).filter((s) => s === "COMPLETED" || s === "SKIPPED").length;
     const pct = Math.round((completed / total) * 100);
-    return { i, cells: [i.id, schemaLabel(i.schema_id, i.schema_version), statePillFor(i.state), `${pct}%`] };
+    const title = contextTitle(titles[i.id]);
+    const idCell = title ? el("div", null, title, el("div", { class: "task-context" }, i.id)) : i.id;
+    return { i, cells: [idCell, schemaLabel(i.schema_id, i.schema_version), statePillFor(i.state), `${pct}%`] };
   });
 
   const tbl = el("table", null,
@@ -7689,6 +8097,15 @@ async function viewMonitor() {
 
   // Detail der ausgewaehlten Instanz inkl. Live-Prozesslandkarte -- direkt unter
   // der Liste der aktiven Instanzen, damit der Bezug sofort sichtbar ist.
+  // Die ausgewaehlte Instanz frisch laden: ``state.instance`` stammt sonst aus
+  // einer frueheren Sicht und zeigte beim Oeffnen ihren Startzustand, bis man
+  // die Zeile anklickte (VAL-14). Die Revisions-Abfrage rendert bei neuem
+  // Fortschritt ohnehin neu -- damit bleibt das Detail aktuell. Ist sie nicht
+  // mehr lesbar (geloescht, fremd), faellt die Auswahl weg.
+  if (state.instanceId) {
+    try { await loadInstance(state.instanceId); }
+    catch (e) { state.instanceId = null; state.instance = null; state.worklist = null; }
+  }
   if (state.instance) {
     const detail = el("div");
     // Schema der Instanz laden, damit der Graph passt
@@ -8343,7 +8760,13 @@ async function viewTasks() {
                 onClick: () => failTask(t, agentId) }, "Problem")
             : null);
       }
-      return [t.label || t.node_id, schemaLabel(t.schema_id, t.schema_version), dueCell(t), elig, status, actions];
+      // Zwei gleiche Aufgaben verschiedener Vorgaenge waren nicht zu
+      // unterscheiden -- darunter jetzt die benennenden Werte (VAL-17).
+      const title = contextTitle(t.context);
+      const taskCell = title
+        ? el("div", null, t.label || t.node_id, el("div", { class: "task-context" }, title))
+        : (t.label || t.node_id);
+      return [taskCell, schemaLabel(t.schema_id, t.schema_version), dueCell(t), elig, status, actions];
     });
     body.appendChild(table(["Aufgabe", "Prozess", "Fällig", "Berechtigte", "Status", ""], rows));
     if (hiddenCount > 0) {
@@ -8636,7 +9059,7 @@ function simulationPanel(schema) {
       input = el("input", { type: "text", placeholder: "– nicht gesetzt –" });
     }
     inputs[d.id] = { input, type: d.data_type };
-    return el("label", { class: "field" }, `${d.name} (${d.data_type})`, input);
+    return el("label", { class: "field" }, `${d.name} (${typeName(d.data_type)})`, input);
   });
   const result = el("div", null);
   async function run() {
@@ -9306,7 +9729,7 @@ function dataBindingPanel() {
     const bindBtn = el("button", { class: "btn small ghost", onClick: () => bindExternalElement(d), disabled: !draft || !hasConn }, "Datensatz");
     const sqlBtn = el("button", { class: "btn small ghost", onClick: () => bindSqlSelect(d), disabled: !draft || !hasConn }, "SQL-Select");
     const writeBtn = el("button", { class: "btn small ghost", onClick: () => bindSqlWrite(d), disabled: !draft || !hasConn }, "SQL-Write");
-    return [d.name, d.data_type, src, detail, el("div", { class: "row-actions" }, bindBtn, sqlBtn, writeBtn)];
+    return [d.name, typeName(d.data_type), src, detail, el("div", { class: "row-actions" }, bindBtn, sqlBtn, writeBtn)];
   });
   const elemBlock = el("div", null,
     el("div", { class: "sub-h" }, el("h3", null, "Datenelemente")),
@@ -9393,7 +9816,7 @@ function bindSqlSelect(element) {
   const entityList = wireEntitySuggestions(entity, "pw-sql-entities", () => conn.value, conn);
   const colInput = el("input", { type: "text", placeholder: "z. B. name", list: "pw-sql-cols" });
   const colDatalist = el("datalist", { id: "pw-sql-cols" });
-  const colType = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t }, t)));
+  const colType = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t }, typeName(t))));
   colType.value = element.data_type;
   const agg = el("select", null, ...SQL_AGGREGATES.map((a) => el("option", { value: a }, a === "NONE" ? "\u2014 kein \u2014" : a)));
   const card = el("select", null, ...SQL_CARDINALITIES.map(([v, l]) => el("option", { value: v }, l)));
@@ -9417,7 +9840,7 @@ function bindSqlSelect(element) {
     try {
       columns = await api.get(`/v1/connectors/${conn.value}/columns?entity=${encodeURIComponent(entity.value.trim())}`);
       clear(colDatalist);
-      columns.forEach((c) => colDatalist.appendChild(el("option", { value: c.column }, `${c.sql_type} \u2192 ${c.data_type || "?"}`)));
+      columns.forEach((c) => colDatalist.appendChild(el("option", { value: c.column }, `${c.sql_type} \u2192 ${typeName(c.data_type)}`)));
       applyColType(); refresh();
       toast("ok", `${columns.length} Spalten geladen`);
     } catch (err) { columns = null; const d = describeError(err); toast("info", "Keine Live-Spalten \u2013 Namen/Typ manuell", d.lines); }
@@ -9443,7 +9866,7 @@ function bindSqlSelect(element) {
     preview.textContent = (s.column && s.entity) ? sqlSelectPreview(s) : "\u2026";
     const rt = sqlResultType(s.aggregate, s.column_type);
     const ok4 = rt === element.data_type;
-    typeHint.textContent = `Ergebnistyp ${rt} ${ok4 ? "\u2713 passt zu" : "\u2717 passt nicht zu"} \u201E${element.name}\u201C (${element.data_type})`;
+    typeHint.textContent = `Ergebnistyp ${typeName(rt)} ${ok4 ? "\u2713 passt zu" : "\u2717 passt nicht zu"} \u201E${element.name}\u201C (${typeName(element.data_type)})`;
     typeHint.className = "sub " + (ok4 ? "ok-hint" : "bad-hint");
     let ok6 = true, msg = "";
     if (s.cardinality === "KEY_UNIQUE") {
@@ -9468,7 +9891,7 @@ function bindSqlSelect(element) {
     const opSel = el("select", null, ...SQL_OPERATORS.map(([v, l]) => el("option", { value: v }, l)));
     opSel.value = f.operator;
     opSel.addEventListener("change", () => { f.operator = opSel.value; refresh(); });
-    const srcSel = el("select", null, ...instanceElems.map((d) => el("option", { value: d.id }, `${d.name} (${d.data_type})`)));
+    const srcSel = el("select", null, ...instanceElems.map((d) => el("option", { value: d.id }, `${d.name} (${typeName(d.data_type)})`)));
     srcSel.value = f.source;
     srcSel.addEventListener("change", () => { f.source = srcSel.value; refresh(); });
     const rm = el("button", { class: "btn small danger", type: "button", onClick: () => { const i = filters.indexOf(f); if (i >= 0) filters.splice(i, 1); renderFilters(); refresh(); } }, "\u00D7");
@@ -9538,7 +9961,7 @@ function bindSqlWrite(element) {
   const entityList = wireEntitySuggestions(entity, "pw-sqlw-entities", () => conn.value, conn);
   const colInput = el("input", { type: "text", placeholder: "z. B. status", list: "pw-sqlw-cols" });
   const colDatalist = el("datalist", { id: "pw-sqlw-cols" });
-  const colType = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t }, t)));
+  const colType = el("select", null, ...DATA_TYPES.map((t) => el("option", { value: t }, typeName(t))));
   colType.value = element.data_type;
   const uniqueCol = el("input", { type: "text", placeholder: "z. B. kd_id" });
   const preview = el("pre", { class: "code-block" });
@@ -9558,7 +9981,7 @@ function bindSqlWrite(element) {
     try {
       columns = await api.get(`/v1/connectors/${conn.value}/columns?entity=${encodeURIComponent(entity.value.trim())}`);
       clear(colDatalist);
-      columns.forEach((c) => colDatalist.appendChild(el("option", { value: c.column }, `${c.sql_type} \u2192 ${c.data_type || "?"}`)));
+      columns.forEach((c) => colDatalist.appendChild(el("option", { value: c.column }, `${c.sql_type} \u2192 ${typeName(c.data_type)}`)));
       applyColType(); refresh();
       toast("ok", `${columns.length} Spalten geladen`);
     } catch (err) { columns = null; const d = describeError(err); toast("info", "Keine Live-Spalten \u2013 Namen/Typ manuell", d.lines); }
@@ -9579,7 +10002,7 @@ function bindSqlWrite(element) {
     const s = spec();
     preview.textContent = (s.column && s.entity) ? sqlUpdatePreview(s) : "\u2026";
     const ok7 = s.column_type === element.data_type;
-    typeHint.textContent = `Zielspalte ${s.column_type} ${ok7 ? "\u2713 passt zu" : "\u2717 passt nicht zu"} \u201E${element.name}\u201C (${element.data_type})`;
+    typeHint.textContent = `Zielspalte ${typeName(s.column_type)} ${ok7 ? "\u2713 passt zu" : "\u2717 passt nicht zu"} \u201E${element.name}\u201C (${typeName(element.data_type)})`;
     typeHint.className = "sub " + (ok7 ? "ok-hint" : "bad-hint");
     const ok9 = !!s.unique_column && s.filters.some((f) => f.operator === "EQ" && f.column === s.unique_column);
     cardHint.textContent = (ok9 ? "\u2713 " : "\u2717 ") + (ok9 ? "Trifft genau eine Zeile (eindeutiger Schl\u00FCssel)" : "Gleichheitsfilter auf die eindeutige Spalte n\u00F6tig");
@@ -9592,7 +10015,7 @@ function bindSqlWrite(element) {
     const opSel = el("select", null, ...SQL_OPERATORS.map(([v, l]) => el("option", { value: v }, l)));
     opSel.value = f.operator;
     opSel.addEventListener("change", () => { f.operator = opSel.value; refresh(); });
-    const srcSel = el("select", null, ...instanceElems.map((d) => el("option", { value: d.id }, `${d.name} (${d.data_type})`)));
+    const srcSel = el("select", null, ...instanceElems.map((d) => el("option", { value: d.id }, `${d.name} (${typeName(d.data_type)})`)));
     srcSel.value = f.source;
     srcSel.addEventListener("change", () => { f.source = srcSel.value; refresh(); });
     const rm = el("button", { class: "btn small danger", type: "button", onClick: () => { const i = filters.indexOf(f); if (i >= 0) filters.splice(i, 1); renderFilters(); refresh(); } }, "\u00D7");
@@ -10128,11 +10551,14 @@ function hasRole(...allowed) {
 // Fetch the verified identity from the API (/auth/me). On 401 the token is
 // invalid; we drop it and fall back to anonymous so the UI stays usable.
 async function loadPrincipal() {
+  const before = state.principal && state.principal.subject;
   try {
     state.principal = await api.get("/auth/me");
+    // Anderer Login: Meldungen der vorigen Person gehoeren nicht hierher (VAL-13).
+    if (before !== undefined && before !== (state.principal && state.principal.subject)) clearToasts();
   } catch (err) {
     state.principal = null;
-    if (err && err.status === 401 && state.token) {
+    if (err && err.status === 401 && state.token && !demoRecovering) {
       toast("err", "Anmeldung fehlgeschlagen", ["Token ung\u00FCltig \u2013 bitte erneut anmelden."]);
     }
   }
@@ -10398,6 +10824,7 @@ async function logout() {
   }
   state.token = "";
   state.principal = null;
+  clearToasts();  // nichts von dieser Sitzung bleibt fuer die naechste stehen (VAL-13)
   localStorage.removeItem("authToken");
   if (state.passwordLogin) showLoginOverlay();
   else await boot();
@@ -10409,9 +10836,13 @@ async function logout() {
 // for a session token (via the normal /auth/login path -- no auth bypass).
 // Returns true on success. Used for the silent auto-login and role switching.
 // Demo users skip the forced first-change, so no password-change step follows.
+/** sessionStorage: zuletzt benutzte Demo-Person (fuer die Wiederanmeldung, VAL-20). */
+const DEMO_LAST_LOGIN_KEY = "demoLastLogin";
+
 async function demoLoginAs(login) {
   try {
     const res = await api.post("/auth/login", { login, password: state.demoPassword });
+    storageSet(sessionStorage, DEMO_LAST_LOGIN_KEY, login);
     state.token = res.token;
     localStorage.setItem("authToken", state.token);
     return true;
@@ -10426,6 +10857,12 @@ async function switchDemoRole(login) {
   if (login === (state.principal && state.principal.subject)) return;
   const ok = await demoLoginAs(login);
   if (ok) {
+    // Wer die Leiste geschlossen hatte, sieht sie nach dem Wechsel nur
+    // eingeklappt wieder -- als Hinweis auf die neue Rolle, nicht als volle
+    // Leiste, die sich jedes Mal neu aufdraengt (VAL-19).
+    if (sessionStorage.getItem("demoBannerDismissed") === "1") {
+      storageSet(localStorage, DEMO_BANNER_COLLAPSED_KEY, "1");
+    }
     sessionStorage.removeItem("demoBannerDismissed");
     hideOverlay();
     await boot();
@@ -10992,6 +11429,10 @@ async function boot() {
     }
     await loadPrincipal();
     if (state.passwordLogin && !state.principal) {
+      // Demo mit abgelaufener Sitzung: Der 401 von /auth/me hat die
+      // Wiederanmeldung schon angestossen (request); sie ruft boot() erneut.
+      // Keine Anmeldemaske dazwischen (VAL-20).
+      if (demoRecovering) return;
       showLoginOverlay();
       return;
     }

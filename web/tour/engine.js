@@ -136,6 +136,15 @@ const Tour = (() => {
 
   // --- Angebot beim ersten Anmelden ---------------------------------------
 
+  /** sessionStorage-Merker: in dieser Browsersitzung wurde schon gefragt. */
+  const OFFERED_KEY = "procworks.tour.offered";
+  function sessionGet(key) {
+    try { return sessionStorage.getItem(key); } catch (_e) { return null; }
+  }
+  function sessionSet(key, value) {
+    try { sessionStorage.setItem(key, value); } catch (_e) { /* nur Komfort */ }
+  }
+
   /**
    * Bietet nach dem Booten die erste noch nicht erledigte Tour an.
    *
@@ -145,6 +154,11 @@ const Tour = (() => {
   function maybeOffer() {
     try {
       if (t.tour) return;
+      // Hoechstens ein Angebot je Browsersitzung: Jeder Rollenwechsel in der
+      // Demo ist ein neuer Login, und die Frage fing danach jedes Mal die
+      // Klicks ab (Validierung 2026-09-25, VAL-19). Die Touren bleiben ueber
+      // „Hilfe“ erreichbar.
+      if (sessionGet(OFFERED_KEY) === "1") return;
       const tour = availableTours().find(
         (x) => !isDone(x) && postponeCount(x) < MAX_POSTPONE);
       if (!tour) return;
@@ -160,6 +174,7 @@ const Tour = (() => {
    */
   function offer(tour) {
     if (t.tour) return;
+    sessionSet(OFFERED_KEY, "1");
     const resumeAt = savedProgress(tour);
     const root = byId("tour-root");
     clear(root);

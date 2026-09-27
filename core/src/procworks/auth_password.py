@@ -238,6 +238,63 @@ class _SessionInfo:
         self.expires_at = expires_at
 
 
+@runtime_checkable
+class SessionStore(Protocol):
+    """Where login sessions live (Validierung 2026-09-25, VAL-11).
+
+    Keys are the SHA-256 **digests** of the bearer tokens -- the clear token is
+    never stored, so a leaked table cannot be replayed. Sessions used to live
+    only in the backend's memory: every ``docker compose restart api`` and
+    every update logged everybody out. With ``DATABASE_URL`` they are now kept
+    in the database (``auth_session``) and survive a restart.
+    """
+
+    def get(self, digest: str) -> _SessionInfo | None: ...
+
+    def put(self, digest: str, info: _SessionInfo) -> None: ...
+
+    def delete(self, digest: str) -> None: ...
+
+    def delete_for_login(self, login: str) -> None: ...
+
+    def purge_expired(self, now: datetime) -> None: ...
+
+
+class InMemorySessionStore:
+    """Sessions in process memory (default without ``DATABASE_URL``)."""
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, _SessionInfo] = {}
+
+    def get(self, digest: str) -> _SessionInfo | None:
+        return self._sessions.get(digest)
+
+    def put(self, digest: str, info: _SessionInfo) -> None:
+        self._sessions[digest] = info
+
+    def delete(self, digest: str) -> None:
+        self._sessions.pop(digest, None)
+
+    def delete_for_login(self, login: str) -> None:
+        for digest in [d for d, i in self._sessions.items() if i.login == login]:
+            del self._sessions[digest]
+
+    def purge_expired(self, now: datetime) -> None:
+        for digest in [d for d, i in self._sessions.items() if i.expires_at <= now]:
+            del self._sessions[digest]
+
+
+def create_session_store() -> SessionStore:
+    """Build the session store from the environment (mirrors the credential store)."""
+
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        from procworks.db import SqlAlchemySessionStore
+
+        return SqlAlchemySessionStore(url, create_tables=True)
+    return InMemorySessionStore()
+
+
 class LoginResult(BaseModel):
     """Outcome of a successful login (the SPA stores ``token`` as a bearer)."""
 
@@ -259,10 +316,11 @@ class PasswordAuthBackend:
         store: CredentialStore,
         *,
         session_ttl: timedelta = timedelta(hours=12),
+        sessions: SessionStore | None = None,
     ) -> None:
         self._store = store
         self._ttl = session_ttl
-        self._sessions: dict[str, _SessionInfo] = {}
+        self._sessions: SessionStore = sessions or InMemorySessionStore()
 
     @property
     def store(self) -> CredentialStore:
@@ -272,7 +330,7 @@ class PasswordAuthBackend:
     def from_env(cls) -> PasswordAuthBackend:
         minutes = os.environ.get("PROCWORKS_SESSION_TTL_MINUTES")
         ttl = timedelta(minutes=int(minutes)) if minutes else timedelta(hours=12)
-        backend = cls(create_credential_store(), session_ttl=ttl)
+        backend = cls(create_credential_store(), session_ttl=ttl, sessions=create_session_store())
         backend._bootstrap_admin()
         return backend
 
@@ -344,11 +402,11 @@ class PasswordAuthBackend:
         if session is None:
             raise AuthError("invalid session")
         if session.expires_at <= datetime.now(UTC):
-            self._sessions.pop(_digest(token), None)
+            self._sessions.delete(_digest(token))
             raise AuthError("session expired")
         user = self._store.get_user(session.login)
         if user is None:
-            self._sessions.pop(_digest(token), None)
+            self._sessions.delete(_digest(token))
             raise AuthError("unknown user")
         return _principal_of(user)
 
@@ -362,8 +420,11 @@ class PasswordAuthBackend:
         if user is None or not ok:
             raise AuthError("invalid credentials")
         token = secrets.token_urlsafe(32)
-        self._sessions[_digest(token)] = _SessionInfo(
-            login=user.login, expires_at=datetime.now(UTC) + self._ttl
+        now = datetime.now(UTC)
+        # Expired sessions are cleaned up on each login -- no scheduler needed.
+        self._sessions.purge_expired(now)
+        self._sessions.put(
+            _digest(token), _SessionInfo(login=user.login, expires_at=now + self._ttl)
         )
         return LoginResult(
             token=token, principal=_principal_of(user), must_change=user.must_change
@@ -372,7 +433,7 @@ class PasswordAuthBackend:
     def logout(self, authorization: str | None) -> None:
         token = bearer_token(authorization)
         if token is not None:
-            self._sessions.pop(_digest(token), None)
+            self._sessions.delete(_digest(token))
 
     def change_password(self, login: str, current: str, new: str) -> None:
         user = self._store.get_user(login)
@@ -437,7 +498,15 @@ class PasswordAuthBackend:
                 update={"password_hash": hash_password(initial), "must_change": True}
             )
         )
+        # A reset usually means "this account is no longer safe": sessions now
+        # survive restarts (VAL-11), so they must end here explicitly.
+        self.revoke_sessions(login)
         return initial
+
+    def revoke_sessions(self, login: str) -> None:
+        """End every session of ``login`` (password reset, deleted user)."""
+
+        self._sessions.delete_for_login(login)
 
 
 # -- brute-force throttling (Validierung 2026-09-25, VAL-06) ------------------

@@ -235,3 +235,11 @@
 @media (prefers-reduced-motion: reduce) {
   .tour-ring { animation: none; }
 }
+
+/* Waehrend einer Tour tritt die Demo-Leiste zurueck (Validierung 2026-09-25,
+   VAL-19): Sie reicht bis an den unteren Rand und schien durch die Aussparung
+   von Ankern wie Statusleiste oder Abwesenheit. Ihr Platz bleibt reserviert
+   (--demo-banner-h), damit die Anker nicht springen. */
+html[data-tour-active] .demo-banner {
+  visibility: hidden;
+}

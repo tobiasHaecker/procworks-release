@@ -52,10 +52,14 @@ startet alles):
 cd C:\
 git clone https://github.com/tobiasHaecker/procworks-release.git ProcWorks
 cd C:\ProcWorks
-docker compose -f deploy/docker-compose.full.yml up --build -d
+docker compose -f deploy/docker-compose.full.yml up -d
 ```
 
 Fertig. Im Browser `http://localhost` öffnen – es erscheint das Login-Fenster.
+
+Der Stack lädt dabei die fertigen, auf Sicherheitslücken geprüften Images der
+Version dieses Checkouts von `ghcr.io` herunter; gebaut wird nichts. Wer den
+Quelltext selbst ändert, startet mit `up --build -d` und baut aus dem Checkout.
 
 #### Erste Anmeldung als Administrator
 
@@ -90,7 +94,7 @@ Linux). Dann:
 ```bash
 git clone https://github.com/tobiasHaecker/procworks-release.git procworks
 cd procworks
-docker compose -f deploy/docker-compose.full.yml up --build -d
+docker compose -f deploy/docker-compose.full.yml up -d
 # Oberfläche: http://localhost   ·   Login: admin
 # Das einmalige Start-Passwort steht im Server-Log (hinter "temporary password="):
 docker compose -f deploy/docker-compose.full.yml logs api | grep "Initial admin"
@@ -138,7 +142,7 @@ da, sobald die Oberfläche erscheint.
 
 ```bash
 PROCWORKS_LOAD_DEMO=1 PROCWORKS_LOAD_O2C=1 \
-  docker compose -f deploy/docker-compose.full.yml up --build -d
+  docker compose -f deploy/docker-compose.full.yml up -d
 ```
 
 In der PowerShell entspricht das `$env:PROCWORKS_LOAD_DEMO="1"` (und dasselbe für

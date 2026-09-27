@@ -1592,6 +1592,23 @@ def delete_data_element(schema: ProcessSchema, element_id: str) -> ProcessSchema
         form.fields = [f for f in form.fields if f.element_id != element_id]
         if not form.fields:
             del candidate.forms[node_id]
+    # A display field is presentation only -- it never blocks a deletion.
+    candidate.display_fields = [e for e in candidate.display_fields if e != element_id]
+    return raise_if_invalid(candidate)
+
+
+def set_display_fields(schema: ProcessSchema, element_ids: list[str]) -> ProcessSchema:
+    """Choose the data elements that name an instance and its tasks (VAL-17).
+
+    requires: schema editable (R0); at most two distinct INSTANCE elements
+              (checked by U5 in ``validate``).
+    ensures:  ``display_fields`` is replaced; nothing else changes. The values
+              appear as the instance title and as context in worklists.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    candidate.display_fields = list(dict.fromkeys(element_ids))
     return raise_if_invalid(candidate)
 
 
@@ -1728,6 +1745,11 @@ class FormFieldSpec:
     help_text: str | None = None
     #: Optional heading the field is grouped under (presentation only).
     group: str = ""
+    #: Optional input checks (VAL-22), see :class:`procworks.model.FormField`.
+    min_value: float | None = None
+    max_value: float | None = None
+    pattern: str | None = None
+    max_length: int | None = None
 
 
 def set_form(
@@ -1821,6 +1843,10 @@ def set_form(
                 options=list(spec.options),
                 help_text=spec.help_text,
                 group=spec.group.strip(),
+                min_value=spec.min_value,
+                max_value=spec.max_value,
+                pattern=spec.pattern or None,
+                max_length=spec.max_length,
             )
         )
 

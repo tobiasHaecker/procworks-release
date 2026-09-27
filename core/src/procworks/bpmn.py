@@ -45,16 +45,20 @@ validating import (No-Bypass), it is never stored undecidable.
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 
 from pydantic import TypeAdapter
 
 from procworks.model import (
+    AccessMode,
     ActivityTemplate,
     ConnectorDescriptor,
     ControlEdge,
     DataAccess,
     DataElement,
+    DataSourceKind,
+    DataType,
     EdgeType,
     EscalationPolicy,
     Form,
@@ -68,7 +72,9 @@ from procworks.model import (
     StaffRule,
     TimeConstraint,
     WorkItemPriority,
+    XorBranch,
     XorDecision,
+    XorDecisionKind,
     loop_block,
     loop_condition_text,
     staff_rule_text,
@@ -385,6 +391,8 @@ def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
         },
         "deadline_seconds": schema.deadline_seconds,
         "is_library_subprocess": schema.is_library_subprocess,
+        # Presentation, but lost otherwise: which elements name an instance (VAL-17).
+        "display_fields": list(schema.display_fields),
     }
     # Empty layers are left out entirely; a pure control-flow model therefore
     # stays a plain BPMN document without any extension element.
@@ -767,6 +775,11 @@ def import_bpmn(
         if source not in raw_nodes or target not in raw_nodes:
             raise BpmnError("sequenceFlow references an unknown flow node")
 
+    # Implicit splits/merges (a task with several outgoing or incoming flows)
+    # become explicit gateways first -- they are ordinary BPMN, and the
+    # block-structure check then sees what the document means (VAL-10).
+    flows = _normalize_implicit_gateways(raw_nodes, flows)
+
     # Loop recognition must run before node-type resolution: after dropping a
     # loop-back flow both gateways have in=1/out=1, which is neither a pure
     # split nor a pure join.
@@ -801,6 +814,10 @@ def import_bpmn(
     }
     data_accesses = _DATA_ACCESSES.validate_python(model.get("data_accesses", []))
     xor_decisions = _XOR_DECISIONS.validate_python(model.get("xor_decisions", {}))
+    # Splits the extension does not decide: read the decision from the
+    # standard conditionExpression texts (VAL-10). Adds missing discriminator
+    # elements and, where nothing writes one, a write at the step before.
+    _decisions_from_conditions(nodes, flows, data_elements, data_accesses, xor_decisions)
     loop_decisions = _LOOP_DECISIONS.validate_python(model.get("loop_decisions", {}))
     forms = _FORMS.validate_python(model.get("forms", {}))
     connectors = _CONNECTORS.validate_python(model.get("connectors", {}))
@@ -845,8 +862,271 @@ def import_bpmn(
         ),
         deadline_seconds=_optional_float(model.get("deadline_seconds")),
         is_library_subprocess=bool(model.get("is_library_subprocess", False)),
+        display_fields=_string_list(model.get("display_fields")),
     )
     return raise_if_invalid(schema, resolver)
+
+
+# --- normalisation of standard BPMN (Validierung 2026-09-25, VAL-10) ---------
+
+
+def _normalize_implicit_gateways(
+    raw_nodes: dict[str, tuple[str, str]],
+    flows: list[tuple[str, str, str | None]],
+) -> list[tuple[str, str, str | None]]:
+    """Turn implicit splits and merges into explicit gateways.
+
+    Standard BPMN lets a task (or an event) have several outgoing or incoming
+    flows without a gateway. The block-structured model needs the gateway, and
+    the import rejected such documents outright ("Aufgabe mit zwei Eingängen").
+
+    * **Implicit split:** several *unconditional* outgoing flows of a
+      non-gateway node mean "all of them" in BPMN -- a parallelGateway is
+      inserted. With conditions on them the semantics would be inclusive, which
+      the checked subset does not support; those flows stay as they are and the
+      validator rejects the node (K2), never guessing.
+    * **Implicit merge:** several incoming flows of a non-gateway node get a
+      join. Its kind follows the split all incoming paths come from
+      (:func:`_nearest_common_split`); without a common split it is exclusive.
+
+    Pure restructuring of the flow list: the result goes through the same
+    loop recognition, typing and ``validate()`` as any document -- a wrong
+    guess is rejected (K1), never stored.
+    """
+
+    def is_gateway(node_id: str) -> bool:
+        return raw_nodes[node_id][0] in _GATEWAY_TAGS
+
+    def fresh(base: str) -> str:
+        candidate, n = base, 2
+        while candidate in raw_nodes:
+            candidate, n = f"{base}_{n}", n + 1
+        return candidate
+
+    result = list(flows)
+    for node_id in list(raw_nodes):
+        if is_gateway(node_id):
+            continue
+        outgoing = [f for f in result if f[0] == node_id]
+        if len(outgoing) > 1 and all(f[2] is None for f in outgoing):
+            split = fresh(f"{node_id}_split")
+            raw_nodes[split] = ("parallelGateway", "")
+            result = [f for f in result if f[0] != node_id]
+            result.append((node_id, split, None))
+            result += [(split, f[1], None) for f in outgoing]
+    for node_id in list(raw_nodes):
+        if is_gateway(node_id):
+            continue
+        incoming = [f for f in result if f[1] == node_id]
+        if len(incoming) > 1:
+            common = _nearest_common_split(raw_nodes, result, [f[0] for f in incoming])
+            kind = raw_nodes[common][0] if common is not None else "exclusiveGateway"
+            join = fresh(f"{node_id}_join")
+            raw_nodes[join] = (kind, "")
+            result = [f for f in result if f[1] != node_id]
+            result += [(f[0], join, f[2]) for f in incoming]
+            result.append((join, node_id, None))
+    return result
+
+
+def _nearest_common_split(
+    raw_nodes: dict[str, tuple[str, str]],
+    flows: list[tuple[str, str, str | None]],
+    sources: list[str],
+) -> str | None:
+    """The closest split gateway that every one of ``sources`` descends from.
+
+    Backwards breadth-first search from each source; a gateway with several
+    outgoing flows is a split. Returns the split reached by all searches with
+    the smallest summed distance, or ``None`` when they share none (then the
+    caller defaults to an exclusive join -- the validator decides).
+    """
+
+    preds: dict[str, list[str]] = {}
+    outdeg: dict[str, int] = {}
+    for s, t, _ in flows:
+        preds.setdefault(t, []).append(s)
+        outdeg[s] = outdeg.get(s, 0) + 1
+
+    def splits_above(origin: str) -> dict[str, int]:
+        found: dict[str, int] = {}
+        seen = {origin}
+        frontier = [(origin, 0)]
+        while frontier:
+            current, dist = frontier.pop(0)
+            if raw_nodes[current][0] in _GATEWAY_TAGS and outdeg.get(current, 0) > 1:
+                found.setdefault(current, dist)
+            for p in preds.get(current, []):
+                if p not in seen:
+                    seen.add(p)
+                    frontier.append((p, dist + 1))
+        return found
+
+    maps = [splits_above(s) for s in sources]
+    common = set(maps[0]).intersection(*maps[1:]) if maps else set()
+    if not common:
+        return None
+    return min(common, key=lambda g: (sum(m[g] for m in maps), g))
+
+
+#: The captions ProcWorks writes into conditionExpression
+#: (:func:`procworks.model.xor_condition_text`), plus the ``${ … }`` wrapper
+#: other tools put around expressions.
+_COND_LOWER = re.compile(r"^(?P<d>.+?)\s*<\s*(?P<u>-?\d+(?:\.\d+)?)$")
+_COND_BETWEEN = re.compile(
+    r"^(?P<l>-?\d+(?:\.\d+)?)\s*<=\s*(?P<d>.+?)\s*<\s*(?P<u>-?\d+(?:\.\d+)?)$"
+)
+_COND_UPPER = re.compile(r"^(?P<d>.+?)\s*>=\s*(?P<l>-?\d+(?:\.\d+)?)$")
+_COND_BOOL = re.compile(r"^(?P<d>.+?)\s*==\s*(?P<b>true|false)$")
+_COND_IN = re.compile(r"^(?P<d>.+?)\s+in\s+\[(?P<v>.*)\]$")
+_COND_ELSE = re.compile(r"^(?P<d>.+?)\s*:\s*otherwise$")
+
+
+def _parse_condition(text: str) -> tuple[str, XorDecisionKind, dict[str, object]] | None:
+    """Parse one condition caption into (discriminator, kind, cell fields)."""
+
+    text = text.strip()
+    wrapped = re.match(r"^[$#]\{(.*)\}$", text, re.S)
+    if wrapped:
+        text = wrapped.group(1).strip()
+    if m := _COND_BETWEEN.match(text):
+        return m["d"], XorDecisionKind.THRESHOLD, {"lower": float(m["l"]), "upper": float(m["u"])}
+    if m := _COND_LOWER.match(text):
+        return m["d"], XorDecisionKind.THRESHOLD, {"lower": None, "upper": float(m["u"])}
+    if m := _COND_UPPER.match(text):
+        return m["d"], XorDecisionKind.THRESHOLD, {"lower": float(m["l"]), "upper": None}
+    if m := _COND_BOOL.match(text):
+        return m["d"], XorDecisionKind.BOOLEAN, {"bool_value": m["b"] == "true"}
+    if m := _COND_ELSE.match(text):
+        return m["d"], XorDecisionKind.ENUM, {"is_else": True}
+    if m := _COND_IN.match(text):
+        values = [v.strip().strip("'\"") for v in m["v"].split(",") if v.strip()]
+        return m["d"], XorDecisionKind.ENUM, {"values": values}
+    return None
+
+
+_KIND_TYPE = {
+    XorDecisionKind.THRESHOLD: DataType.FLOAT,
+    XorDecisionKind.BOOLEAN: DataType.BOOLEAN,
+    XorDecisionKind.ENUM: DataType.STRING,
+}
+
+
+def _decisions_from_conditions(
+    nodes: dict[str, Node],
+    flows: list[tuple[str, str, str | None]],
+    data_elements: dict[str, DataElement],
+    data_accesses: list[DataAccess],
+    xor_decisions: dict[str, XorDecision],
+) -> None:
+    """Derive missing XOR decisions from ``conditionExpression`` texts (VAL-10).
+
+    The ProcWorks extension carries the structured partition; a document
+    without it (a foreign tool, or an export whose extension was stripped)
+    still has the readable conditions. For every XOR split without a decision:
+
+    1. every outgoing flow must carry a parsable condition, all over the same
+       discriminator and of one kind -- otherwise nothing is derived and K7
+       rejects the split as before;
+    2. threshold cells must tile the number line (each lower bound equals the
+       previous upper bound) -- a gap or overlap is not guessed away;
+    3. the discriminator is the data element with that name or id, or a new
+       INSTANCE element of the fitting type;
+    4. if **no** step writes it, the ACTIVITY directly before the split gets a
+       mandatory WRITE -- the same default the XOR dialog uses (VAL-15). With
+       any other predecessor nothing is added and D1/K7 decide.
+
+    Mutates the passed collections; correctness is still decided solely by
+    ``validate()`` afterwards.
+    """
+
+    out: dict[str, list[tuple[str, str | None]]] = {}
+    pred: dict[str, list[str]] = {}
+    for s, t, c in flows:
+        out.setdefault(s, []).append((t, c))
+        pred.setdefault(t, []).append(s)
+    for split_id, node in nodes.items():
+        if node.type is not NodeType.XOR_SPLIT or split_id in xor_decisions:
+            continue
+        parsed = [(t, _parse_condition(c) if c else None) for t, c in out.get(split_id, [])]
+        if not parsed or any(p is None for _, p in parsed):
+            continue
+        discs = {p[0] for _, p in parsed if p is not None}
+        kinds = {p[1] for _, p in parsed if p is not None}
+        if len(discs) != 1 or len(kinds) != 1:
+            continue
+        disc_name, kind = discs.pop(), kinds.pop()
+        branches = _branches_of(kind, [(t, p[2]) for t, p in parsed if p is not None])
+        if branches is None:
+            continue
+        element = next(
+            (e for e in data_elements.values() if disc_name in (e.name, e.id)), None
+        )
+        if element is None:
+            element_id = re.sub(r"[^A-Za-z0-9_]+", "_", disc_name).strip("_") or "merkmal"
+            base, n = element_id, 2
+            while element_id in data_elements:
+                element_id, n = f"{base}_{n}", n + 1
+            element = DataElement(
+                id=element_id,
+                name=disc_name,
+                data_type=_KIND_TYPE[kind],
+                source=DataSourceKind.INSTANCE,
+            )
+            data_elements[element_id] = element
+        xor_decisions[split_id] = XorDecision(
+            discriminator=element.id, kind=kind, branches=branches
+        )
+        written = any(
+            a.element_id == element.id and a.mode in (AccessMode.WRITE, AccessMode.READ_WRITE)
+            for a in data_accesses
+        )
+        before = pred.get(split_id, [])
+        if not written and len(before) == 1 and nodes[before[0]].type is NodeType.ACTIVITY:
+            data_accesses.append(
+                DataAccess(
+                    node_id=before[0],
+                    element_id=element.id,
+                    mode=AccessMode.WRITE,
+                    mandatory=True,
+                )
+            )
+
+
+def _branches_of(
+    kind: XorDecisionKind, cells: list[tuple[str, dict[str, object]]]
+) -> list[XorBranch] | None:
+    """Order parsed cells into a partition, or ``None`` if they do not tile it."""
+
+    if kind is XorDecisionKind.THRESHOLD:
+        def lower(cell: dict[str, object]) -> float:
+            value = cell["lower"]
+            return float("-inf") if value is None else float(value)  # type: ignore[arg-type]
+
+        ordered = sorted(cells, key=lambda tc: lower(tc[1]))
+        previous: object = None
+        for index, (_, cell) in enumerate(ordered):
+            if cell["lower"] != previous:
+                return None  # gap or overlap -- not guessed away
+            if cell["upper"] is None and index != len(ordered) - 1:
+                return None
+            previous = cell["upper"]
+        return [
+            XorBranch(target=t, upper=c["upper"])  # type: ignore[arg-type]
+            for t, c in ordered
+        ]
+    if kind is XorDecisionKind.BOOLEAN:
+        return [XorBranch(target=t, bool_value=c["bool_value"]) for t, c in cells]  # type: ignore[arg-type]
+    return [
+        XorBranch(target=t, values=list(c.get("values", [])), is_else=bool(c.get("is_else")))  # type: ignore[call-overload]
+        for t, c in cells
+    ]
+
+
+def _string_list(value: object) -> list[str]:
+    """Read an optional list of strings from the extension payload ([] when absent)."""
+
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
 
 
 def _optional_float(value: object) -> float | None:

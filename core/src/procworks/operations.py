@@ -13,11 +13,11 @@ Correctness by Construction in practice.
 
 from __future__ import annotations
 
-import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from procworks import ids
 from procworks.model import (
     JOIN_TYPES,
     SPLIT_TYPES,
@@ -83,11 +83,16 @@ from procworks.validator import (
     raise_if_invalid,
 )
 
-_counter = itertools.count(1)
-
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{next(_counter)}"
+    """Return a fresh ``<prefix>_<n>`` id from the shared model sequence.
+
+    The sequence survives restarts by being lifted past the stored ids at
+    start-up, and the globally stored prefixes (``schema``, ``tpl``) are
+    checked against their store before use -- see :mod:`procworks.ids` (NT-01).
+    """
+
+    return ids.MODEL_IDS.new(prefix)
 
 
 def new_schema_id() -> str:

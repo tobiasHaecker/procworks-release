@@ -33,6 +33,7 @@ from procworks import (
     backups,
     demo,
     demo_o2c,
+    ids,
     mail_runtime,
     metrics,
     migration,
@@ -212,10 +213,17 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     This is a pure boundary convenience and touches no correctness rule; the
     seeds go through the same ``load_demo``/``load_o2c`` path as the admin reset.
 
+    Before anything else it lifts the id sequences past the persisted ids
+    (:func:`_reserve_stored_ids`, NT-01) -- that part is not optional and runs
+    on every start, with or without a seed switch.
+
     Idempotent by design: it only seeds when no schema exists yet, so a
     re-entrant lifespan (test client, ``--reload``) or an already-populated
     store is left untouched. Off by default -- without the env var nothing runs.
     """
+    # Zuerst die ID-Zaehler hinter den gespeicherten Bestand setzen -- sonst
+    # ersetzt der erste neue Vorgang nach einem Neustart ``instance_1`` (NT-01).
+    _reserve_stored_ids()
     # Die Leer-Pruefung faellt *einmal*, vor dem ersten Seed: sonst saehe der
     # zweite Schalter den vom ersten gefuellten Store und liefe nie an.
     was_empty = not _store.list_ids()
@@ -281,6 +289,37 @@ _resolver = make_resolver(_store)
 _org_resolver = make_org_resolver(_org_store)
 _context = exe.ExecutionContext(_resolver, _instances)
 _audit = create_audit_log()
+
+# Kein neu vergebener Schluessel darf einen gespeicherten ersetzen (NT-01): Die
+# Stores speichern per Upsert, eine doppelte ID ueberschriebe also still einen
+# Vorgang, ein Schema, eine Vorlage oder ein Organisationsmodell. Die Waechter
+# fragen vor jeder Vergabe den Store; ``_reserve_stored_ids`` hebt die Zaehler
+# zusaetzlich beim Start ueber den Bestand (siehe procworks/ids.py).
+ids.INSTANCE_IDS.guard("instance", lambda key: _instances.get(key) is not None)
+ids.MODEL_IDS.guard("schema", lambda key: _store.get(key) is not None)
+ids.MODEL_IDS.guard("tpl", lambda key: _template_store.get(key) is not None)
+ids.ORG_IDS.guard("org", lambda key: _org_store.get(key) is not None)
+
+
+def _reserve_stored_ids() -> int:
+    """Lift all id sequences past the ids already persisted (NT-01).
+
+    Called once at start-up (:func:`_lifespan`). Without it a restarted API
+    process counted from 1 again; with the guards alone it would still work,
+    but would probe the store once per already-used number. Scans every stored
+    schema, org model and user template (all ids inside them count, e.g. node
+    and element ids) plus the instance ids -- instances themselves carry no
+    generated ids of their own besides ``instance_<n>`` and ``adhoc_<n>``, the
+    latter numbered per instance.
+
+    :returns: the highest number found (0 for an empty system), for logging.
+    """
+
+    documents: list[object] = []
+    documents.extend(_store.get(key) for key in _store.list_ids())
+    documents.extend(_org_store.get(key) for key in _org_store.list_ids())
+    documents.extend(_template_store.get(key) for key in _template_store.list_ids())
+    return ids.reserve_existing_ids(instance_ids=_instances.list_ids(), documents=documents)
 
 #: Licensing / agent metering (dormant by default). Without a configured
 #: ``PROCWORKS_LICENSE_PUBKEY`` the manager is *not* enforced: every guard is a

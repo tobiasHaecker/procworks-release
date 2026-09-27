@@ -39,7 +39,7 @@ services:
   api:
     # Scanned release image (VAL-12); `build` stays for `up --build` and as the
     # fallback when the image cannot be pulled.
-    image: ghcr.io/tobiashaecker/procworks-api:${PROCWORKS_VERSION:-1.27.1}
+    image: ghcr.io/tobiashaecker/procworks-api:${PROCWORKS_VERSION:-1.27.2}
     build:
       context: ../core
     restart: unless-stopped
@@ -78,7 +78,7 @@ services:
       - procworks_backup_control:/control
 
   web:
-    image: ghcr.io/tobiashaecker/procworks-web:${PROCWORKS_VERSION:-1.27.1}
+    image: ghcr.io/tobiashaecker/procworks-web:${PROCWORKS_VERSION:-1.27.2}
     build:
       context: ..
       dockerfile: web/Dockerfile
@@ -129,7 +129,7 @@ services:
       # Version stamped into every backup's index (app_version) -- the same
       # default as the images above, so a restore shows which release wrote
       # the dump (VAL-34; Helm passes .Chart.AppVersion the same way).
-      PROCWORKS_VERSION: "${PROCWORKS_VERSION:-1.27.1}"
+      PROCWORKS_VERSION: "${PROCWORKS_VERSION:-1.27.2}"
       # Optional hardening/extension hooks (see the concept, left empty here):
       #   BACKUP_PASSPHRASE   -> symmetric encryption at rest (needs gpg/age)
       #   BACKUP_SYNC_CMD     -> off-site copy command (rsync/rclone/aws s3 ...)

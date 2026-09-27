@@ -28,10 +28,9 @@ with the handover-mapped data.
 
 from __future__ import annotations
 
-import itertools
 from dataclasses import dataclass
 
-from procworks import assignment
+from procworks import assignment, ids
 from procworks.conditions import ConditionError, evaluate_condition
 from procworks.model import (
     ControlEdge,
@@ -54,8 +53,6 @@ from procworks.model import (
 )
 from procworks.store import InstanceStore
 from procworks.validator import SchemaResolver
-
-_instance_counter = itertools.count(1)
 
 
 @dataclass
@@ -96,7 +93,13 @@ class ExecutionError(Exception):
 
 
 def _new_instance_id() -> str:
-    return f"instance_{next(_instance_counter)}"
+    """Return a fresh ``instance_<n>`` id from the shared, store-guarded sequence.
+
+    Never a process-local counter again: that restarted at 1 after every API
+    restart and overwrote stored instances (NT-01, see :mod:`procworks.ids`).
+    """
+
+    return ids.INSTANCE_IDS.new("instance")
 
 
 def _edge_key(edge: ControlEdge) -> str:

@@ -22,16 +22,19 @@ org edit, so a change can never silently break a released process's staffing
 
 from __future__ import annotations
 
-import itertools
-
+from procworks import ids
 from procworks.model import Agent, OrgModel, OrgUnit, Role, is_valid_email
 from procworks.validator import CorrectnessError, ValidationFinding, clean_label
 
-_counter = itertools.count(1)
-
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{next(_counter)}"
+    """Return a fresh ``<prefix>_<n>`` id from the shared org sequence.
+
+    Replaces a process-local counter that restarted at 1 (NT-01); ``org`` ids
+    are additionally checked against the org store, see :mod:`procworks.ids`.
+    """
+
+    return ids.ORG_IDS.new(prefix)
 
 
 class _KeepSentinel:

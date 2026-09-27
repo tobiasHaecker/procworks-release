@@ -1936,3 +1936,35 @@ def test_amounts_are_a_first_class_type_in_the_client() -> None:
     formatter = _function_body(src, "function formatValue(")
     assert "minimumFractionDigits: 2, maximumFractionDigits: 2" in formatter
     assert 'dtype === "DECIMAL" ? "0.01"' in _function_body(src, "function maskControl(")
+
+
+def test_every_adhoc_dialog_asks_for_the_reason() -> None:
+    """Der Kern verlangt fuer echte Vorgaenge einen Anlass (NT-02).
+
+    Fragte ein Dialog ihn nicht ab, schluege jede Aenderung dort mit 422 fehl --
+    Einfuegen, Umbenennen und Entfernen muessen alle das gemeinsame Feld nutzen
+    und den Wert mitschicken.
+    """
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "function adhocReasonField(inst)" in src
+    for name in ("openAdhocInsert", "openAdhocRename", "openAdhocDelete"):
+        body = re.search(rf"\nfunction {name}\(.*?\n\}}", src, re.S)
+        assert body, f"{name}() nicht gefunden -- Waechter angleichen"
+        assert "adhocReasonField(inst)" in body.group(0), name
+        assert "reason: why" in body.group(0) or "payload.reason = why" in body.group(0), name
+
+
+def test_loading_example_data_shows_the_example_password_once() -> None:
+    """Das Zufallspasswort der Beispiel-Anmeldungen steht nur in der Antwort (NT-04)."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = re.search(r"\nasync function runReset\(kind\) \{.*?\n\}", src, re.S)
+    assert body, "runReset() nicht gefunden -- Waechter angleichen"
+    assert "return res.example_password" in body.group(0)
+    confirm = re.search(r"\nfunction confirmReset\(kind\) \{.*?\n\}", src, re.S)
+    assert confirm, "confirmReset() nicht gefunden -- Waechter angleichen"
+    # Der Dialog muss offen bleiben (return false): openModal teilt sich einen
+    # Container, ein Schliessen entfernte den Passwort-Dialog sofort wieder.
+    assert "showExamplePassword(password); return false;" in confirm.group(0)
+    assert "function showExamplePassword(password)" in src

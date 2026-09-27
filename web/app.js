@@ -7585,6 +7585,34 @@ function adhocSuggestedRule(schema, anchorId) {
   return null;
 }
 
+/**
+ * Eingabefeld „Anlass" fuer eine Ad-hoc-Aenderung (NT-02).
+ *
+ * Eine Ad-hoc-Aenderung legt fest, wie *dieser eine* laufende Vorgang
+ * weitergeht; der Kern verlangt deshalb fuer echte Vorgaenge einen Anlass und
+ * schreibt ihn mit dem Namen der handelnden Person in den Verlauf. Test-
+ * Instanzen schreiben keinen Verlauf -- dort bleibt das Feld freiwillig.
+ * @param {object} inst die Instanz, die geaendert wird
+ * @returns {{input: HTMLInputElement, field: HTMLElement, value: function(): (string|null)}}
+ *   ``value()`` liefert den Anlass oder ``null``, wenn er fehlt, obwohl er
+ *   Pflicht ist (dann ist bereits ein Hinweis angezeigt).
+ */
+function adhocReasonField(inst) {
+  const required = !inst.is_test;
+  const input = el("input", { type: "text",
+    placeholder: required ? "z. B. Kunde verlangt Zusatzpr\u00FCfung" : "optional" });
+  const field = el("label", { class: "field" }, required ? "Anlass *" : "Anlass", input);
+  const value = () => {
+    const text = input.value.trim();
+    if (required && !text) {
+      toast("err", "Bitte einen Anlass angeben", ["Er steht mit deinem Namen im Verlauf des Vorgangs."]);
+      return null;
+    }
+    return text;
+  };
+  return { input, field, value };
+}
+
 // Ad-hoc: neuen seriellen Schritt hinter einem Anker einfuegen.
 //
 // Der Schritt braucht eine Bearbeiterregel (B2 im Ad-hoc-Pfad, VAL-03): ohne
@@ -7625,19 +7653,21 @@ function openAdhocInsert(schema, inst, anchors) {
   };
   anchorSel.addEventListener("change", fillStaff);
   fillStaff();
-  const reasonInput = el("input", { type: "text", placeholder: "optional, steht im Verlauf" });
+  const reason = adhocReasonField(inst);
   const body = el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Einf\u00FCgen hinter", anchorSel),
     el("label", { class: "field" }, "Neuer Schritt", labelInput),
     el("label", { class: "field" }, "Bearbeiter *", staffSel),
-    el("label", { class: "field" }, "Anlass", reasonInput));
+    reason.field);
   openModal("Schritt einf\u00FCgen (Ad-hoc)", body, async () => {
     const label = labelInput.value.trim();
     if (!label) { toast("info", "Bitte eine Bezeichnung angeben."); return false; }
     const rule = choices[staffSel.value];
     if (!rule) { toast("err", "Bitte festlegen, wer den neuen Schritt bearbeitet."); return false; }
+    const why = reason.value();
+    if (why === null) return false;
     const payload = { after_node_id: anchorSel.value, label, staff_rule: rule };
-    if (reasonInput.value.trim()) payload.reason = reasonInput.value.trim();
+    if (why) payload.reason = why;
     try {
       await api.post(`/instances/${inst.id}/adhoc/insert`, payload);
       toast("ok", "Schritt eingef\u00FCgt", [describeRule(rule, schema)]);
@@ -7657,14 +7687,19 @@ function openAdhocRename(schema, inst, targets) {
   };
   targetSel.addEventListener("change", syncLabel);
   syncLabel();
+  const reason = adhocReasonField(inst);
   const body = el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Schritt", targetSel),
-    el("label", { class: "field" }, "Neue Bezeichnung", labelInput));
+    el("label", { class: "field" }, "Neue Bezeichnung", labelInput),
+    reason.field);
   openModal("Schritt umbenennen (Ad-hoc)", body, async () => {
     const label = labelInput.value.trim();
     if (!label) { toast("info", "Bitte eine Bezeichnung angeben."); return false; }
+    const why = reason.value();
+    if (why === null) return false;
     try {
-      await api.post(`/instances/${inst.id}/adhoc/rename`, { node_id: targetSel.value, label });
+      await api.post(`/instances/${inst.id}/adhoc/rename`,
+        why ? { node_id: targetSel.value, label, reason: why } : { node_id: targetSel.value, label });
       toast("ok", "Schritt umbenannt");
       await reloadInstance(inst.id);
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
@@ -7675,13 +7710,18 @@ function openAdhocRename(schema, inst, targets) {
 function openAdhocDelete(schema, inst, targets) {
   const targetSel = el("select", null,
     ...targets.map((n) => el("option", { value: n.id }, nodeCaption(n))));
+  const reason = adhocReasonField(inst);
   const body = el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Zu entfernender Schritt", targetSel),
+    reason.field,
     el("p", { class: "muted", style: "font-size:13px" },
       "Vorg\u00E4nger und Nachfolger werden wieder direkt verbunden."));
   openModal("Schritt entfernen (Ad-hoc)", body, async () => {
+    const why = reason.value();
+    if (why === null) return false;
     try {
-      await api.post(`/instances/${inst.id}/adhoc/delete`, { node_id: targetSel.value });
+      await api.post(`/instances/${inst.id}/adhoc/delete`,
+        why ? { node_id: targetSel.value, reason: why } : { node_id: targetSel.value });
       toast("ok", "Schritt entfernt");
       await reloadInstance(inst.id);
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
@@ -8582,14 +8622,14 @@ const RESET_KINDS = {
     title: "Beispieldaten laden",
     confirm: "Beispieldaten laden",
     done: "Beispieldaten geladen",
-    msg: "Alle vorhandenen Daten werden gel\u00F6scht und durch die Beispieldaten ersetzt. M\u00F6chten Sie fortfahren?",
+    msg: "Alle vorhandenen Daten werden gel\u00F6scht und durch die Beispieldaten ersetzt. Im Login-Betrieb entstehen dabei Beispiel-Anmeldungen (u. a. eine Modelliererin) mit einem zuf\u00E4lligen Passwort, das danach einmal angezeigt wird. M\u00F6chten Sie fortfahren?",
     body: { load_demo: true },
   },
   o2c: {
     title: "Order-to-Cash-Beispiel laden",
     confirm: "Order-to-Cash laden",
     done: "Order-to-Cash-Beispiel geladen",
-    msg: "Alle vorhandenen Daten werden gel\u00F6scht und durch den Order-to-Cash-Datensatz ersetzt: sechs Prozesse, eine eigene Organisation und neun Vorg\u00E4nge an unterschiedlichen Stellen. M\u00F6chten Sie fortfahren?",
+    msg: "Alle vorhandenen Daten werden gel\u00F6scht und durch den Order-to-Cash-Datensatz ersetzt: sechs Prozesse, eine eigene Organisation und neun Vorg\u00E4nge an unterschiedlichen Stellen. Im Login-Betrieb entstehen dabei Beispiel-Anmeldungen mit einem zuf\u00E4lligen Passwort, das danach einmal angezeigt wird. M\u00F6chten Sie fortfahren?",
     body: { load_o2c: true },
   },
   wipe: {
@@ -8606,10 +8646,22 @@ function confirmReset(kind) {
   openModal(
     spec.title,
     el("p", { class: "muted" }, spec.msg),
-    async () => { await runReset(kind); return true; },
+    async () => {
+      const password = await runReset(kind);
+      // Der Passwort-Dialog ersetzt diesen hier; ``true`` wuerde ihn beim
+      // Schliessen gleich wieder entfernen (openModal teilt sich einen Container).
+      if (password) { showExamplePassword(password); return false; }
+      return true;
+    },
     spec.confirm);
 }
 
+/**
+ * Fuehrt die Wartung aus (POST /admin/reset) und laedt die Oberflaeche neu.
+ * @param {string} kind "demo", "o2c" oder "wipe" (siehe RESET_KINDS)
+ * @returns {Promise<string|null>} das Passwort neu angelegter Beispiel-
+ *   Anmeldungen (NT-04) -- der Aufrufer zeigt es an -- sonst ``null``
+ */
 async function runReset(kind) {
   const spec = RESET_KINDS[kind] || RESET_KINDS.wipe;
   try {
@@ -8626,7 +8678,30 @@ async function runReset(kind) {
     state.schema = null;
     state.schemaId = null;
     await boot();
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+    return res.example_password || null;
+  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return null; }
+}
+
+/**
+ * Zeigt das Passwort der gerade angelegten Beispiel-Anmeldungen -- genau
+ * einmal, in einem Dialog statt einer verschwindenden Meldung (NT-04).
+ *
+ * Bis 1.27.2 trugen diese Anmeldungen das auf der Website veroeffentlichte
+ * Demo-Passwort; auf einer Kundeninstallation war damit u. a. eine
+ * Modellierer-Anmeldung fuer jeden offen. Der Server vergibt jetzt ein
+ * zufaelliges Passwort und nennt es nur in der Antwort auf das Laden.
+ * @param {string} password das Passwort aller Beispiel-Anmeldungen
+ */
+function showExamplePassword(password) {
+  openModal("Beispiel-Anmeldungen angelegt",
+    el("div", null,
+      el("p", null, "Die Beispieldaten bringen Anmeldungen mit, z. B. ",
+        el("code", null, "mara.modell"), " oder ", el("code", null, "erika.sander"),
+        ". Ihr gemeinsames Passwort wird nur jetzt angezeigt:"),
+      el("p", null, el("code", { class: "example-password" }, password)),
+      el("p", { class: "muted", style: "font-size:13px" },
+        "Vor dem echten Einsatz die Beispiel-Anmeldungen in der Benutzerverwaltung l\u00F6schen oder das System auf Null zur\u00FCcksetzen.")),
+    async () => true, "Verstanden");
 }
 
 function statePillFor(s) {
@@ -8695,6 +8770,13 @@ function auditDetailText(ev) {
       return String(v);
     };
     base = `${base}: ${show(detail.old)} \u2192 ${show(detail.new)}`;
+  }
+  // Ad-hoc (NT-02): ``label`` ist der Schritt davor bzw. der alte Name, das
+  // Detail traegt den neuen Schritt bzw. den neuen Namen.
+  if (ev.event_type === "ADHOC_INSERTED" && detail.label) {
+    base = `\u201E${detail.label}\u201C nach ${base}`;
+  } else if (ev.event_type === "ADHOC_RENAMED" && detail.label) {
+    base = `${base} \u2192 \u201E${detail.label}\u201C`;
   }
   const reason = detail.reason;
   return reason ? `${base} \u2013 Begr\u00FCndung: ${reason}` : base;

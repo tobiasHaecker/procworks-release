@@ -208,7 +208,9 @@ def eligible_agents(
                 base = base | _resolve(schema.org_model, stage.rule, instance)
     if not include_deputies:
         return base
-    return _with_deputies(schema.org_model, base, absent_agents)
+    return _with_deputies(
+        schema.org_model, base, absent_agents, _four_eyes_performers(rule, instance)
+    )
 
 
 def resolve_rule_agents(
@@ -227,7 +229,9 @@ def resolve_rule_agents(
     """
 
     base = _resolve(schema.org_model, rule, instance)
-    return _with_deputies(schema.org_model, base, absent_agents)
+    return _with_deputies(
+        schema.org_model, base, absent_agents, _four_eyes_performers(rule, instance)
+    )
 
 
 def open_tasks(
@@ -421,11 +425,20 @@ def _supervisor_of_performer(
 ) -> str | None:
     """Resolve the supervisor of the agent who performed ``rule.ref``.
 
-    The supervisor is the manager of the performer's org unit
-    (``OrgUnit.manager_id``). Returns ``None`` -- an empty eligible set -- when
-    the referenced node has no recorded performer yet, the performer is not in
-    the org model, has no org unit, or the org unit has no manager. This mirrors
-    the design-time over-approximation used by Z2 (all org-unit managers).
+    The supervisor is the nearest manager **above the performer**: the manager
+    of the performer's org unit -- unless that is the performer themself or the
+    unit has no manager; then the search goes up the ``parent_id`` chain
+    (Nachtest 2026-09-27, NT-03). Before, a unit head who filed their own
+    leave request was its only approver: "Vorgesetzte:r" resolved to the head
+    of their own unit, i.e. to themself, and the four-eyes principle was gone.
+
+    Returns ``None`` -- an empty eligible set, which the monitoring shows as
+    "Niemand zuständig" (VAL-09) -- when the referenced node has no recorded
+    performer yet, the performer is not in the org model or has no org unit,
+    or no unit up the chain has a manager other than the performer. The result
+    is always the manager of *some* unit, so the design-time over-approximation
+    of Z2 (all org-unit managers) still holds. A cycle in the parent chain
+    (rejected by the org validation anyway) ends the search.
     """
 
     performer_id = instance.performed_by.get(rule.ref) if rule.ref else None
@@ -434,14 +447,47 @@ def _supervisor_of_performer(
     performer = org.agents.get(performer_id)
     if performer is None or performer.org_unit_id is None:
         return None
-    unit = org.org_units.get(performer.org_unit_id)
-    if unit is None:
-        return None
-    return unit.manager_id
+    seen: set[str] = set()
+    unit_id: str | None = performer.org_unit_id
+    while unit_id is not None and unit_id not in seen:
+        seen.add(unit_id)
+        unit = org.org_units.get(unit_id)
+        if unit is None:
+            return None
+        if unit.manager_id is not None and unit.manager_id != performer_id:
+            return unit.manager_id
+        unit_id = unit.parent_id
+    return None
+
+
+def _four_eyes_performers(rule: StaffRule, instance: ProcessInstance) -> frozenset[str]:
+    """Performers whose work a rule has someone *else* approve (NT-03).
+
+    Every ``NODE_PERFORMING_AGENT_SUPERVISOR`` term in the rule tree names a
+    step whose performer must not end up approving it. The supervisor itself
+    never is that performer (see :func:`_supervisor_of_performer`), but a
+    deputy could be: were the supervisor absent and the performer their
+    deputy, the substitution would hand the approval straight back.
+    :func:`_with_deputies` therefore never adds these agents as deputies.
+    """
+
+    found: set[str] = set()
+    stack = [rule]
+    while stack:
+        current = stack.pop()
+        if current.kind is StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR and current.ref:
+            performer = instance.performed_by.get(current.ref)
+            if performer is not None:
+                found.add(performer)
+        stack.extend(current.operands)
+    return frozenset(found)
 
 
 def _with_deputies(
-    org: OrgModel, base: set[str], absent: frozenset[str]
+    org: OrgModel,
+    base: set[str],
+    absent: frozenset[str],
+    never: frozenset[str] = frozenset(),
 ) -> set[str]:
     """Extend an eligible set by the deputies of *absent* agents.
 
@@ -450,6 +496,10 @@ def _with_deputies(
     keeps their own tasks, an absent one hands them to their deputy in parallel.
     If the deputy is in turn absent, their deputy is added too (chain), with a
     visited guard so deputy cycles terminate. The base agents are always kept.
+
+    ``never`` are agents a deputy edge must not lead to -- the performers a
+    four-eyes rule is about (:func:`_four_eyes_performers`, NT-03). The chain
+    does not continue through them either.
     """
 
     result = set(base)
@@ -459,6 +509,8 @@ def _with_deputies(
         if agent is None or agent.deputy_id is None:
             continue
         if agent.id not in absent:
+            continue
+        if agent.deputy_id in never:
             continue
         if agent.deputy_id not in result:
             result.add(agent.deputy_id)

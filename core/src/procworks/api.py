@@ -14,7 +14,9 @@ Interactive docs at /docs (OpenAPI is generated automatically).
 from __future__ import annotations
 
 import json
+import logging
 import os
+import secrets
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
@@ -227,10 +229,20 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # Die Leer-Pruefung faellt *einmal*, vor dem ersten Seed: sonst saehe der
     # zweite Schalter den vom ersten gefuellten Store und liefe nie an.
     was_empty = not _store.list_ids()
-    if was_empty and _env_truthy("PROCWORKS_LOAD_DEMO"):
-        _seed_demo()
-    if was_empty and _env_truthy("PROCWORKS_LOAD_O2C"):
-        _seed_o2c()
+    load_demo = was_empty and _env_truthy("PROCWORKS_LOAD_DEMO")
+    load_o2c = was_empty and _env_truthy("PROCWORKS_LOAD_O2C")
+    password = _example_password()
+    if load_demo:
+        _seed_demo(password)
+    if load_o2c:
+        _seed_o2c(password)
+    if (load_demo or load_o2c) and not _demo_mode() and _password_login_active():
+        # Wie das Start-Passwort des Admins: einmal ins Log, sonst nirgends (NT-04).
+        logging.getLogger("procworks.api").warning(
+            "Example accounts created (password=%r). Change or delete them "
+            "before real use.",
+            password,
+        )
     yield
 
 
@@ -330,7 +342,30 @@ def _reserve_stored_ids() -> int:
 _license_store = create_license_store()
 
 
-def _seed_demo() -> None:
+def _example_password() -> str:
+    """Password for the logins a data set seeds (NT-04).
+
+    Only the public throw-away demo (:func:`_demo_mode`) uses the published
+    ``demo-procworks`` -- the website prints it, and ``/auth/config`` offers
+    it. Everywhere else a fresh random password: before the Nachtest
+    2026-09-27, "Beispieldaten laden" on a customer installation created 13
+    logins -- a modeller among them -- with that public password and no forced
+    change. The caller reports the random one exactly once (reset response,
+    or the server log for the boot seed).
+    """
+
+    if _demo_mode():
+        return demo.DEMO_PASSWORD
+    return secrets.token_urlsafe(9)
+
+
+def _password_login_active() -> bool:
+    """True when logins with passwords exist at all (password auth backend)."""
+
+    return isinstance(_auth_backend, PasswordAuthBackend)
+
+
+def _seed_demo(password: str) -> None:
     """Load the built-in demo world into the current (empty) stores.
 
     Shared by ``POST /admin/reset {load_demo:true}`` and the boot seed
@@ -349,10 +384,11 @@ def _seed_demo() -> None:
         audit_log=_audit,
         password_backend=backend,
         absence_store=_absence_store,
+        password=password,
     )
 
 
-def _seed_o2c() -> None:
+def _seed_o2c(password: str) -> None:
     """Load the large Order-to-Cash data set into the current stores.
 
     Shared by ``POST /admin/reset {load_o2c:true}`` and the boot seed
@@ -368,6 +404,7 @@ def _seed_o2c() -> None:
         audit_log=_audit,
         password_backend=backend,
         absence_store=_absence_store,
+        password=password,
     )
 
 
@@ -921,6 +958,10 @@ class ResetRequest(BaseModel):
 class ResetResponse(BaseModel):
     demo_loaded: bool
     o2c_loaded: bool = False
+    #: Passwort der angelegten Beispiel-Logins -- nur hier, genau einmal (NT-04).
+    #: Zufällig außer in der öffentlichen Demo; ``None``, wenn keine Logins
+    #: angelegt wurden (kein Datensatz oder kein Passwort-Login).
+    example_password: str | None = None
     schemas: int
     instances: int
     org_models: int
@@ -1404,17 +1445,22 @@ class AdhocInsertRequest(BaseModel):
     #: im Schema nur, damit der Kern die Ablehnung mit Befund ``B2.no-staff``
     #: formuliert statt eines Pydantic-Fehlers.
     staff_rule: StaffRule | None = None
-    #: Optionale Begründung; sie steht im Ereignis ``ADHOC_INSERTED``.
+    #: Anlass der Änderung; Pflicht außer bei Test-Instanzen (NT-02), steht im
+    #: Ereignis ``ADHOC_INSERTED``.
     reason: str | None = None
 
 
 class AdhocDeleteRequest(BaseModel):
     node_id: str = Field(..., examples=["act_2"])
+    #: Anlass der Änderung; Pflicht außer bei Test-Instanzen (NT-02).
+    reason: str | None = None
 
 
 class AdhocRenameRequest(BaseModel):
     node_id: str = Field(..., examples=["act_2"])
     label: str = Field(..., examples=["Zusatzpruefung (angepasst)"])
+    #: Anlass der Änderung; Pflicht außer bei Test-Instanzen (NT-02).
+    reason: str | None = None
 
 
 class RevisionRequest(BaseModel):
@@ -2279,14 +2325,17 @@ def post_admin_reset(
         keep.add(principal.subject)
     _wipe_users(keep)
 
+    password = _example_password()
     if req.load_demo:
-        _seed_demo()
+        _seed_demo(password)
     if req.load_o2c:
-        _seed_o2c()
+        _seed_o2c(password)
+    seeded_logins = (req.load_demo or req.load_o2c) and _password_login_active()
 
     return ResetResponse(
         demo_loaded=req.load_demo,
         o2c_loaded=req.load_o2c,
+        example_password=password if seeded_logins else None,
         schemas=len(_store.list_ids()),
         instances=len(_instances.list_ids()),
         org_models=len(_org_store.list_ids()),
@@ -5065,22 +5114,61 @@ def post_complete_activity(
 
 # --- ad-hoc changes (per-instance variant; R1/R2) ------------------------
 
+#: Hinweis, wenn einer Ad-hoc-Änderung der Anlass fehlt (NT-02).
+ADHOC_REASON_REQUIRED = (
+    "Ad-hoc-Änderung: Bitte einen Anlass angeben – er wird mit deinem Namen im "
+    "Verlauf des Vorgangs festgehalten."
+)
+
+
+def _adhoc_audit_detail(
+    instance: ProcessInstance, principal: Principal, reason: str | None
+) -> dict[str, str]:
+    """Check the reason of an ad-hoc change and build its audit detail (NT-02).
+
+    An ad-hoc change alters *how one running case continues* -- in the
+    Nachtest 2026-09-27 an operator renamed "Genehmigung durch Leitung" in his
+    own leave request, and the history named nobody. So, like a supervisory
+    data correction (VAL-01), a real instance needs a reason, and the event
+    records who acted. Test instances write no audit events and need none.
+
+    :param instance: the instance to be changed (before the change).
+    :param principal: the caller (already restricted to modeler/admin).
+    :param reason: the reason from the request, may be blank.
+    :returns: ``{"actor": ..., "reason": ...}`` for the audit event (the
+        reason only when given).
+    :raises HTTPException: 422 when a real instance is changed without reason.
+    """
+
+    text = (reason or "").strip()
+    if not text and not instance.is_test:
+        raise HTTPException(status_code=422, detail=ADHOC_REASON_REQUIRED)
+    detail = {"actor": principal.subject}
+    if text:
+        detail["reason"] = text
+    return detail
+
 
 @app.post(
     "/instances/{instance_id}/adhoc/insert",
     response_model=ProcessInstance,
-    dependencies=[_run],
 )
-def post_adhoc_insert(instance_id: str, req: AdhocInsertRequest) -> ProcessInstance:
+def post_adhoc_insert(
+    instance_id: str,
+    req: AdhocInsertRequest,
+    principal: Principal = Depends(require_role("modeler", "admin")),
+) -> ProcessInstance:
     """Insert a serial step into one running instance (R1/R2, plus B2).
 
     ``staff_rule`` is required by the core for the new step (422 with
     ``B2.no-staff`` otherwise) -- a step without one would stand in nobody's
-    worklist (VAL-03). The optional ``reason`` travels into the
-    ``ADHOC_INSERTED`` event.
+    worklist (VAL-03). Only modeller/admin may change a running case, and a
+    real instance needs a ``reason``; both travel into ``ADHOC_INSERTED``
+    together with the actor (NT-02, see :func:`_adhoc_audit_detail`).
     """
 
     instance = _get_instance_or_404(instance_id)
+    detail = _adhoc_audit_detail(instance, principal, req.reason)
     schema = _effective_schema_for(instance)
     before_states = dict(instance.node_states)
     after = _commit_instance_or_422(
@@ -5095,16 +5183,14 @@ def post_adhoc_insert(instance_id: str, req: AdhocInsertRequest) -> ProcessInsta
     )
     if not instance.is_test:
         # Test instances record no audit events (see instance creation).
-        detail = {"label": req.label}
-        reason = (req.reason or "").strip()
-        if reason:
-            detail["reason"] = reason
+        detail = {"label": req.label, **detail}
         _audit.append(
             EventType.ADHOC_INSERTED,
             after.id,
             after.schema_id,
             schema_version=after.schema_version,
             node_id=req.after_node_id,
+            label=_label_of(schema, req.after_node_id),
             detail=detail,
         )
         # An ad-hoc insert can make a mail-bound activity ready -> notify (§10.7).
@@ -5115,10 +5201,20 @@ def post_adhoc_insert(instance_id: str, req: AdhocInsertRequest) -> ProcessInsta
 @app.post(
     "/instances/{instance_id}/adhoc/delete",
     response_model=ProcessInstance,
-    dependencies=[_run],
 )
-def post_adhoc_delete(instance_id: str, req: AdhocDeleteRequest) -> ProcessInstance:
+def post_adhoc_delete(
+    instance_id: str,
+    req: AdhocDeleteRequest,
+    principal: Principal = Depends(require_role("modeler", "admin")),
+) -> ProcessInstance:
+    """Remove a not yet reached serial step from one running instance (R1/R2).
+
+    Modeller/admin only, with a reason for a real instance; the actor and the
+    reason are recorded in ``ADHOC_DELETED`` (NT-02).
+    """
+
     instance = _get_instance_or_404(instance_id)
+    detail = _adhoc_audit_detail(instance, principal, req.reason)
     schema = _effective_schema_for(instance)
     before_states = dict(instance.node_states)
     after = _commit_instance_or_422(
@@ -5134,6 +5230,8 @@ def post_adhoc_delete(instance_id: str, req: AdhocDeleteRequest) -> ProcessInsta
             after.schema_id,
             schema_version=after.schema_version,
             node_id=req.node_id,
+            label=_label_of(schema, req.node_id),
+            detail=detail,
         )
         # Deleting a node can hand control to a mail-bound successor -> notify.
         _after_advance(_effective_schema_for(after), before_states, after)
@@ -5143,10 +5241,20 @@ def post_adhoc_delete(instance_id: str, req: AdhocDeleteRequest) -> ProcessInsta
 @app.post(
     "/instances/{instance_id}/adhoc/rename",
     response_model=ProcessInstance,
-    dependencies=[_run],
 )
-def post_adhoc_rename(instance_id: str, req: AdhocRenameRequest) -> ProcessInstance:
+def post_adhoc_rename(
+    instance_id: str,
+    req: AdhocRenameRequest,
+    principal: Principal = Depends(require_role("modeler", "admin")),
+) -> ProcessInstance:
+    """Rename a not yet reached step of one running instance (R1/R2).
+
+    Modeller/admin only, with a reason for a real instance; the actor and the
+    reason are recorded in ``ADHOC_RENAMED`` next to the new label (NT-02).
+    """
+
     instance = _get_instance_or_404(instance_id)
+    detail = _adhoc_audit_detail(instance, principal, req.reason)
     schema = _effective_schema_for(instance)
     after = _commit_instance_or_422(
         lambda: adhoc.adhoc_rename_activity(
@@ -5161,7 +5269,8 @@ def post_adhoc_rename(instance_id: str, req: AdhocRenameRequest) -> ProcessInsta
             after.schema_id,
             schema_version=after.schema_version,
             node_id=req.node_id,
-            detail={"label": req.label},
+            label=_label_of(schema, req.node_id),
+            detail={"label": req.label, **detail},
         )
     return after
 
@@ -5183,9 +5292,15 @@ def post_new_revision(schema_id: str, req: RevisionRequest) -> ProcessSchema:
     dependencies=[_run],
 )
 def post_migration_check(
-    instance_id: str, req: MigrateRequest
+    instance_id: str, req: MigrateRequest, principal: Principal = Depends(get_principal)
 ) -> MigrationReport:
-    instance = _get_instance_or_404(instance_id)
+    """Dry-run check whether one instance could move onto ``target_schema_id``.
+
+    A limited operator sees only instances it is involved in; any other is 404
+    like a missing one (NT-02, the VAL-05 rule).
+    """
+
+    instance = _readable_instance_or_404(instance_id, principal)
     source = _get_or_404(instance.schema_id)
     target = _get_or_404(req.target_schema_id)
     findings = migration.check_migration(
@@ -5204,7 +5319,14 @@ def post_migrate(
     req: MigrateRequest,
     principal: Principal = Depends(require_role("operator", "modeler", "admin")),
 ) -> ProcessInstance:
-    instance = _get_instance_or_404(instance_id)
+    """Migrate one instance onto a newer revision (M1-M5 via the core).
+
+    Operators may migrate -- the instance view offers it to them -- but a
+    limited operator only an instance it is involved in; a foreign one is 404
+    (NT-02: in the Nachtest an uninvolved operator moved a colleague's case).
+    """
+
+    instance = _readable_instance_or_404(instance_id, principal)
     target = _get_or_404(req.target_schema_id)
     return _migrate_and_record(instance, target, req.data_mapping or None, principal)
 
@@ -5371,21 +5493,42 @@ def _mapping_for(
     return picked or None
 
 
+def _visible_migration_candidates(
+    target: ProcessSchema, principal: Principal
+) -> list[ProcessInstance]:
+    """Migration candidates the caller may see and act on (NT-02).
+
+    Everyone but a limited operator gets all candidates. A limited operator
+    (see :func:`_reads_only_own_instances`) gets only the instances it is
+    involved in -- the migration assistant opened from the instance view passes
+    exactly that one id, and nobody else's case can be listed or moved.
+    """
+
+    candidates = _migration_candidates(target)
+    if not _reads_only_own_instances(principal):
+        return candidates
+    own = _involved_instance_ids(principal)
+    return [inst for inst in candidates if inst.id in own]
+
+
 @app.get(
     "/schemas/{schema_id}/migration-report",
     response_model=MigrationAssistantReport,
     dependencies=[_read],
 )
-def get_migration_report(schema_id: str) -> MigrationAssistantReport:
+def get_migration_report(
+    schema_id: str, principal: Principal = Depends(get_principal)
+) -> MigrationAssistantReport:
     """Which running instances of earlier revisions could move to this one?
 
     Read-only. For a draft target every candidate reports M1 (not released) --
     the assistant is meant for released revisions, but the answer stays honest.
+    A limited operator sees only the instances it is involved in (NT-02).
     """
 
     target = _get_or_404(schema_id)
     candidates = []
-    for inst in _migration_candidates(target):
+    for inst in _visible_migration_candidates(target, principal):
         findings, missing = _assess(inst, target, None)
         candidates.append(
             MigrationCandidate(
@@ -5419,7 +5562,9 @@ def post_migrate_instances(
     stays exactly as it was, the others still move (partial success is
     reported per instance). Start values are type-checked against the target
     first (D3); a type error rejects the whole request before anything moves.
-    Requested ids that are not candidates are reported as not migrated.
+    Requested ids that are not candidates are reported as not migrated --
+    for a limited operator that includes every instance it is not involved in
+    (NT-02); the answer is the same as for an id that does not exist.
     """
 
     target = _get_or_404(schema_id)
@@ -5428,7 +5573,7 @@ def post_migrate_instances(
         raise HTTPException(
             status_code=422, detail={"findings": [f.model_dump() for f in type_findings]}
         )
-    candidates = {i.id: i for i in _migration_candidates(target)}
+    candidates = {i.id: i for i in _visible_migration_candidates(target, principal)}
     wanted = req.instance_ids if req.instance_ids is not None else list(candidates)
     results: list[BulkMigrateResult] = []
     for iid in wanted:

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 import procworks.api as api
 from procworks.api import _env_truthy, _maybe_mount_web, app
+from procworks.auth import AuthError
 from procworks.auth_password import InMemoryCredentialStore, PasswordAuthBackend
 from procworks.demo import DEMO_AUTOLOGIN, DEMO_PASSWORD, DEMO_USERS, ORG_ID, SCHEMA_URLAUB
 from procworks.demo_o2c import O2C_USERS, SCHEMA_MAIN
@@ -517,3 +518,50 @@ def test_full_stack_uses_the_released_images_of_this_version() -> None:
         )
     # VAL-34: the backup index names the release that wrote the dump.
     assert f'PROCWORKS_VERSION: "${{PROCWORKS_VERSION:-{version}}}"' in compose
+
+
+# --- NT-04: example logins carry the public password only in the public demo --
+
+
+def test_boot_seed_in_demo_mode_keeps_the_published_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public demo advertises ``demo-procworks`` -- its logins must accept it."""
+    monkeypatch.setenv("PROCWORKS_LOAD_DEMO", "1")
+    monkeypatch.setenv("PROCWORKS_DEMO_MODE", "1")
+    original = api._auth_backend
+    backend = _with_password_backend()
+    _clear_stores()
+    try:
+        with TestClient(app):
+            pass
+        assert backend.login("mara.modell", DEMO_PASSWORD).principal.roles == {"modeler"}
+    finally:
+        api._auth_backend = original
+        _clear_stores()
+
+
+def test_boot_seed_outside_the_demo_uses_a_random_password_from_the_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A customer install with ``PROCWORKS_LOAD_DEMO`` must not open a modeller
+    login with the password printed on the website (Nachtest 2026-09-27, NT-04).
+    The random password is reported once, in the server log -- like the
+    admin's start password."""
+    monkeypatch.setenv("PROCWORKS_LOAD_DEMO", "1")
+    monkeypatch.delenv("PROCWORKS_DEMO_MODE", raising=False)
+    original = api._auth_backend
+    backend = _with_password_backend()
+    _clear_stores()
+    try:
+        with caplog.at_level("WARNING", logger="procworks.api"), TestClient(app):
+            pass
+        with pytest.raises(AuthError):
+            backend.login("mara.modell", DEMO_PASSWORD)
+        record = next(r for r in caplog.records if "Example accounts created" in r.getMessage())
+        password = record.args[0] if isinstance(record.args, tuple) else None
+        assert isinstance(password, str) and password != DEMO_PASSWORD
+        assert backend.login("mara.modell", password).principal.roles == {"modeler"}
+    finally:
+        api._auth_backend = original
+        _clear_stores()

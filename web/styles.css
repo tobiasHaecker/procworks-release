@@ -1122,3 +1122,17 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .gnode.d-suspended .gstate { fill: var(--amber); }
 .gnode.d-failed rect { stroke: var(--red); stroke-width: 2.5; }
 .gnode.d-failed .gstate { fill: var(--red); }
+
+/* Passwort der Beispiel-Anmeldungen, einmal nach "Beispieldaten laden" (NT-04):
+   gut lesbar und mit einem Klick markierbar. */
+.example-password {
+  display: inline-block;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elev2);
+  color: var(--txt);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+  user-select: all;
+}

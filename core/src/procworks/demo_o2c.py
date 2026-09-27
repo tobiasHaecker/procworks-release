@@ -2774,8 +2774,13 @@ def _seed_absences(absence_store: AbsenceStore) -> None:
     )
 
 
-def _seed_users(backend: PasswordAuthBackend) -> int:
-    """Legt die Logins dieses Datensatzes an (idempotent); zaehlt die neuen."""
+def _seed_users(backend: PasswordAuthBackend, password: str = DEMO_PASSWORD) -> int:
+    """Legt die Logins dieses Datensatzes an (idempotent); zaehlt die neuen.
+
+    ``password`` gilt fuer alle angelegten Logins: das veroeffentlichte
+    ``DEMO_PASSWORD`` nur in der oeffentlichen Demo, sonst ein zufaelliges
+    (NT-04, siehe ``demo._seed_users``).
+    """
 
     seeded = 0
     for login, name, roles, agent_id in O2C_USERS:
@@ -2784,7 +2789,7 @@ def _seed_users(backend: PasswordAuthBackend) -> int:
         backend.store.put_user(
             User(
                 login=login,
-                password_hash=hash_password(DEMO_PASSWORD),
+                password_hash=hash_password(password),
                 subject=login,
                 agent_id=agent_id,
                 roles=roles,
@@ -2804,6 +2809,7 @@ def load_o2c(
     audit_log: AuditLog,
     password_backend: PasswordAuthBackend | None = None,
     absence_store: AbsenceStore | None = None,
+    password: str = DEMO_PASSWORD,
 ) -> int:
     """Laedt den Order-to-Cash-Datensatz in die Stores; liefert die Zahl neuer Logins.
 
@@ -2855,5 +2861,5 @@ def load_o2c(
     if absence_store is not None:
         _seed_absences(absence_store)
     if password_backend is not None:
-        return _seed_users(password_backend)
+        return _seed_users(password_backend, password)
     return 0

@@ -767,8 +767,14 @@ class _NoopSchemaStore:
         return None
 
 
-def _seed_users(backend: PasswordAuthBackend) -> int:
-    """Seed the ready-to-use demo logins (idempotent); returns how many added."""
+def _seed_users(backend: PasswordAuthBackend, password: str = DEMO_PASSWORD) -> int:
+    """Seed the ready-to-use demo logins (idempotent); returns how many added.
+
+    :param password: the password of every seeded login. Only the public
+        throw-away demo uses the published :data:`DEMO_PASSWORD`; the admin
+        reset of a customer installation passes a random one (NT-04), because a
+        login with a password printed on the website would be an open door.
+    """
 
     store = backend.store
     seeded = 0
@@ -778,7 +784,7 @@ def _seed_users(backend: PasswordAuthBackend) -> int:
         store.put_user(
             User(
                 login=login,
-                password_hash=hash_password(DEMO_PASSWORD),
+                password_hash=hash_password(password),
                 subject=login,
                 agent_id=agent_id,
                 roles=roles,
@@ -798,8 +804,12 @@ def load_demo(
     audit_log: AuditLog,
     password_backend: PasswordAuthBackend | None = None,
     absence_store: AbsenceStore | None = None,
+    password: str = DEMO_PASSWORD,
 ) -> int:
     """Populate the stores with the demo world; returns the seeded-user count.
+
+    ``password`` is the password of the seeded logins (see :func:`_seed_users`;
+    the published one only for the public demo, NT-04).
 
     Call this on an already-empty system (the admin reset clears first). The
     shared org, both schemas and the three instances are always created; demo
@@ -827,5 +837,5 @@ def load_demo(
         _seed_absences(absence_store)
 
     if password_backend is not None:
-        return _seed_users(password_backend)
+        return _seed_users(password_backend, password)
     return 0

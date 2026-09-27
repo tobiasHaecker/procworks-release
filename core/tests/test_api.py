@@ -688,7 +688,7 @@ def test_adhoc_insert_via_api_runs_through_variant() -> None:
     # Without a staff rule the new step would stand in nobody's worklist (VAL-03).
     unstaffed = client.post(
         f"/instances/{iid}/adhoc/insert",
-        json={"after_node_id": a_id, "label": "Zusatz"},
+        json={"after_node_id": a_id, "label": "Zusatz", "reason": "Test"},
     )
     assert unstaffed.status_code == 422
     assert [f["code"] for f in unstaffed.json()["detail"]["findings"]] == ["B2.no-staff"]
@@ -733,7 +733,7 @@ def test_adhoc_insert_after_executed_node_returns_422() -> None:
 
     resp = client.post(
         f"/instances/{iid}/adhoc/insert",
-        json={"after_node_id": "start", "label": "ZuSpaet"},
+        json={"after_node_id": "start", "label": "ZuSpaet", "reason": "Test"},
     )
     assert resp.status_code == 422
     rules = {f["rule"] for f in resp.json()["detail"]["findings"]}
@@ -752,7 +752,7 @@ def test_adhoc_rename_via_api_updates_variant_label() -> None:
 
     resp = client.post(
         f"/instances/{iid}/adhoc/rename",
-        json={"node_id": b_id, "label": "B (angepasst)"},
+        json={"node_id": b_id, "label": "B (angepasst)", "reason": "Test"},
     )
     assert resp.status_code == 200
     instance = resp.json()
@@ -770,7 +770,7 @@ def test_adhoc_rename_reached_node_returns_422() -> None:
 
     resp = client.post(
         f"/instances/{iid}/adhoc/rename",
-        json={"node_id": a_id, "label": "Zu spaet"},
+        json={"node_id": a_id, "label": "Zu spaet", "reason": "Test"},
     )
     assert resp.status_code == 422
     assert "R1" in {f["rule"] for f in resp.json()["detail"]["findings"]}

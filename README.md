@@ -152,8 +152,16 @@ In der PowerShell entspricht das `$env:PROCWORKS_LOAD_DEMO="1"` (und dasselbe f�
 **nur, solange noch kein Prozess gespeichert ist** – eine laufende Installation
 bleibt unberührt, ein zweiter Start ändert nichts.
 
-Nach dem Laden können Sie sich mit den **Testbenutzern** anmelden (Passwort für
-alle: `demo-procworks`):
+Nach dem Laden können Sie sich mit den **Testbenutzern** anmelden. Ihr
+gemeinsames Passwort wird bei jedem Laden **neu und zufällig** vergeben – ein
+fest vorgegebenes Passwort wäre auf Ihrem Server eine offene Tür. Nach
+„Beispieldaten laden“ zeigt die Oberfläche es **einmal** an; beim Laden über die
+Startschalter steht es im Server-Log:
+
+```bash
+docker compose -f deploy/docker-compose.full.yml logs api | grep "Example accounts"
+```
+
 
 | Login | Person | Rolle | Sieht / kann |
 | --- | --- | --- | --- |

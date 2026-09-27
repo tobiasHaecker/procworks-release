@@ -282,8 +282,9 @@ Lieferung → Rechnung → Zahlungseingang → Mahnwesen), sechs Prozessen, eine
 eigenen Beispielfirma und neun vorbereiteten Vorgängen. Beide Datensätze lassen
 sich auch nacheinander laden; jedes Laden setzt vorher alle Daten zurück.
 
-Anschließend stehen fünf **Testbenutzer** zum Anmelden bereit (Passwort für alle:
-`demo-procworks`):
+Anschließend stehen fünf **Testbenutzer** zum Anmelden bereit. Ihr gemeinsames
+Passwort vergibt ProcWorks bei jedem Laden neu und zufällig; die Oberfläche zeigt
+es nach dem Laden **einmal** an – notieren Sie es gleich:
 
 | Login | Rolle |
 | --- | --- |

@@ -132,6 +132,11 @@ curl -X POST https://host/v1/instances/instance_42/nodes/act_pruefen/complete \
   antwortet der Abschluss mit `422` (Befund D3) und der Schritt bleibt offen.
   Der Typ **`DECIMAL`** (Betrag) ist eine JSON-Zahl mit höchstens zwei
   Nachkommastellen: `499.99` ist gültig, `499.999` nicht.
+* **Ad-hoc-Änderungen** eines laufenden Vorgangs
+  (`POST /instances/{id}/adhoc/insert|rename|delete`) stehen nur den Rollen
+  Modellierer und Administrator offen und verlangen für echte Vorgänge einen
+  Anlass im Feld `reason` (sonst `403` bzw. `422`). Der Verlauf nennt Anlass und
+  handelnde Person.
 
 **Wer schließt ab?** Ein Token, das an einen Bearbeiter gebunden ist, schließt
 als dieser Bearbeiter ab; ein ungebundenes Token nennt ihn über `agent_id`, und

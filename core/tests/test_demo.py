@@ -19,6 +19,7 @@ import procworks.api as api_module
 from procworks import assignment, demo, demo_o2c
 from procworks.api import app
 from procworks.audit import InMemoryAuditLog, compute_kpis, discover_process_map
+from procworks.auth import AuthError
 from procworks.auth_password import (
     InMemoryCredentialStore,
     PasswordAuthBackend,
@@ -605,8 +606,14 @@ def test_admin_reset_demo_seeds_usable_logins(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
-    # The demo operator login works out of the box (no forced change).
-    erika = backend.login("erika.sander", demo.DEMO_PASSWORD)
+    # Outside the public demo the example logins get a random password that the
+    # reset reports exactly once -- never the one printed on the website (NT-04).
+    password = resp.json()["example_password"]
+    assert password and password != demo.DEMO_PASSWORD
+    with pytest.raises(AuthError):
+        backend.login("mara.modell", demo.DEMO_PASSWORD)
+    # With the reported password the demo operator works out of the box.
+    erika = backend.login("erika.sander", password)
     assert "operator" in erika.principal.roles
     assert erika.principal.agent_id == "a-erika"
     # ... and she has an open task from the freshly loaded instances.

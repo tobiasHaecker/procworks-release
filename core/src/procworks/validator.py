@@ -2139,7 +2139,9 @@ _ORDER_OPERATORS = frozenset(
     {FilterOperator.LT, FilterOperator.LE, FilterOperator.GT, FilterOperator.GE}
 )
 #: Data types that support ordering comparisons.
-_ORDERABLE_TYPES = frozenset({DataType.INTEGER, DataType.FLOAT, DataType.DATE})
+_ORDERABLE_TYPES = frozenset(
+    {DataType.INTEGER, DataType.FLOAT, DataType.DECIMAL, DataType.DATE}
+)
 
 
 def _operator_matches_type(operator: FilterOperator, data_type: DataType) -> bool:

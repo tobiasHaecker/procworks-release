@@ -255,7 +255,33 @@ const LOOP_TYPES = new Set([NODE_TYPE.LOOP_START, NODE_TYPE.LOOP_END]);
 const GATEWAYS = new Set([
   NODE_TYPE.AND_SPLIT, NODE_TYPE.AND_JOIN, NODE_TYPE.XOR_SPLIT, NODE_TYPE.XOR_JOIN,
 ]);
-const DATA_TYPES = ["INTEGER", "FLOAT", "STRING", "DATE", "BOOLEAN", "URI"];
+const DATA_TYPES = ["INTEGER", "FLOAT", "DECIMAL", "STRING", "DATE", "BOOLEAN", "URI"];
+/**
+ * Zahlentypen: Ganzzahl, Kommazahl und Betrag (DECIMAL, seit VAL-16). Eine
+ * Stelle statt verstreuter ``=== "INTEGER" || === "FLOAT"``-Pruefungen, die
+ * einen neuen Zahlentyp sonst stillschweigend wie Text behandelten.
+ * @param {string} t Datentyp
+ * @returns {boolean}
+ */
+function isNumericType(t) { return t === "INTEGER" || t === "FLOAT" || t === "DECIMAL"; }
+
+/**
+ * Anzeigewert eines Datenelements: Betraege immer mit zwei Nachkommastellen
+ * und deutschem Trennzeichen („1.234,50“, VAL-16), Ja/Nein ausgeschrieben,
+ * alles andere unveraendert. Nur Anzeige -- Eingabefelder erhalten den Rohwert.
+ * @param {object|undefined} elem Datenelement
+ * @param {*} v Wert
+ * @returns {string}
+ */
+function formatValue(elem, v) {
+  if (v === null || v === undefined) return "\u2013";
+  if (elem && elem.data_type === "DECIMAL" && typeof v === "number") {
+    return v.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  if (v === true) return "Ja";
+  if (v === false) return "Nein";
+  return String(v);
+}
 // Presentation widgets available per data type for the input-mask designer
 // (mirrors model._WIDGETS_FOR_TYPE; the server has the final say via rule U2).
 const WIDGETS_FOR_TYPE = {
@@ -263,6 +289,7 @@ const WIDGETS_FOR_TYPE = {
   URI: ["TEXT"],
   INTEGER: ["NUMBER"],
   FLOAT: ["NUMBER"],
+  DECIMAL: ["NUMBER"],
   BOOLEAN: ["CHECKBOX"],
   DATE: ["DATE"],
 };
@@ -496,7 +523,10 @@ const FINDING_TEXTS = {
   "LC.not-draft": () => ({ text: "Nur ein Entwurf kann freigegeben werden." }),
   "LC.not-released": () => ({ text: "Eine neue Revision lässt sich nur von einer freigegebenen Version anlegen." }),
   "D3.unknown-element": (p) => ({ text: `Das Datenelement „${p.element}“ gibt es in diesem Schema nicht.` }),
-  "D3.wrong-type": (p) => ({ text: `Der Wert für „${p.element}“ passt nicht zum Typ ${p.type}.` }),
+  "D3.wrong-type": (p) => ({
+    text: `Der Wert für „${p.element}“ passt nicht zum Typ ${typeName(p.type)}.`,
+    hint: p.type === "DECIMAL" ? "Ein Betrag hat höchstens zwei Nachkommastellen." : undefined,
+  }),
   "M0.not-candidate": () => ({ text: "Diese Instanz läuft nicht auf einer früheren Version dieses Schemas." }),
   "M1.not-released": (p) => ({
     text: `Die Zielversion v${p.version} ist noch nicht freigegeben.`,
@@ -918,7 +948,7 @@ function nm(id) {
  * Beschriftung ist deutsch.
  */
 const DATA_TYPE_LABELS = {
-  INTEGER: "Ganzzahl", FLOAT: "Kommazahl", STRING: "Text", DATE: "Datum", BOOLEAN: "Ja/Nein", URI: "Link",
+  INTEGER: "Ganzzahl", FLOAT: "Kommazahl", DECIMAL: "Betrag", STRING: "Text", DATE: "Datum", BOOLEAN: "Ja/Nein", URI: "Link",
 };
 function typeName(t) { return DATA_TYPE_LABELS[t] || t || "?"; }
 
@@ -5275,7 +5305,7 @@ async function openSubprocessBinding(node, mode) {
  */
 function coerceTypedInput(dtype, raw) {
   const text = String(raw).trim();
-  if (dtype === "INTEGER" || dtype === "FLOAT") {
+  if (isNumericType(dtype)) {
     const num = Number(text.replace(",", "."));
     if (text === "" || !Number.isFinite(num)) return raw;
     if (dtype === "INTEGER" && !Number.isInteger(num)) return raw;
@@ -5302,7 +5332,7 @@ function coerceTypedInput(dtype, raw) {
 function fallbackWidget(elem) {
   const dtype = elem ? elem.data_type : "STRING";
   if (dtype === "BOOLEAN") return "YESNO";
-  if (dtype === "INTEGER" || dtype === "FLOAT") return "NUMBER";
+  if (isNumericType(dtype)) return "NUMBER";
   if (dtype === "DATE") return "DATE";
   return "TEXT";
 }
@@ -5345,7 +5375,7 @@ function maskControl(elem, widget, options, current) {
   }
   const type = widget === "NUMBER" ? "number" : widget === "DATE" ? "date" : "text";
   const attrs = { type, placeholder: elem ? elem.name : "" };
-  if (widget === "NUMBER") attrs.step = dtype === "INTEGER" ? "1" : "any";
+  if (widget === "NUMBER") attrs.step = dtype === "INTEGER" ? "1" : dtype === "DECIMAL" ? "0.01" : "any";
   const input = el("input", attrs);
   if (current != null) input.value = String(current);
   return { control: input, read: () => (input.value === "" ? undefined : coerce(input.value)) };
@@ -5656,7 +5686,7 @@ function openInsertModal(afterNodeId) {
   }
   // --- XOR partition builder (K7): a typed discriminator drives the branches.
   const partitionable = Object.values(state.schema.data_elements).filter(
-    (d) => d.source === "INSTANCE" && ["INTEGER", "FLOAT", "BOOLEAN", "STRING"].includes(d.data_type));
+    (d) => d.source === "INSTANCE" && ["INTEGER", "FLOAT", "DECIMAL", "BOOLEAN", "STRING"].includes(d.data_type));
   // VAL-15: Das Merkmal musste vorher woanders angelegt UND an einem Schritt
   // davor geschrieben werden; der Dialog schickte den Nutzer weg. Jetzt: Wahl
   // „Neues Merkmal …“ legt es hier an, und der Schritt vor der Einfuegestelle
@@ -5670,6 +5700,7 @@ function openInsertModal(afterNodeId) {
   const newDiscName = el("input", { type: "text", placeholder: "z. B. Betrag" });
   const newDiscType = el("select", null,
     el("option", { value: "FLOAT" }, "Zahl (Stufen nach Grenzwerten)"),
+    el("option", { value: "DECIMAL" }, "Betrag (Stufen nach Grenzwerten)"),
     el("option", { value: "BOOLEAN" }, "Ja/Nein"),
     el("option", { value: "STRING" }, "Text (Zweige nach Werten)"));
   const newDiscBox = el("div", { class: "form-grid new-disc" },
@@ -5697,7 +5728,7 @@ function openInsertModal(afterNodeId) {
     const type = condDisc.value === NEW_DISC
       ? newDiscType.value
       : (state.schema.data_elements[condDisc.value] || {}).data_type;
-    if (type === "INTEGER" || type === "FLOAT") return "THRESHOLD";
+    if (isNumericType(type)) return "THRESHOLD";
     if (type === "BOOLEAN") return "BOOLEAN";
     if (type === "STRING") return "ENUM";
     return null;
@@ -5758,7 +5789,7 @@ function openInsertModal(afterNodeId) {
   // Die Rumpfaktivität erhält vom Kern automatisch den Pflicht-Schreibzugriff
   // auf das Merkmal (K6c: jede Iteration entscheidet auf frischen Daten).
   const loopable = Object.values(state.schema.data_elements).filter(
-    (d) => d.source === "INSTANCE" && ["BOOLEAN", "INTEGER", "FLOAT", "STRING"].includes(d.data_type));
+    (d) => d.source === "INSTANCE" && ["BOOLEAN", "INTEGER", "FLOAT", "DECIMAL", "STRING"].includes(d.data_type));
   const loopDisc = el("select", { class: "loop-disc" },
     ...loopable.map((d) => el("option", { value: d.id }, `${d.name} (${typeName(d.data_type)})`)));
   const loopRepeat = el("select", null,
@@ -6127,7 +6158,7 @@ async function instanceMigrationPanel(inst) {
 function startValueWidget(elem) {
   if (!elem) return "TEXT";
   if (elem.data_type === "BOOLEAN") return "CHECKBOX";
-  if (elem.data_type === "INTEGER" || elem.data_type === "FLOAT") return "NUMBER";
+  if (isNumericType(elem.data_type)) return "NUMBER";
   return "TEXT";
 }
 
@@ -7406,7 +7437,7 @@ async function renderInstanceDetail(container, withActions) {
   // Datenwerte
   const dataRows = Object.entries(inst.data_values || {}).map(([k, v]) => {
     const elem = runSchema.data_elements[k];
-    return [elem ? elem.name : k, String(v)];
+    return [elem ? elem.name : k, formatValue(elem, v)];
   });
   // Daten koennen direkt nach dem Start eingegeben werden – unabhaengig davon,
   // ob schon eine Aktivitaet aktiviert wurde.
@@ -9181,7 +9212,7 @@ function simulationPanel(schema) {
         el("option", { value: "" }, "– nicht gesetzt –"),
         el("option", { value: "true" }, "wahr"),
         el("option", { value: "false" }, "falsch"));
-    } else if (d.data_type === "INTEGER" || d.data_type === "FLOAT") {
+    } else if (isNumericType(d.data_type)) {
       input = el("input", { type: "number", placeholder: "– nicht gesetzt –" });
     } else {
       input = el("input", { type: "text", placeholder: "– nicht gesetzt –" });
@@ -9196,9 +9227,7 @@ function simulationPanel(schema) {
       const v = (input.value || "").trim();
       if (v === "") return;  // leer = nicht gesetzt (bewusst, s. Konzept §3)
       if (type === "BOOLEAN") data[id] = v === "true";
-      else if (type === "INTEGER") data[id] = parseInt(v, 10);
-      else if (type === "FLOAT") data[id] = Number(v);
-      else data[id] = v;
+      else data[id] = coerceTypedInput(type, v);  // Zahlen inkl. Betrag (VAL-16)
     });
     clear(result);
     try {
@@ -9435,7 +9464,7 @@ function testMonitorPanel(inst, runSchema) {
 
   const dataRows = Object.entries(inst.data_values || {}).map(([k, v]) => {
     const elem = runSchema.data_elements[k];
-    return [elem ? elem.name : k, String(v)];
+    return [elem ? elem.name : k, formatValue(elem, v)];
   });
   const dataBlock = el("div", { class: "panel-b" },
     el("div", { class: "sub-h" }, el("h3", null, "Instanzdaten")),

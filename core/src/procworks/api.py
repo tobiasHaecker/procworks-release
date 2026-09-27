@@ -4950,6 +4950,19 @@ def post_complete_activity(
     supervision = _require_supervision_reason(
         principal, acting_agent, before, schema, req.node_id, req.supervision_reason
     )
+    # D3 at runtime: a completed step's values must fit their element's type.
+    # Before, "vielleicht" landed in a BOOLEAN element, and an XOR decision on
+    # it silently took the "true" branch (found while adding DECIMAL, VAL-16).
+    # Only wrong types of *known* elements are refused here; unknown keys keep
+    # their previous behaviour so integrations sending extra fields do not break.
+    type_findings = [
+        f for f in _validate_data_values(schema, req.data) if f.code == "D3.wrong-type"
+    ]
+    if type_findings:
+        raise HTTPException(
+            status_code=422,
+            detail={"findings": [f.model_dump() for f in type_findings]},
+        )
     # U4 (VAL-22): the input checks of the step's mask hold for every caller,
     # not only for the web form that marks the field.
     form_findings = form_value_findings(schema, req.node_id, req.data)

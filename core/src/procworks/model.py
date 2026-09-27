@@ -97,6 +97,12 @@ class DataType(StrEnum):
 
     INTEGER = "INTEGER"
     FLOAT = "FLOAT"
+    #: A monetary amount: a number with at most two decimal places
+    #: (Validierung 2026-09-25, VAL-16). Carried as a JSON number like FLOAT --
+    #: integrations and storage stay unchanged -- but D3 rejects a third
+    #: decimal instead of letting a rounding error through, and the client
+    #: always shows two places ("1.234,50").
+    DECIMAL = "DECIMAL"
     STRING = "STRING"
     DATE = "DATE"
     BOOLEAN = "BOOLEAN"
@@ -283,6 +289,29 @@ READ_MODES = frozenset({AccessMode.READ, AccessMode.READ_WRITE})
 WRITE_MODES = frozenset({AccessMode.WRITE, AccessMode.READ_WRITE})
 
 
+#: Decimal places of a DECIMAL amount (VAL-16).
+AMOUNT_SCALE = 2
+
+
+def _is_amount(value: object) -> bool:
+    """A finite number with at most :data:`AMOUNT_SCALE` decimal places.
+
+    Judged on the number's shortest decimal representation (``repr``), so
+    ``499.99`` passes and ``0.1 + 0.2`` (``0.30000000000000004``) does not --
+    exactly the rounding noise a monetary field must not accept silently.
+    """
+
+    import math
+    from decimal import Decimal
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    exponent = Decimal(repr(value)).as_tuple().exponent
+    return isinstance(exponent, int) and exponent >= -AMOUNT_SCALE
+
+
 def value_matches_type(data_type: DataType, value: object) -> bool:
     """Return whether ``value`` is a valid runtime value for ``data_type``.
 
@@ -297,6 +326,8 @@ def value_matches_type(data_type: DataType, value: object) -> bool:
         return isinstance(value, int) and not isinstance(value, bool)
     if data_type is DataType.FLOAT:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if data_type is DataType.DECIMAL:
+        return _is_amount(value)
     if data_type is DataType.BOOLEAN:
         return isinstance(value, bool)
     # STRING, DATE and URI are all carried as strings over the wire.
@@ -416,6 +447,7 @@ _WIDGETS_FOR_TYPE: dict[DataType, frozenset[WidgetKind]] = {
     DataType.URI: frozenset({WidgetKind.TEXT}),
     DataType.INTEGER: frozenset({WidgetKind.NUMBER}),
     DataType.FLOAT: frozenset({WidgetKind.NUMBER}),
+    DataType.DECIMAL: frozenset({WidgetKind.NUMBER}),
     DataType.BOOLEAN: frozenset({WidgetKind.CHECKBOX}),
     DataType.DATE: frozenset({WidgetKind.DATE}),
 }
@@ -1146,6 +1178,7 @@ def discriminator_kind(data_type: DataType) -> XorDecisionKind | None:
     return {
         DataType.INTEGER: XorDecisionKind.THRESHOLD,
         DataType.FLOAT: XorDecisionKind.THRESHOLD,
+        DataType.DECIMAL: XorDecisionKind.THRESHOLD,
         DataType.BOOLEAN: XorDecisionKind.BOOLEAN,
         DataType.STRING: XorDecisionKind.ENUM,
     }.get(data_type)

@@ -122,6 +122,11 @@ curl -X POST https://host/v1/instances/instance_42/nodes/act_pruefen/complete \
 # Diskriminator-Wert beim Abschließen des vorgelagerten Schritts zu übergeben.
 ```
 
+* Die mitgegebenen Werte müssen zum Datentyp ihres Elements passen, sonst
+  antwortet der Abschluss mit `422` (Befund D3) und der Schritt bleibt offen.
+  Der Typ **`DECIMAL`** (Betrag) ist eine JSON-Zahl mit höchstens zwei
+  Nachkommastellen: `499.99` ist gültig, `499.999` nicht.
+
 **Wer schließt ab?** Ein Token, das an einen Bearbeiter gebunden ist, schließt
 als dieser Bearbeiter ab; ein ungebundenes Token nennt ihn über `agent_id`, und
 die Bearbeiterregel des Schritts wird geprüft (`409`, wenn er nicht zuständig

@@ -417,7 +417,8 @@ def test_loop_partition_cells_share_one_caption_and_reach_the_api() -> None:
         "Das Schleifen-Panel nutzt die geteilte Beschriftung nicht"
     )
     insert = _fn_body("openInsertModal")
-    assert '"BOOLEAN", "INTEGER", "FLOAT", "STRING"' in insert.split("loopable", 1)[1][:200], (
+    loop_types = '"BOOLEAN", "INTEGER", "FLOAT", "DECIMAL", "STRING"'
+    assert loop_types in insert.split("loopable", 1)[1][:200], (
         "Der Schleifen-Tab laesst nur BOOLEAN-Merkmale zu (S3 fehlt)"
     )
     assert "payload.cells" in insert, (
@@ -1665,7 +1666,7 @@ def test_typed_inputs_are_never_guessed_into_false() -> None:
     mask = _function_body(src, "function maskControl(")
     assert "coerceTypedInput(dtype, raw)" in mask
     assert 'widget === "YESNO"' in mask
-    assert 'attrs.step = dtype === "INTEGER" ? "1" : "any"' in mask
+    assert 'attrs.step = dtype === "INTEGER" ? "1" : dtype === "DECIMAL" ? "0.01" : "any"' in mask
 
 
 def test_instance_data_form_asks_for_a_reason_and_the_audit_shows_the_change() -> None:
@@ -1917,3 +1918,21 @@ def test_empty_model_view_speaks_german_and_offers_next_steps() -> None:
     empty = _function_body(src, "function noSchemaState(")
     assert '"Neuer Prozess"' in empty and 'confirmReset("demo")' in empty
     assert "!state.schemaIds.length" in empty  # Beispieldaten nur im leeren System
+
+
+def test_amounts_are_a_first_class_type_in_the_client() -> None:
+    """VAL-16: Betraege gab es nur als Kommazahl. DECIMAL steht in jeder
+    Typauswahl, ist fuer Masken, Entscheidungen und Schleifen eine Zahl, nimmt
+    Eingaben in 0,01-Schritten an und wird mit zwei Stellen angezeigt."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert '"DECIMAL"' in src.split("const DATA_TYPES = ", 1)[1].split(";", 1)[0]
+    assert 'DECIMAL: "Betrag"' in src
+    assert "DECIMAL: [\"NUMBER\"]" in src
+    helper = _function_body(src, "function isNumericType(")
+    rest = src.replace(helper, "")
+    pattern = r'===\s*"INTEGER"\s*\|\|\s*\w+(\.\w+)?\s*===\s*"FLOAT"\)'
+    assert not re.search(pattern, rest), "Zahlentypen einzeln geprueft -- isNumericType verwenden"
+    formatter = _function_body(src, "function formatValue(")
+    assert "minimumFractionDigits: 2, maximumFractionDigits: 2" in formatter
+    assert 'dtype === "DECIMAL" ? "0.01"' in _function_body(src, "function maskControl(")

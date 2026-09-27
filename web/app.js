@@ -523,6 +523,11 @@ const FINDING_TEXTS = {
   "LC.not-draft": () => ({ text: "Nur ein Entwurf kann freigegeben werden." }),
   "LC.not-released": () => ({ text: "Eine neue Revision lässt sich nur von einer freigegebenen Version anlegen." }),
   "D3.unknown-element": (p) => ({ text: `Das Datenelement „${p.element}“ gibt es in diesem Schema nicht.` }),
+  "D6.not-writable": (p) => ({
+    text: `„${p.step}“ setzt „${p.element}“ nicht – dieser Wert lässt sich beim Abschluss nicht ändern.`,
+    hint: "Werte gibt nur der Schritt ein, der sie schreibt. Eine Korrektur nimmt die Prozessverantwortung vor.",
+  }),
+  "D6.unknown-element": (p) => ({ text: `„${p.element}“ ist kein Datenelement dieses Prozesses.` }),
   "D3.wrong-type": (p) => ({
     text: `Der Wert für „${p.element}“ passt nicht zum Typ ${typeName(p.type)}.`,
     hint: p.type === "DECIMAL" ? "Ein Betrag hat höchstens zwei Nachkommastellen." : undefined,
@@ -10513,6 +10518,7 @@ const HELP_RULES = [
     ["D3", "Typkonformit\u00E4t von Quelle und Senke."],
     ["D4", "Optionale Eingaben d\u00FCrfen unversorgt bleiben; Join-Knoten tragen keine Daten."],
     ["D5", "Datenfluss wird live gepr\u00FCft und muss vor Freigabe sauber sein."],
+    ["D6", "Beim Abschlie\u00DFen eines Schritts nur Werte, die dieser Schritt schreibt \u2013 nichts, was er nur liest, und keine unbekannten Felder."],
   ]],
   ["Externe Datenbindung (C)", [
     ["C1", "EXTERNE Elemente brauchen eine g\u00FCltige Connector-Bindung; INSTANCE-Elemente keine."],

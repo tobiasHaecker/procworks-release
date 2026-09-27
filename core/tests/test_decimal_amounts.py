@@ -96,6 +96,10 @@ def test_completion_rejects_a_value_of_the_wrong_type() -> None:
         f"/schemas/{sid}/data-elements",
         json={"name": "Genehmigt", "data_type": "BOOLEAN", "element_id": "ok"},
     )
+    client.post(
+        f"/schemas/{sid}/data-access",
+        json={"node_id": act, "element_id": "ok", "mode": "WRITE", "mandatory": False},
+    )
     staff_via_api(client, sid)
     assert client.post(f"/schemas/{sid}/release").status_code == 200
     iid = client.post(f"/schemas/{sid}/instances").json()["id"]

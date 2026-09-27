@@ -171,6 +171,7 @@ from procworks.validator import (
     _possible_agents,
     check_executable,
     form_value_findings,
+    node_name,
     performer_reference_candidates,
     validate,
 )
@@ -4950,6 +4951,17 @@ def post_complete_activity(
     supervision = _require_supervision_reason(
         principal, acting_agent, before, schema, req.node_id, req.supervision_reason
     )
+    # D6: a step's completion may only set what the step writes. Before, any
+    # key was taken over -- an approval step that only READS the amount could
+    # overwrite it (four-eyes manipulation, no audit), and unknown keys piled up
+    # as junk in the instance data. The external-task path has refused
+    # non-writable outputs all along; interactive completion now does the same.
+    unwritable = _unwritable_completion_keys(schema, req.node_id, req.data)
+    if unwritable:
+        raise HTTPException(
+            status_code=422,
+            detail={"findings": [f.model_dump() for f in unwritable]},
+        )
     # D3 at runtime: a completed step's values must fit their element's type.
     # Before, "vielleicht" landed in a BOOLEAN element, and an XOR decision on
     # it silently took the "true" branch (found while adding DECIMAL, VAL-16).
@@ -5582,6 +5594,54 @@ class V1CompleteRequest(BaseModel):
     #: Begründung eines Aufsichtseingriffs (ungebundener Token ohne ``agent_id``
     #: an einem Schritt mit Bearbeiterregel); siehe ``_require_supervision_reason``.
     supervision_reason: str | None = None
+
+
+def _unwritable_completion_keys(
+    schema: ProcessSchema, node_id: str, data: dict[str, object]
+) -> list[ValidationFinding]:
+    """D6: completion values the step is not allowed to set.
+
+    Allowed are exactly the elements the step has a WRITE/READ_WRITE access to
+    (the same set its input mask may write, U3). Everything else is refused:
+
+    * a **known** element the step does not write (``D6.not-writable``) --
+      e.g. an approval step overwriting the amount it only reads;
+    * an **unknown** key (``D6.unknown-element``).
+
+    Unknown nodes are left to the engine (409 as before), so this never turns a
+    wrong ``node_id`` into a data finding.
+    """
+
+    if node_id not in schema.nodes:
+        return []
+    writable = {a.element_id for a in schema.accesses_of(node_id) if a.mode in WRITE_MODES}
+    step = node_name(schema, node_id)
+    findings: list[ValidationFinding] = []
+    for key in data:
+        if key in writable:
+            continue
+        element = schema.data_elements.get(key)
+        if element is None:
+            findings.append(
+                ValidationFinding(
+                    rule="D6",
+                    node_id=node_id,
+                    message=f"'{key}' is no data element of this process",
+                    code="D6.unknown-element",
+                    params={"element": key, "step": step},
+                )
+            )
+        else:
+            findings.append(
+                ValidationFinding(
+                    rule="D6",
+                    node_id=node_id,
+                    message=f"step '{node_id}' does not write '{key}'",
+                    code="D6.not-writable",
+                    params={"element": element.name, "step": step},
+                )
+            )
+    return findings
 
 
 def _validate_data_values(

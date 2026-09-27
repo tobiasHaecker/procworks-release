@@ -122,6 +122,12 @@ curl -X POST https://host/v1/instances/instance_42/nodes/act_pruefen/complete \
 # Diskriminator-Wert beim Abschließen des vorgelagerten Schritts zu übergeben.
 ```
 
+* Mitgeben lassen sich **nur Werte, die der abgeschlossene Schritt schreibt**
+  (Datenbindung „Schreiben“ bzw. „Lesen und Schreiben“ am Schritt). Ein Wert,
+  den der Schritt nur liest, oder ein unbekanntes Feld ergibt `422` (Befund D6,
+  seit 1.27.1) – so kann etwa ein Genehmigungsschritt den Betrag nicht
+  nachträglich ändern. Dieselbe Regel gilt seit jeher für externe Aufgaben.
+  Andere Werte setzt eine Integration über `PUT …/data` (Scope `data:write`).
 * Die mitgegebenen Werte müssen zum Datentyp ihres Elements passen, sonst
   antwortet der Abschluss mit `422` (Befund D3) und der Schritt bleibt offen.
   Der Typ **`DECIMAL`** (Betrag) ist eine JSON-Zahl mit höchstens zwei

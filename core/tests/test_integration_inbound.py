@@ -32,13 +32,20 @@ def _released_schema_with_data() -> str:
     """A released single-activity schema with one INTEGER data element."""
 
     sid = client.post("/schemas", json={"name": "Inbound"}).json()["id"]
-    client.post(
+    schema = client.post(
         f"/schemas/{sid}/serial-insert",
         json={"label": "Bearbeiten", "after_node_id": "start"},
-    )
+    ).json()
+    act = next(n["id"] for n in schema["nodes"].values() if n["label"] == "Bearbeiten")
     client.post(
         f"/schemas/{sid}/data-elements",
         json={"name": "Betrag", "data_type": "INTEGER", "element_id": "betrag"},
+    )
+    # The step writes the amount -- a completion may only set what its step
+    # writes (D6), so the integration tests complete with a bound value.
+    client.post(
+        f"/schemas/{sid}/data-access",
+        json={"node_id": act, "element_id": "betrag", "mode": "WRITE", "mandatory": False},
     )
     staff_via_api(client, sid)
     client.post(f"/schemas/{sid}/release")

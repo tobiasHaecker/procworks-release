@@ -408,6 +408,7 @@ function clearToasts(kind) {
 const OP_KIND_NAMES = {
   node: "Der Schritt", data_element: "Das Datenelement", role: "Die Rolle", org_unit: "Die Abteilung",
   agent: "Die Person", follow_up: "Der Folgeprozess", activity_template: "Die Dienst-Vorlage", connector: "Der Connector",
+  schema: "Der Prozess", template: "Die Vorlage", org_model: "Die Organisation",
 };
 
 /** Texte fuer „geht an dieser Knotenart nicht“ (Code OP.wrong-node-kind, Parameter ``what``). */
@@ -854,6 +855,9 @@ const FINDING_TEXTS = {
   "R1.not-serial": () => ({ text: "Dieser Schritt liegt nicht auf einer einfachen Strecke und lässt sich ad hoc nicht entfernen." }),
   "R1.rename-not-step": () => ({ text: "Ad hoc lassen sich nur Schritte und Teilprozesse umbenennen." }),
   "OP.own-deputy": () => ({ text: "Eine Person kann nicht ihre eigene Vertretung sein." }),
+  "OP.label-empty": (p) => ({ text: `${OP_KIND_NAMES[p.kind] || "Das Element"} braucht einen Namen.` }),
+  "OP.label-too-long": (p) => ({ text: `Der Name ist zu lang – höchstens ${p.max} Zeichen.` }),
+  "U6.label-too-long": (p) => ({ text: `${stepOf(p, "Eine Bezeichnung")} ist zu lang – höchstens ${p.max} Zeichen.` }),
   "U2.bounds-not-number": (p) => ({ text: `„${p.field}“: Unter- und Obergrenze gibt es nur bei Zahlenfeldern.` }),
   "U2.bounds-order": (p) => ({ text: `„${p.field}“: Die Untergrenze liegt über der Obergrenze.` }),
   "U2.text-rule-not-text": (p) => ({ text: `„${p.field}“: Muster und Höchstlänge gibt es nur bei Textfeldern.` }),
@@ -1045,7 +1049,7 @@ async function request(method, path, body) {
     });
   } catch (e) {
     setConnected(false);
-    throw { detail: `Keine Verbindung zur API (${state.apiBase}). Laeuft uvicorn?` };
+    throw { detail: `Keine Verbindung zur API (${state.apiBase}). L\u00E4uft der Server?` };
   }
   setConnected(true);
   const text = await resp.text();
@@ -1798,8 +1802,11 @@ function renderGraph(schema, opts) {
       style: opts.onSelectNode ? "cursor:pointer" : "",
       onClick: opts.onSelectNode ? () => opts.onSelectNode(id) : null });
     g.appendChild(svg("rect", { x: p.x, y: p.y, width: p.w, height: p.h, rx: 10 }));
+    // Gekuerzte Bezeichnung: die volle steht als Tooltip am Knoten (VAL-30).
+    const caption = nodeCaption(node);
+    if (caption.length > 18) g.appendChild(svg("title", null, document.createTextNode(caption)));
     g.appendChild(svg("text", { class: "glabel", x: p.x + p.w / 2, y: p.y + p.h / 2 - 2, "text-anchor": "middle" },
-      document.createTextNode(truncate(nodeCaption(node), 18))));
+      document.createTextNode(truncate(caption, 18))));
     // E2-Status-Overlay (Detailzustaende-Konzept §7 Stufe C): ein angehaltener
     // oder gescheiterter Schritt ist direkt in der Prozesslandkarte sichtbar,
     // nicht erst in der Aufgabenliste -- Statustext + Randfarbe am Knoten.
@@ -2170,10 +2177,33 @@ function attachPanZoom(wrap, svgEl) {
 
   /** Mindestmassstab, den der erste Einpassen-Klick nicht unterschreitet. */
   const FIT_READABLE = 0.6;
+  /**
+   * Mindestmassstab der Uebersicht (zweiter Klick). Frueher bis MIN (0,2) --
+   * ein Modell mit 16 Knoten war dann nicht mehr lesbar (VAL-23). Was bei
+   * diesem Massstab nicht passt, bleibt seitlich verschiebbar; die Randpfeile
+   * zeigen, dass dort noch etwas liegt.
+   */
+  const FIT_OVERVIEW_MIN = 0.35;
+
+  // Randpfeile: „hier geht es weiter“. Ohne sie wirkte das lesbare Einpassen
+  // wie ein abgeschnittenes Modell (VAL-23).
+  const moreLeft = el("div", { class: "canvas-more canvas-more-left", "aria-hidden": "true" }, "\u25C0");
+  const moreRight = el("div", { class: "canvas-more canvas-more-right", "aria-hidden": "true" }, "\u25B6 weiter rechts");
+  wrap.appendChild(moreLeft);
+  wrap.appendChild(moreRight);
 
   function apply() {
     svgEl.style.transformOrigin = "0 0";
     svgEl.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    const vb = svgEl.viewBox && svgEl.viewBox.baseVal;
+    const vw = wrap.clientWidth;
+    if (vb && vb.width && vw) {
+      const left = tx + vb.x * scale;
+      const right = tx + (vb.x + vb.width) * scale;
+      moreLeft.style.display = left < -4 ? "" : "none";
+      moreRight.style.display = right > vw - reserveRight + 4 ? "" : "none";
+      moreRight.style.right = `${10 + reserveRight}px`;  // nicht unter der Schritt-Karte
+    }
   }
   apply();
 
@@ -2306,9 +2336,13 @@ function attachPanZoom(wrap, svgEl) {
       ty = h <= vh - MARGIN * 2 ? (vh - h) / 2 - by * scale : MARGIN - by * scale;
       fitState.readableShown = true;
     } else {
-      scale = Math.min(MAX, Math.max(MIN, Math.min(1, fit)));
-      tx = (vwFree - bw * scale) / 2 - bx * scale;
-      ty = (vh - bh * scale) / 2 - by * scale;
+      scale = Math.min(MAX, Math.max(Math.max(MIN, FIT_OVERVIEW_MIN), Math.min(1, fit)));
+      const w = bw * scale;
+      // Passt es auch so nicht, beginnt die Ansicht links am Start statt
+      // mittig abgeschnitten zu sein; der Rest ist per Ziehen erreichbar.
+      tx = w <= vwFree - MARGIN * 2 ? (vwFree - w) / 2 - bx * scale : MARGIN - bx * scale;
+      const h = bh * scale;
+      ty = h <= vh - MARGIN * 2 ? (vh - h) / 2 - by * scale : MARGIN - by * scale;
       fitState.readableShown = false;
     }
     apply();
@@ -2444,6 +2478,31 @@ async function openCreatedSchema(id) {
   state.view = "model";
   setActiveNav();
   await selectSchema(id);
+}
+
+/**
+ * Leerzustand der Modellieren-Sicht (beide Oberflaechen, VAL-33): Umlaute statt
+ * „ausgewaehlt“ und gleich die naechsten Schritte als Knoepfe. „Beispieldaten
+ * laden“ nur fuer Admins und nur, wenn das System noch **leer** ist -- das
+ * Laden loescht vorher alles (``confirmReset`` fragt zusaetzlich nach).
+ * @returns {HTMLElement}
+ */
+function noSchemaState() {
+  const box = emptyState(state.schemaIds.length
+    ? "Kein Schema ausgew\u00E4hlt. Oben ein Schema w\u00E4hlen oder ein neues anlegen."
+    : "Noch kein Prozess vorhanden.");
+  const actions = el("div", { class: "btn-row", style: "justify-content:center;margin-top:10px" },
+    hasRole("modeler", "admin")
+      ? el("button", { class: "btn small primary", onClick: newSchema }, "Neuer Prozess")
+      : null,
+    hasRole("modeler", "admin")
+      ? el("button", { class: "btn small ghost", onClick: newFromTemplate }, "Aus Vorlage")
+      : null,
+    hasRole("admin") && !state.schemaIds.length
+      ? el("button", { class: "btn small ghost", onClick: () => confirmReset("demo") }, "Beispieldaten laden")
+      : null);
+  box.appendChild(actions);
+  return box;
 }
 
 function activitiesOf(schema) {
@@ -2592,7 +2651,7 @@ async function newFromTemplate() {
   const gallery = el("div", { class: "tpl-gallery" }, ...cards);
 
   openModal("Aus Vorlage erstellen", gallery, async () => {
-    if (!selection.id) { toast("info", "Keine Vorlage gewaehlt", ["Bitte eine Vorlage auswaehlen."]); return false; }
+    if (!selection.id) { toast("info", "Keine Vorlage gew\u00E4hlt", ["Bitte eine Vorlage ausw\u00E4hlen."]); return false; }
     try {
       const schema = await api.post(`/templates/${encodeURIComponent(selection.id)}/instantiate`,
         { name: selection.name });
@@ -2714,7 +2773,13 @@ function modelHeader(schema, draft) {
         : null,
       migrationHeaderButton(schema, draft),
       draft
-        ? el("button", { class: "btn small green", "data-tour": "model.release", onClick: releaseSchema }, "Freigeben")
+        // Gruen nur, wenn freigabereif (VAL-24) -- sonst sah der Knopf nach
+        // "fertig" aus, obwohl Schritte ohne Bearbeiter die Freigabe verhindern.
+        ? el("button", {
+            class: "btn small" + (isReleasable(schema) ? " green" : ""),
+            title: isReleasable(schema) ? "Schema freigeben (danach unver\u00E4nderlich)"
+              : "Noch nicht freigabereif \u2013 siehe Statusleiste",
+            "data-tour": "model.release", onClick: releaseSchema }, "Freigeben")
         : el("button", { class: "btn small primary", onClick: () => { state.view = "run"; setActiveNav(); render(); } }, "Zur Ausf\u00FChrung"),
       draft && hasRole("modeler", "admin")
         ? el("button", { class: "btn small", onClick: startTestInstance, title: "Test-Instanz dieses Entwurfs starten und im 4-Quadranten-Cockpit durchspielen" }, "\u2697 Pr\u00FCfinstanz")
@@ -2735,7 +2800,7 @@ function viewModelCard() {
   const nameFocus = captureCardNameFocus();
   clear(content);
   if (!state.schema) {
-    content.appendChild(emptyState("Kein Schema ausgewaehlt. Lege oben rechts ein neues Schema an."));
+    content.appendChild(noSchemaState());
     return;
   }
   const schema = state.schema;
@@ -2923,7 +2988,7 @@ function viewModelClassic() {
   const content = byId("content");
   clear(content);
   if (!state.schema) {
-    content.appendChild(emptyState("Kein Schema ausgewaehlt. Lege oben rechts ein neues Schema an."));
+    content.appendChild(noSchemaState());
     return;
   }
   const schema = state.schema;
@@ -3840,8 +3905,10 @@ function ancestorsOf(schema, nodeId) {
  * @param {function(string): void} onPick Rueckmeldung der Auswahl (Element-Id).
  * @returns {{node: HTMLElement, get: function(): string|null}} Steuerelement.
  */
-function pickList(items, onPick) {
-  let chosen = items.length ? items[0].id : null;
+function pickList(items, onPick, initial) {
+  // ``initial`` waehlt einen Eintrag vor (z. B. das soeben angelegte Element).
+  let chosen = initial && items.some((it) => it.id === initial) ? initial
+    : items.length ? items[0].id : null;
   const list = el("div", { class: "pick-list" });
   const search = el("input", { type: "text", placeholder: "Suchen …" });
   function build() {
@@ -3885,9 +3952,15 @@ function pickList(items, onPick) {
  * vorherige Schreibquelle wird mit HTTP 422 abgewiesen, das Modell bleibt
  * unveraendert und der Befund erscheint als Meldung.
  *
+ * Vorgaben (VAL-26, VAL-27): Die Richtung steht auf „Schreiben“, solange kein
+ * Schritt davor das gewaehlte Element setzt -- „Lesen“ fuehrte dort sicher zu
+ * D1. Ueber „Neues Datenelement anlegen“ kommt man mit dem neuen Element
+ * vorgewaehlt hierher zurueck (``preselect``).
+ *
  * @param {string} nodeId Zielschritt.
+ * @param {string} [preselect] vorzuwaehlendes Datenelement
  */
-function bindDataDialog(nodeId) {
+function bindDataDialog(nodeId, preselect) {
   const schema = state.schema;
   const node = schema.nodes[nodeId];
   const before = ancestorsOf(schema, nodeId);
@@ -3905,14 +3978,16 @@ function bindDataDialog(nodeId) {
   if (!items.length) {
     // Ohne Datenelement gibt es nichts zu binden -- direkt das Anlegen anbieten
     // und danach zurueck in den Bindungsdialog.
-    addDataElement(() => bindDataDialog(nodeId));
+    addDataElement((id) => bindDataDialog(nodeId, id));
     return;
   }
-  const picker = pickList(items, null);
   const modeSel = el("select", null,
     el("option", { value: "READ" }, "Lesen (liest den Wert)"),
     el("option", { value: "WRITE" }, "Schreiben (setzt den Wert)"),
     el("option", { value: "READ_WRITE" }, "Lesen und Schreiben"));
+  const defaultMode = (id) => { modeSel.value = writtenBefore.has(id) ? "READ" : "WRITE"; };
+  const picker = pickList(items, defaultMode, preselect);
+  defaultMode(picker.get());
   const mandBox = el("input", { type: "checkbox" });
   mandBox.checked = true;
   openModal(`Datenelement an „${nodeCaption(node)}" binden`,
@@ -3925,7 +4000,7 @@ function bindDataDialog(nodeId) {
         el("label", { class: "row", style: "gap:8px;align-items:center" }, mandBox, "Pflichtbindung")),
       el("div", { style: "margin-top:10px" },
         el("button", { class: "btn small ghost", type: "button",
-          onClick: () => addDataElement(() => bindDataDialog(nodeId)) },
+          onClick: () => addDataElement((id) => bindDataDialog(nodeId, id)) },
           "＋ Neues Datenelement anlegen"))),
     async () => {
       const id = picker.get();
@@ -5793,6 +5868,7 @@ function openInsertModal(afterNodeId) {
           // Vergleichswahl bestimmt, welche Seite wiederholt (K6b: je eine
           // Wiederhol- und eine Verlassen-Zelle).
           const bound = loopBound.value.trim();
+          if (loopBound.validity && loopBound.validity.badInput) { toast("err", "Grenze ist keine Zahl"); return false; }
           if (bound === "") { toast("err", "Grenze fehlt"); return false; }
           const g = Number(bound);
           payload.cells = loopCmp.value === "gte"
@@ -5814,6 +5890,13 @@ function openInsertModal(afterNodeId) {
         if (!kind) { toast("err", "Kein Entscheidungs-Datenelement gew\u00E4hlt", ["Bitte oben ein Datenelement ausw\u00E4hlen, nach dem verzweigt wird."]); return false; }
         let branches = [];
         if (kind === "THRESHOLD") {
+          // Ein Zahlenfeld liefert fuer „abc“ einen leeren Wert -- das galt
+          // bisher still als „ohne Obergrenze“ und endete in einer
+          // irrefuehrenden Meldung (VAL-28). ``badInput`` verraet die Eingabe.
+          const bad = [...condRows.querySelectorAll(".threshold-row")].filter((r) =>
+            r.querySelector(".cond-upper").validity && r.querySelector(".cond-upper").validity.badInput);
+          bad.forEach((r) => markField(r, "keine Zahl"));
+          if (bad.length) { toast("err", "Grenzwert ist keine Zahl", ["Bitte eine Zahl eingeben oder das Feld für die oberste Stufe leer lassen."]); return false; }
           const rows = [...condRows.querySelectorAll(".threshold-row")].map((r) => ({
             label: r.querySelector(".cond-label").value.trim(),
             upperRaw: r.querySelector(".cond-upper").value.trim(),
@@ -5936,19 +6019,39 @@ async function releaseSchema() {
   const missing = releaseFindings();
   if (missing.length) {
     const names = missing.map((f) => nodeLabelOf(f.node_id)).filter(Boolean);
+    // Die Meldung ist bereits eine Aufzaehlung (<ul>) -- kein eigenes „•“
+    // davor, sonst standen zwei Zeichen vor jedem Namen (VAL-24).
     toast("err", "Freigabe noch nicht möglich", [
-      `${missing.length} Schritt(e) brauchen noch eine Bearbeiterzuordnung.`,
-      ...names.map((n) => `• ${n}`),
+      `${missing.length} Schritt(e) brauchen noch eine Bearbeiterzuordnung:`,
+      ...names,
       "Sie würden sonst in keiner Arbeitsliste erscheinen.",
     ]);
     return;
   }
-  try {
-    await api.post(`/schemas/${state.schemaId}/release`);
-    await refreshSchema();
-    render();
-    toast("ok", "Schema freigegeben", ["Jetzt instanziierbar."]);
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  // Freigeben ist nicht umkehrbar (R0): erst nachfragen (VAL-24).
+  openModal("Schema freigeben?", el("div", { class: "form-grid" },
+    el("p", null, `„${state.schema.name}“ wird freigegeben. Danach lassen sich Vorgänge starten, das Schema selbst ist aber unveränderlich.`),
+    el("p", { class: "muted" }, "Änderungen gehen dann nur noch über eine neue Revision; laufende Vorgänge lassen sich auf sie migrieren.")),
+  async () => {
+    try {
+      await api.post(`/schemas/${state.schemaId}/release`);
+      await refreshSchema();
+      render();
+      toast("ok", "Schema freigegeben", ["Jetzt instanziierbar."]);
+    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+  }, "Freigeben");
+}
+
+/**
+ * Ist das Schema laut letzter Pruefung freigabereif? Nur fuer die Farbe des
+ * Knopfs -- entschieden wird beim Freigeben im Kern.
+ * @param {object} schema angezeigtes Schema
+ * @returns {boolean}
+ */
+function isReleasable(schema) {
+  const v = state.validation;
+  if (!v || !schema || schema.id !== state.schemaId) return false;
+  return v.correct !== false && !releaseFindings().length;
 }
 
 /** Bezeichnung eines Knotens der aktuellen Sicht (fuer Meldungen). */
@@ -6183,7 +6286,7 @@ async function toggleDisplayField(elementId) {
 function viewData() {
   const content = byId("content");
   clear(content);
-  if (!state.schema) { content.appendChild(emptyState("Kein Schema ausgewaehlt.")); return; }
+  if (!state.schema) { content.appendChild(emptyState("Kein Schema ausgew\u00E4hlt.")); return; }
   const schema = state.schema;
   const draft = isDraft(schema);
 
@@ -6272,9 +6375,14 @@ function addDataElement(onCreated) {
     el("label", { class: "field" }, "Typ", type)), async () => {
     if (!name.value.trim()) return false;
     try {
-      await api.post(`/schemas/${state.schemaId}/data-elements`, { name: name.value.trim(), data_type: type.value });
+      const known = new Set(Object.keys(state.schema.data_elements || {}));
+      const schema = await api.post(`/schemas/${state.schemaId}/data-elements`, { name: name.value.trim(), data_type: type.value });
+      const created = Object.keys(schema.data_elements || {}).find((id) => !known.has(id));
       await refreshSchema(); render(); toast("ok", "Datenelement angelegt");
-      if (typeof onCreated === "function") onCreated();
+      // Erst NACH dem Schliessen dieses Dialogs fortsetzen: ``openModal``
+      // leert nach dem Bestaetigen seinen Container -- ein hier sofort
+      // geoeffneter Folgedialog verschwand mit (VAL-27).
+      if (typeof onCreated === "function") setTimeout(() => onCreated(created), 0);
     } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
   }, "Anlegen");
 }
@@ -6346,7 +6454,7 @@ function deleteDataElement(elem) {
 function viewOrg() {
   const content = byId("content");
   clear(content);
-  if (!state.schema) { content.appendChild(emptyState("Kein Schema ausgewaehlt.")); return; }
+  if (!state.schema) { content.appendChild(emptyState("Kein Schema ausgew\u00E4hlt.")); return; }
   const schema = state.schema;
   const draft = isDraft(schema);
   const linked = !!schema.org_model_id;
@@ -6592,7 +6700,7 @@ function orgUnitPanel(org, draft) {
   const head = el("div", { class: "panel-h" }, el("h2", null, "Abteilungen"),
     el("span", { class: "sub" }, "Hierarchie mit Vorgesetzten"),
     el("span", { class: "spacer", style: "flex:1" }),
-    el("button", { class: "btn small", onClick: () => addChildOrgUnit(null), disabled: !draft }, "+ OrgEinheit"));
+    el("button", { class: "btn small", onClick: () => addChildOrgUnit(null), disabled: !draft }, "+ Abteilung"));
   const body = el("div", { class: "panel-b" });
   if (!units.length) { body.appendChild(emptyState("Noch keine Abteilung.")); return el("div", { class: "panel" }, head, body); }
 
@@ -6742,7 +6850,8 @@ function describeRule(rule, schema) {
     return n && n.label ? n.label : id;
   };
   if (rule.kind === "ROLE") return `Rolle: ${named(org.roles, rule.ref)}`;
-  if (rule.kind === "ORG_UNIT") return `OrgEinheit: ${named(org.org_units, rule.ref)}${rule.recursive ? " (inkl. Unterbereiche)" : ""}`;
+  // „Abteilung“ wie in den Dialogen, nicht „OrgEinheit“ (VAL-37).
+  if (rule.kind === "ORG_UNIT") return `Abteilung: ${named(org.org_units, rule.ref)}${rule.recursive ? " (inkl. Unterbereiche)" : ""}`;
   // Beim Agenten lohnt der Rueckfall auf agentNameOf: kennt ihn die
   // Organisation dieses Schemas nicht, findet ihn oft das modelluebergreifende
   // Verzeichnis.
@@ -7073,18 +7182,37 @@ function staffTermPicker(schema, currentNode) {
   const kindSel = el("select", null,
     el("option", { value: "ROLE" }, "Rolle"),
     el("option", { value: "ORG_UNIT" }, "Abteilung"),
-    el("option", { value: "AGENT" }, "Person"),
+    el("option", { value: "AGENT" }, "Agent (konkrete Person)"),
     el("option", { value: "NODE_PERFORMING_AGENT" }, "Bearbeiter eines Schritts"),
     el("option", { value: "NODE_PERFORMING_AGENT_SUPERVISOR" }, "Vorgesetzte:r des Bearbeiters eines Schritts"));
   const recBox = el("input", { type: "checkbox" });
   const recField = el("label", { class: "field" }, recBox, " Abteilung und alle Bereiche darunter");
   const NODE_KINDS = ["NODE_PERFORMING_AGENT", "NODE_PERFORMING_AGENT_SUPERVISOR"];
+  let pending = 0;
   function refresh() {
     clear(refSel);
     if (NODE_KINDS.includes(kindSel.value)) {
-      activitiesOf(schema)
-        .filter((n) => n.id !== currentNode())
-        .forEach((n) => refSel.appendChild(el("option", { value: n.id }, nodeCaption(n))));
+      // Nur Schritte, die garantiert vorher laufen -- dieselbe Analyse wie Z3
+      // im Kern (VAL-25). Frueher standen auch Schritte des anderen XOR-Zweigs
+      // zur Wahl, und erst der Klick brachte die Ablehnung.
+      const ticket = ++pending;
+      const target = currentNode();
+      refSel.appendChild(el("option", { value: "" }, "\u2026 wird geladen"));
+      api.get(`/schemas/${schema.id}/nodes/${target}/performer-candidates`)
+        .then((ids) => {
+          if (ticket !== pending) return;  // inzwischen andere Auswahl
+          clear(refSel);
+          ids.forEach((id) => {
+            const n = schema.nodes[id];
+            if (n) refSel.appendChild(el("option", { value: id }, nodeCaption(n)));
+          });
+          if (!ids.length) refSel.appendChild(el("option", { value: "" }, "(kein Schritt l\u00E4uft sicher vorher)"));
+        })
+        .catch(() => {
+          if (ticket !== pending) return;
+          clear(refSel);
+          refSel.appendChild(el("option", { value: "" }, "(Schritte nicht abrufbar)"));
+        });
     } else {
       const src = kindSel.value === "ROLE" ? org.roles
         : kindSel.value === "AGENT" ? org.agents : org.org_units;
@@ -7182,7 +7310,7 @@ function addStaffRule(fixedNodeId) {
 async function viewRun() {
   const content = byId("content");
   clear(content);
-  if (!state.schema) { content.appendChild(emptyState("Kein Schema ausgewaehlt.")); return; }
+  if (!state.schema) { content.appendChild(emptyState("Kein Schema ausgew\u00E4hlt.")); return; }
   const schema = state.schema;
 
   const header = el("div", { class: "panel" },
@@ -10361,6 +10489,16 @@ const HELP_RULES = [
     ["C1", "EXTERNE Elemente brauchen eine g\u00FCltige Connector-Bindung; INSTANCE-Elemente keine."],
     ["C2", "Das Schl\u00FCsselelement der Bindung ist ein existierendes INSTANCE-Element (nicht es selbst)."],
     ["C3", "Der gebundene Entit\u00E4tsname ist nicht leer."],
+    ["C4\u2013C6", "SQL-Abfrage: Ergebnistyp passt zum Element, Filter passen zu ihren Spalten und Quellen, die Anzahl gelesener Zeilen ist eindeutig (eine Zeile, Zusammenfassung, erste nach Sortierung)."],
+    ["C7\u2013C9", "Zur\u00FCckschreiben: Zielspalte passt zum Typ, Filter passen, genau eine Zeile wird getroffen (eindeutige Spalte)."],
+  ]],
+  ["Eingabemasken & Anzeige (U)", [
+    ["U1", "Die Maske h\u00E4ngt an einem Aufgaben-Schritt und nennt existierende Datenelemente."],
+    ["U2", "Felder sind stimmig: eindeutig, beschriftet, Bedienelement passt zum Typ, Pr\u00FCfregeln passen zum Feld."],
+    ["U3", "Jedes Feld hat die passende Daten\u00ADbindung am Schritt (Eingabe schreibt, Anzeige liest)."],
+    ["U4", "Beim Abschlie\u00DFen: Werte halten die Pr\u00FCfregeln der Maske ein (Grenzen, Muster, L\u00E4nge)."],
+    ["U5", "Den Vorgang benennen h\u00F6chstens zwei vorhandene Vorgangsdaten."],
+    ["U6", "Bezeichnungen sind h\u00F6chstens 200 Zeichen lang."],
   ]],
   ["Bearbeiter / Ressourcen (Z, A)", [
     ["Z1", "Bearbeiterregel ist syntaktisch g\u00FCltig und referenziert existierende Rollen/Einheiten."],
@@ -10374,19 +10512,32 @@ const HELP_RULES = [
     ["I2", "Genau ein Automatik-Muster; automatisierte Bindung ist als automatisch markiert."],
     ["I3", "Parameter-Mapping zeigt auf existierende Datenelemente."],
     ["I4", "Topic/Endpunkt enthalten keine Inline-URL oder Zugangsdaten."],
+    ["WH", "Webhook-Ziel: https, ein erlaubter \u00F6ffentlicher Server, keine Zugangsdaten in der Adresse."],
   ]],
   ["Komposition (H, F)", [
     ["H1\u2013H4", "Sub-Prozesse: nur freigegebene, gepinnte Version; typkonforme Schnittstelle; zyklenfrei."],
-    ["F1\u2013F3", "Folgeprozesse: Ziel existiert freigegeben; typkonformes Handover; lose Kopplung bei ASYNC."],
+    ["F1\u2013F4", "Folgeprozesse: Ziel existiert freigegeben; typkonformes Handover; lose Kopplung bei ASYNC; Bedingungen lesen nur sicher gesetzte Daten."],
   ]],
   ["Zeit & Release (T, B)", [
     ["T1\u2013T2", "Fristen/Dauern wohldefiniert und entlang der Blockstruktur widerspruchsfrei."],
+    ["T3", "Eskalation: nur an Aufgaben-Schritten mit Soll-Zeit, Stufen aufsteigend, Ziele finden jemanden."],
     ["B1", "Release-Reife: jeder Schritt ist ausf\u00FChrbar \u2013 automatische tragen einen Dienst, interaktive Maske und Bearbeiterzuordnung (der interaktive Teil ist B2)."],
     ["B2", "Release-Reife: jeder interaktive Schritt hat eine Bearbeiterzuordnung."],
     ["B3", "Release-Reife: alle Pflichtdaten sind gebunden, alle Pr\u00E4dikate spezifiziert."],
   ]],
+  ["Benachrichtigung (N)", [
+    ["N1", "E-Mail-Adressen und Postf\u00E4cher sind wohlgeformt."],
+    ["N2", "Mails gibt es nur an Aufgaben-Schritten mit Bearbeiterzuordnung."],
+    ["N3", "Jeder m\u00F6gliche Empf\u00E4nger ist erreichbar (Adresse bzw. Gruppenpostfach)."],
+    ["N4", "Platzhalter im Mailtext verweisen auf sicher gesetzte Vorgangsdaten."],
+  ]],
+  ["Bearbeitungsschritte (OP)", [
+    ["OP", "Vorbedingung einer Bearbeitung nicht erf\u00FCllt \u2013 etwa: das Element gibt es nicht (mehr), der Schritt liegt an der falschen Stelle, der Name fehlt."],
+  ]],
   ["Laufzeit & Migration (R, M)", [
     ["R0", "Nur Entw\u00FCrfe sind editierbar; freigegebene Schemata sind unver\u00E4nderlich."],
+    ["LC", "Lebenszyklus: nur ein Entwurf wird freigegeben, eine neue Revision entsteht nur aus einer freigegebenen Version."],
+    ["M0", "Migration: die Instanz l\u00E4uft auf einer fr\u00FCheren Version genau dieses Schemas."],
     ["R1\u2013R2", "Ad-hoc-\u00C4nderungen nur zustandsvertr\u00E4glich und unter Erhalt aller K/D-Regeln."],
     ["M1\u2013M5", "Migration nur, wenn Ziel korrekt ist und der bisherige Verlauf vertr\u00E4glich bleibt."],
   ]],
@@ -11220,7 +11371,7 @@ function renderTourBadge() {
   if (typeof Tour === "undefined" || !Tour.sandboxed) return;
   slot.appendChild(el("span", {
     class: "tour-badge",
-    title: "Im Tutorial verlaesst kein schreibender Aufruf den Browser.",
+    title: "Im Tutorial verl\u00E4sst kein schreibender Aufruf den Browser.",
   }, "Tutorial – es wird nichts gespeichert"));
 }
 

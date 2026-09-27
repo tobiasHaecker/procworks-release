@@ -515,3 +515,5 @@ def test_full_stack_uses_the_released_images_of_this_version() -> None:
         assert expected in compose, (
             f"{image}: Compose-Standardversion passt nicht zu pyproject ({version})"
         )
+    # VAL-34: the backup index names the release that wrote the dump.
+    assert f'PROCWORKS_VERSION: "${{PROCWORKS_VERSION:-{version}}}"' in compose

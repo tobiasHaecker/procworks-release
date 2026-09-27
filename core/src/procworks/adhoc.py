@@ -33,6 +33,7 @@ from procworks.validator import (
     SchemaResolver,
     ValidationFinding,
     check_executable,
+    clean_label,
     raise_if_invalid,
 )
 
@@ -134,7 +135,7 @@ def adhoc_insert_activity(
     new_node = Node(
         id=new_node_id or _free_id(candidate, "adhoc"),
         type=NodeType.ACTIVITY,
-        label=label,
+        label=clean_label(label, what="node"),
     )
     candidate.nodes[new_node.id] = new_node
     candidate.edges = [
@@ -270,7 +271,7 @@ def adhoc_rename_activity(
         )
 
     candidate = current.model_copy(deep=True)
-    candidate.nodes[node_id].label = label
+    candidate.nodes[node_id].label = clean_label(label, what="node")
     candidate.lifecycle_state = LifecycleState.RELEASED
     raise_if_invalid(candidate, resolver)
 

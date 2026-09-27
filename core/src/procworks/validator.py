@@ -162,6 +162,7 @@ def validate(
     findings += _check_data_flow(schema)
     findings += _check_forms(schema)
     findings += _check_display_fields(schema)
+    findings += _check_label_lengths(schema)
     findings += _check_connectors(schema)
     findings += _check_scalar_queries(schema)
     findings += _check_scalar_writes(schema)
@@ -1633,6 +1634,21 @@ def _topological_order(schema: ProcessSchema) -> list[str]:
     return order
 
 
+def performer_reference_candidates(schema: ProcessSchema, node_id: str) -> list[str]:
+    """ACTIVITY nodes a staff rule on ``node_id`` may reference (VAL-25).
+
+    Exactly the nodes Z3 accepts: guaranteed to have run on every path before
+    ``node_id`` (:func:`_must_executed_before`). The web dialog offered every
+    step, including those of another XOR branch, and only the click brought
+    the Z3 rejection. Read-only; Z3 stays the rule that decides.
+    """
+
+    before = _must_executed_before(schema).get(node_id, set())
+    return sorted(
+        nid for nid in before if schema.nodes[nid].type is NodeType.ACTIVITY
+    )
+
+
 def _must_executed_before(schema: ProcessSchema) -> dict[str, set[str]]:
     """For each node, the nodes guaranteed to have executed on all prior paths.
 
@@ -1661,6 +1677,81 @@ def _must_executed_before(schema: ProcessSchema) -> dict[str, set[str]]:
 
 
 # --- U1-U3: input-mask (form designer) well-formedness -------------------
+
+
+#: Longest name/label any input may set (VAL-29). Long enough for every real
+#: caption, short enough to keep dialogs, lanes and worklists readable.
+MAX_LABEL_LENGTH = 200
+
+
+def clean_label(value: str, *, what: str) -> str:
+    """Trim a name/label and reject an empty or overlong one (VAL-29).
+
+    Labels that were empty, only blanks or 5000 characters long were accepted
+    (Validierung 2026-09-25). Every operation that sets a name calls this, so
+    the rule holds for web, API and scripts alike; ``what`` names the kind of
+    object for the client's wording (``OP_KIND_NAMES``). The *length* bound is
+    additionally part of ``validate()`` (U6), so the BPMN import honours it
+    too; emptiness is not -- foreign BPMN and stored models may carry unnamed
+    steps, and every later operation on them would fail.
+    """
+
+    text = value.strip()
+    if not text:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"{what} needs a non-empty name",
+                    code="OP.label-empty",
+                    params={"kind": what},
+                )
+            ]
+        )
+    if len(text) > MAX_LABEL_LENGTH:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"{what} name is longer than {MAX_LABEL_LENGTH} characters",
+                    code="OP.label-too-long",
+                    params={"kind": what, "max": str(MAX_LABEL_LENGTH)},
+                )
+            ]
+        )
+    return text
+
+
+def _check_label_lengths(schema: ProcessSchema) -> list[ValidationFinding]:
+    """U6: no node label or data element name exceeds ``MAX_LABEL_LENGTH``.
+
+    Part of ``validate()`` so that also the BPMN import -- which builds nodes
+    without the operations -- cannot store a 5000-character caption (VAL-29).
+    """
+
+    findings: list[ValidationFinding] = []
+    for node in schema.nodes.values():
+        if node.label and len(node.label) > MAX_LABEL_LENGTH:
+            findings.append(
+                ValidationFinding(
+                    rule="U6",
+                    node_id=node.id,
+                    message=f"label of '{node.id}' is longer than {MAX_LABEL_LENGTH}",
+                    code="U6.label-too-long",
+                    params={"max": str(MAX_LABEL_LENGTH)},
+                )
+            )
+    for element in schema.data_elements.values():
+        if len(element.name) > MAX_LABEL_LENGTH:
+            findings.append(
+                ValidationFinding(
+                    rule="U6",
+                    message=f"name of data element '{element.id}' is too long",
+                    code="U6.label-too-long",
+                    params={"max": str(MAX_LABEL_LENGTH)},
+                )
+            )
+    return findings
 
 
 #: How many data elements may name an instance (VAL-17) -- more no longer fits

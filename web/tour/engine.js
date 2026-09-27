@@ -626,6 +626,18 @@ const Tour = (() => {
         if (extra) { anchor = extra; fallback = true; break; }
       }
     }
+    // Mobil liegt das Menue in einer Schublade: Ein Anker darin existiert, ist
+    // bei geschlossener Schublade aber ausserhalb des Bildes -- die Admin-Tour
+    // hing so in Schritt 2 (Validierung 2026-09-25, VAL-32). Solange zeigt die
+    // Tour auf den Menue-Knopf und sagt, was dort zu tippen ist; oeffnet der
+    // Nutzer die Schublade, springt sie auf den eigentlichen Eintrag.
+    let viaMenu = null;
+    if (anchor && isMobile() && anchor.closest("#nav")
+        && document.documentElement.getAttribute("data-mobile-nav") !== "open") {
+      const burger = byId("nav-burger");
+      // Beschriftung ohne vorangestelltes Symbol (etwa „⚙ Administration“).
+      if (burger) { viaMenu = (anchor.textContent || "").trim().replace(/^[^\p{L}]+/u, ""); anchor = burger; }
+    }
     let missing = false;
     if (step.anchor && !anchor) {
       if (!t.anchorSince) t.anchorSince = Date.now();
@@ -639,7 +651,7 @@ const Tour = (() => {
       t.anchorSince = 0;
     }
 
-    const key = paintKey(step, anchor, missing, fallback);
+    const key = paintKey(step, anchor, missing, fallback) + (viaMenu !== null ? "|m" : "");
     const reuse = !!(t.painted && t.painted.key === key && t.painted.pop.isConnected);
     if (!reuse) clear(root);
     document.documentElement.setAttribute("data-tour-active", "1");
@@ -690,7 +702,7 @@ const Tour = (() => {
       root.appendChild(ring);
     }
     if (!(opts && opts.noScroll)) scrollTargetsIntoView(rects);
-    const pop = popup(step, rect, missing);
+    const pop = popup(step, rect, missing, viaMenu);
     root.appendChild(pop);
     t.painted = { key, scrim, ring, pop };
   }
@@ -890,9 +902,11 @@ const Tour = (() => {
    * @param {object} step Aktueller Schritt.
    * @param {DOMRect|null} rect Ankerrechteck (null = mittiges Popup).
    * @param {boolean} missing true, wenn der Anker nicht gefunden wurde.
+   * @param {string|null} [viaMenu] mobil: Beschriftung des Menueeintrags, der
+   *   hinter dem ☰-Knopf liegt -- der Hinweis sagt dann, was zu tippen ist (VAL-32).
    * @returns {HTMLElement} Das fertige Popup.
    */
-  function popup(step, rect, missing) {
+  function popup(step, rect, missing, viaMenu) {
     const total = t.tour.steps.length;
     const box = el("div", {
       class: "tour-pop" + (rect && !missing ? "" : " centered"),
@@ -910,7 +924,10 @@ const Tour = (() => {
       // sonst rutschte „Weiter“ bei langem Text aus dem Fenster.
       el("div", { class: "tour-pop-b" },
         el("p", { class: "tour-body" }, step.body),
-        step.hint ? el("p", { class: "tour-hint" }, step.hint) : null,
+        viaMenu !== null && viaMenu !== undefined
+          ? el("p", { class: "tour-hint" },
+              `Tippe oben links auf \u2630 und dann im Men\u00FC auf \u201E${viaMenu}\u201C.`)
+          : (step.hint ? el("p", { class: "tour-hint" }, step.hint) : null),
         missing ? el("p", { class: "tour-warn" },
           "Das zugehörige Element ist gerade nicht sichtbar.") : null,
         step.doc

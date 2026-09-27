@@ -603,3 +603,16 @@ def test_overlay_follows_a_scroll_without_scrolling_again() -> None:
         "Der Aufruf aus dem Rollereignis darf nicht erneut rollen"
     )
     assert "if (!(opts && opts.noScroll)) scrollTargetsIntoView(rects);" in engine
+
+
+def test_menu_anchors_on_mobile_point_to_the_menu_button() -> None:
+    """VAL-32: Auf Handy-Breite zeigte die Admin-Tour auf „Administration“ in
+    der geschlossenen Menue-Schublade (ausserhalb des Bildes) und sagte „links
+    im Menue“ -- sie liess sich nicht fortsetzen. Solange die Schublade zu ist,
+    zeigt die Tour auf den Menue-Knopf und nennt den Eintrag."""
+
+    engine = (WEB / "tour" / "engine.js").read_text(encoding="utf-8")
+    assert 'anchor.closest("#nav")' in engine
+    assert 'getAttribute("data-mobile-nav") !== "open"' in engine
+    assert 'byId("nav-burger")' in engine
+    assert "Tippe oben links auf" in engine

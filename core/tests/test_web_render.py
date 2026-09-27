@@ -683,7 +683,7 @@ def test_step_card_offers_every_binding_at_the_node() -> None:
     # Anlegen eines fehlenden Datenelements ohne Umweg ueber die Datensicht --
     # und zurueck in den Bindungsdialog, statt den Nutzer stehen zu lassen.
     binder = _fn_body("bindDataDialog")
-    assert "addDataElement(() => bindDataDialog(nodeId))" in binder, (
+    assert "addDataElement((id) => bindDataDialog(nodeId, id))" in binder, (
         "Aus dem Bindungsdialog heraus laesst sich kein neues Datenelement anlegen"
     )
 
@@ -1825,3 +1825,95 @@ def test_tasks_and_instances_are_named_by_their_data() -> None:
     assert 'api.get("/instance-titles")' in monitor and "contextTitle(titles[i.id])" in monitor
     assert "toggleDisplayField(d.id)" in _function_body(src, "function viewData(")
     assert "/display-fields`" in _function_body(src, "async function toggleDisplayField(")
+
+
+def test_help_glossary_names_every_rule_the_core_reports() -> None:
+    """VAL-38: Im Glossar fehlten u. a. C4-C7, U2, H2/H3 und OP, obwohl sie in
+    Meldungen vorkommen. Jede Regel mit Code im Kern muss im Glossar stehen --
+    einzeln oder in einem Bereich wie „C4–C6“."""
+
+    src_dir = Path(__file__).resolve().parents[1] / "src" / "procworks"
+    rules: set[str] = set()
+    for py in src_dir.glob("*.py"):
+        rules |= set(re.findall(r'code="([A-Z]+[0-9]*)\.', py.read_text(encoding="utf-8")))
+    app = APP_JS.read_text(encoding="utf-8")
+    block = app[app.index("const HELP_RULES = ["): app.index("function viewHelp(")]
+    listed = re.findall(r'\["([A-Z]+[0-9]*)(?:\\u2013([A-Z]+[0-9]*))?"', block)
+    covered: set[str] = set()
+    for first, last in listed:
+        covered.add(first)
+        if last:
+            prefix = re.match(r"[A-Z]+", first).group(0)  # type: ignore[union-attr]
+            lo, hi = int(first[len(prefix):]), int(last[len(prefix):])
+            covered |= {f"{prefix}{n}" for n in range(lo, hi + 1)}
+    missing = sorted(rules - covered)
+    assert not missing, "Regel ohne Glossareintrag: " + ", ".join(missing)
+
+
+# ---------------------------------------------------------------------------
+# Validierung aus Aussensicht 2026-09-25, P3 (VAL-23 bis VAL-37)
+# ---------------------------------------------------------------------------
+
+
+def test_fit_keeps_the_overview_readable_and_shows_more() -> None:
+    """VAL-23: „Einpassen“ schnitt das Ende ab, die Uebersicht wurde winzig."""
+
+    body = _function_body(APP_JS.read_text(encoding="utf-8"), "function attachPanZoom(")
+    assert "const FIT_OVERVIEW_MIN = 0.35;" in body
+    assert "canvas-more-right" in body and "canvas-more-left" in body
+
+
+def test_release_asks_first_and_is_green_only_when_ready() -> None:
+    """VAL-24: Freigabe ohne Rueckfrage, gruen trotz offener B2, „• ·“."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    release = _function_body(src, "async function releaseSchema(")
+    assert 'openModal("Schema freigeben?"' in release
+    assert "`• ${n}`" not in release
+    assert '(isReleasable(schema) ? " green" : "")' in src
+
+
+def test_performer_references_come_from_the_core() -> None:
+    """VAL-25: Der Dialog bot Schritte des anderen XOR-Zweigs an."""
+
+    picker = _function_body(APP_JS.read_text(encoding="utf-8"), "function staffTermPicker(")
+    assert "/performer-candidates`" in picker
+
+
+def test_binding_dialog_defaults_to_write_and_returns_after_creating() -> None:
+    """VAL-26/27: Vorgabe „Lesen“ am ersten Schritt; das neue Element kam nicht
+    zurueck in den Dialog."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    binder = _function_body(src, "function bindDataDialog(")
+    assert 'modeSel.value = writtenBefore.has(id) ? "READ" : "WRITE"' in binder
+    assert "pickList(items, defaultMode, preselect)" in binder
+    creator = _function_body(src, "function addDataElement(")
+    assert "setTimeout(() => onCreated(created), 0)" in creator
+
+
+def test_non_numeric_thresholds_are_reported() -> None:
+    """VAL-28: „abc“ als Schwellwert wurde still verworfen."""
+
+    body = _function_body(APP_JS.read_text(encoding="utf-8"), "function openInsertModal(")
+    assert "validity.badInput" in body and '"Grenzwert ist keine Zahl"' in body
+
+
+def test_layout_fixes_for_long_labels_header_and_links() -> None:
+    """VAL-30: gekuerzte Knoten ohne Tooltip, ueberlaufende Kopfzeile, dunkle Links."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert 'if (caption.length > 18) g.appendChild(svg("title"' in src
+    css = (APP_JS.parent / "styles.css").read_text(encoding="utf-8")
+    assert "flex-wrap: wrap; row-gap: 8px;" in css
+    assert "a { color: var(--accent); }" in css
+
+
+def test_empty_model_view_speaks_german_and_offers_next_steps() -> None:
+    """VAL-33: „Kein Schema ausgewaehlt“ ohne Weg nach vorn."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "ausgewaehlt." not in src.replace("// ", "")  # nur noch in Kommentaren
+    empty = _function_body(src, "function noSchemaState(")
+    assert '"Neuer Prozess"' in empty and 'confirmReset("demo")' in empty
+    assert "!state.schemaIds.length" in empty  # Beispieldaten nur im leeren System

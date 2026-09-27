@@ -171,6 +171,7 @@ from procworks.validator import (
     _possible_agents,
     check_executable,
     form_value_findings,
+    performer_reference_candidates,
     validate,
 )
 from procworks.worklist_priority import TimeContext
@@ -993,9 +994,11 @@ class LoopInsertRequest(BaseModel):
     #: discriminator's domain like a K7 partition (THRESHOLD/BOOLEAN/ENUM per
     #: the element's type) and classify each cell into repeat or exit.
     cells: list[LoopCell] | None = None
-    #: Optional hard brake (stage S3): total body runs are capped at this
-    #: bound (>= 2) and the T2 critical path charges the body that many times.
-    max_iterations: int | None = None
+    #: Hard brake (stage S3): total body runs are capped at this bound (>= 2)
+    #: and the T2 critical path charges the body that many times. Defaults to
+    #: the same 10 as the web dialog (VAL-31); an explicit ``null`` means
+    #: "unbounded".
+    max_iterations: int | None = ops.DEFAULT_MAX_ITERATIONS
 
 
 class LoopDecisionRequest(BaseModel):
@@ -4075,6 +4078,20 @@ def _readable_instance_or_404(instance_id: str, principal: Principal) -> Process
     ):
         raise HTTPException(status_code=404, detail="instance not found")
     return instance
+
+
+@app.get(
+    "/schemas/{schema_id}/nodes/{node_id}/performer-candidates",
+    response_model=list[str],
+    dependencies=[_read],
+)
+def get_performer_candidates(schema_id: str, node_id: str) -> list[str]:
+    """Steps whose performer a rule on ``node_id`` may name (Z3, VAL-25)."""
+
+    schema = _get_or_404(schema_id)
+    if node_id not in schema.nodes:
+        raise HTTPException(status_code=404, detail="node not found")
+    return performer_reference_candidates(schema, node_id)
 
 
 class DisplayFieldsRequest(BaseModel):

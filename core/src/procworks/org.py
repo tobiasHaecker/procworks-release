@@ -25,7 +25,7 @@ from __future__ import annotations
 import itertools
 
 from procworks.model import Agent, OrgModel, OrgUnit, Role, is_valid_email
-from procworks.validator import CorrectnessError, ValidationFinding
+from procworks.validator import CorrectnessError, ValidationFinding, clean_label
 
 _counter = itertools.count(1)
 
@@ -207,7 +207,7 @@ def _fail(
 def create_org_model(name: str, *, org_id: str | None = None) -> OrgModel:
     """Create a new, empty shared org model with a stable id."""
 
-    return OrgModel(id=org_id or _new_id("org"), name=name)
+    return OrgModel(id=org_id or _new_id("org"), name=clean_label(name, what="org_model"))
 
 
 def org_add_role(org: OrgModel, name: str, *, role_id: str | None = None) -> OrgModel:
@@ -219,7 +219,7 @@ def org_add_role(org: OrgModel, name: str, *, role_id: str | None = None) -> Org
             code="OP.already-exists",
             params={"kind": "role", "name": str(rid)},
         )
-    candidate.roles[rid] = Role(id=rid, name=name)
+    candidate.roles[rid] = Role(id=rid, name=clean_label(name, what="role"))
     return raise_if_invalid_org(candidate)
 
 
@@ -252,7 +252,10 @@ def org_add_unit(
             params={"kind": "agent", "name": str(manager_id)},
         )
     candidate.org_units[uid] = OrgUnit(
-        id=uid, name=name, parent_id=parent_id, manager_id=manager_id
+        id=uid,
+        name=clean_label(name, what="org_unit"),
+        parent_id=parent_id,
+        manager_id=manager_id,
     )
     return raise_if_invalid_org(candidate)
 
@@ -296,7 +299,7 @@ def org_add_agent(
         )
     candidate.agents[aid] = Agent(
         id=aid,
-        name=name,
+        name=clean_label(name, what="agent"),
         role_ids=list(role_ids or []),
         org_unit_id=org_unit_id,
         deputy_id=deputy_id,
@@ -323,7 +326,7 @@ def org_update_agent(
             params={"kind": "agent", "name": str(agent_id)},
         )
     if name is not None:
-        agent.name = name
+        agent.name = clean_label(name, what="agent")
     if role_ids is not None:
         for role_id in role_ids:
             if role_id not in candidate.roles:

@@ -89,7 +89,9 @@ Initial admin account created (login='admin', temporary password='…').
 ### macOS / Linux (zum Ausprobieren)
 
 Voraussetzung ist nur **Docker** (Docker Desktop auf macOS, Docker Engine unter
-Linux). Dann:
+Linux). Auf dem Mac nach der Installation Docker Desktop einmal starten und dann
+ein **neues Terminalfenster** öffnen – erst dort findet die Kommandozeile den
+Befehl `docker`. Dann:
 
 ```bash
 git clone https://github.com/tobiasHaecker/procworks-release.git procworks

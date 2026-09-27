@@ -83,8 +83,9 @@ def _loop_schema():
     schema = create_empty_schema("Schleife")
     schema = serial_insert(schema, "Erfassen", after_node_id="start")
     schema = add_data_element(schema, "na", DataType.BOOLEAN, element_id="na")
+    # Explicitly unbounded: the default is a brake of 10 since VAL-31.
     return insert_loop(
-        schema, _nid(schema, "Erfassen"), "Pruefen", discriminator="na"
+        schema, _nid(schema, "Erfassen"), "Pruefen", discriminator="na", max_iterations=None
     )
 
 
@@ -867,3 +868,22 @@ def test_s3_loop_cells_and_decision_endpoint_via_api() -> None:
     assert resp.status_code == 200
     cells = resp.json()["loop_decisions"][le]["cells"]
     assert [c["repeat"] for c in cells] == [True, False]
+
+
+def test_a_new_loop_has_the_same_brake_as_the_web_dialog() -> None:
+    """VAL-31: per API ohne ``max_iterations`` lief eine Schleife unbegrenzt,
+    die Oberflaeche setzte 10. Jetzt gilt 10 fuer jeden Eingang; ``None``
+    schaltet die Bremse weiter bewusst ab."""
+
+    from procworks.operations import DEFAULT_MAX_ITERATIONS
+
+    schema = create_empty_schema("Bremse", schema_id="brake")
+    schema = serial_insert(schema, "Erfassen", after_node_id="start")
+    schema = add_data_element(schema, "Nacharbeit", DataType.BOOLEAN, element_id="na")
+    schema = connect_data(schema, _nid(schema, "Erfassen"), "na", AccessMode.WRITE)
+    braked = insert_loop(schema, _nid(schema, "Erfassen"), "Pruefen", discriminator="na")
+
+    [decision] = braked.loop_decisions.values()
+    assert decision.max_iterations == DEFAULT_MAX_ITERATIONS == 10
+    [unbounded] = _loop_schema().loop_decisions.values()
+    assert unbounded.max_iterations is None

@@ -365,3 +365,40 @@ def test_clear_staff_rule_rejected_on_released_schema():
         clear_staff_rule(schema, act)
     assert any(f.rule == "R0" for f in exc.value.findings)
     assert act in schema.staff_rules
+
+
+def test_performer_candidates_are_exactly_what_z3_accepts() -> None:
+    """VAL-25: Der Dialog bot Schritte des anderen XOR-Zweigs an; erst der
+    Klick brachte Z3. Die Kandidaten kommen jetzt aus derselben Analyse."""
+    from fastapi.testclient import TestClient
+
+    from procworks.api import app
+
+    c = TestClient(app)
+    sid = c.post("/schemas", json={"name": "Kandidaten"}).json()["id"]
+    def insert(label: str, after: str) -> dict:  # type: ignore[type-arg]
+        body = {"label": label, "after_node_id": after}
+        return c.post(f"/schemas/{sid}/serial-insert", json=body).json()  # type: ignore[no-any-return]
+
+    s = insert("Erfassen", "start")
+    erfassen = next(n["id"] for n in s["nodes"].values() if n["label"] == "Erfassen")
+    elem = {"name": "ok", "data_type": "BOOLEAN", "element_id": "ok"}
+    c.post(f"/schemas/{sid}/data-elements", json=elem)
+    c.post(f"/schemas/{sid}/data-access",
+           json={"node_id": erfassen, "element_id": "ok", "mode": "WRITE", "mandatory": True})
+    s = c.post(f"/schemas/{sid}/conditional-insert", json={
+        "after_node_id": erfassen, "discriminator": "ok",
+        "branches": [{"label": "Ja-Zweig", "bool_value": True},
+                     {"label": "Nein-Zweig", "bool_value": False}]}).json()
+    join = next(n["id"] for n in s["nodes"].values() if n["type"] == "XOR_JOIN")
+    s = insert("Abschluss", join)
+    ids = {n["label"]: n["id"] for n in s["nodes"].values() if n["label"]}
+
+    candidates = c.get(f"/schemas/{sid}/nodes/{ids['Abschluss']}/performer-candidates").json()
+
+    assert candidates == [erfassen]  # not "Ja-Zweig"/"Nein-Zweig"
+    rejected = c.post(f"/schemas/{sid}/staff-rule", json={
+        "node_id": ids["Abschluss"],
+        "rule": {"kind": "NODE_PERFORMING_AGENT", "ref": ids["Ja-Zweig"]}})
+    assert rejected.status_code == 422
+    assert "Z3" in {f["rule"] for f in rejected.json()["detail"]["findings"]}

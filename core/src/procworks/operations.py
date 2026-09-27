@@ -79,6 +79,7 @@ from procworks.validator import (
     SchemaResolver,
     ValidationFinding,
     check_executable,
+    clean_label,
     raise_if_invalid,
 )
 
@@ -104,6 +105,7 @@ def new_schema_id() -> str:
 def create_empty_schema(name: str, schema_id: str | None = None) -> ProcessSchema:
     """Create the minimal correct schema: START -> END."""
 
+    name = clean_label(name, what="schema")
     start = Node(id="start", type=NodeType.START, label="Start")
     end = Node(id="end", type=NodeType.END, label="Ende")
     schema = ProcessSchema(
@@ -212,7 +214,9 @@ def serial_insert(schema: ProcessSchema, label: str, after_node_id: str) -> Proc
     edge = _single_outgoing(candidate, after_node_id)
     successor_id = edge.target
 
-    new_node = Node(id=_new_id("act"), type=NodeType.ACTIVITY, label=label)
+    new_node = Node(
+        id=_new_id("act"), type=NodeType.ACTIVITY, label=clean_label(label, what="node")
+    )
     candidate.nodes[new_node.id] = new_node
     candidate.edges.remove(edge)
     candidate.edges.append(ControlEdge(source=after_node_id, target=new_node.id))
@@ -350,7 +354,11 @@ def conditional_insert(
     xor_branches: list[XorBranch] = []
     body_edges: list[ControlEdge] = []
     for spec in branches:
-        body = Node(id=_new_id("act"), type=NodeType.ACTIVITY, label=spec.label)
+        body = Node(
+            id=_new_id("act"),
+            type=NodeType.ACTIVITY,
+            label=clean_label(spec.label, what="node"),
+        )
         candidate.nodes[body.id] = body
         xor_branches.append(
             XorBranch(
@@ -412,7 +420,9 @@ def _insert_block(
     candidate.edges.append(ControlEdge(source=join.id, target=successor_id))
 
     for label in branch_labels:
-        branch = Node(id=_new_id("act"), type=NodeType.ACTIVITY, label=label)
+        branch = Node(
+            id=_new_id("act"), type=NodeType.ACTIVITY, label=clean_label(label, what="node")
+        )
         candidate.nodes[branch.id] = branch
         candidate.edges.append(ControlEdge(source=split.id, target=branch.id))
         candidate.edges.append(ControlEdge(source=branch.id, target=join.id))
@@ -503,6 +513,12 @@ def _build_loop_decision(
     )
 
 
+#: Default hard brake of a new loop (VAL-29/31): the web dialog pre-fills 10,
+#: a loop inserted via API or script used to be unbounded. ``None`` passed
+#: explicitly still means "unbounded" -- a deliberate choice, not a default.
+DEFAULT_MAX_ITERATIONS = 10
+
+
 def insert_loop(
     schema: ProcessSchema,
     after_node_id: str,
@@ -511,13 +527,14 @@ def insert_loop(
     discriminator: str,
     repeat_value: bool = True,
     cells: Sequence[LoopCell] | None = None,
-    max_iterations: int | None = None,
+    max_iterations: int | None = DEFAULT_MAX_ITERATIONS,
 ) -> ProcessSchema:
     """Insert a REPEAT-UNTIL loop block after the anchor (K6).
 
-    ``max_iterations`` (optional) caps the total number of body runs as a
-    deterministic hard brake and makes the T2 critical path charge the body
-    that many times; at least 2 when set (K6b).
+    ``max_iterations`` caps the total number of body runs as a deterministic
+    hard brake and makes the T2 critical path charge the body that many times;
+    at least 2 when set (K6b). Defaults to :data:`DEFAULT_MAX_ITERATIONS` like
+    the web dialog (Validierung 2026-09-25, VAL-31); ``None`` disables it.
 
     Builds ``LOOP_START -> body activity -> LOOP_END`` on the anchor's outgoing
     edge and stores the structured :class:`LoopDecision` on the LOOP_END.
@@ -567,7 +584,9 @@ def insert_loop(
     successor_id = edge.target
 
     loop_start = Node(id=_new_id("loop"), type=NodeType.LOOP_START, label="Wiederholen")
-    body = Node(id=_new_id("act"), type=NodeType.ACTIVITY, label=body_label)
+    body = Node(
+        id=_new_id("act"), type=NodeType.ACTIVITY, label=clean_label(body_label, what="node")
+    )
     loop_end = Node(id=_new_id("loopend"), type=NodeType.LOOP_END, label="Bis erfüllt")
     candidate.nodes[loop_start.id] = loop_start
     candidate.nodes[body.id] = body
@@ -831,7 +850,9 @@ def insert_between_node_sets(
             ]
         )
     split_id, join_id = block
-    activity = Node(id=_new_id("act"), type=NodeType.ACTIVITY, label=label)
+    activity = Node(
+        id=_new_id("act"), type=NodeType.ACTIVITY, label=clean_label(label, what="node")
+    )
     candidate.nodes[activity.id] = activity
     candidate.edges.append(ControlEdge(source=split_id, target=activity.id))
     candidate.edges.append(ControlEdge(source=activity.id, target=join_id))
@@ -871,7 +892,7 @@ def rename_node(schema: ProcessSchema, node_id: str, label: str) -> ProcessSchem
                 )
             ]
         )
-    node.label = label
+    node.label = clean_label(label, what="node")
     return raise_if_invalid(candidate)
 
 
@@ -1487,7 +1508,9 @@ def add_data_element(
                 )
             ]
         )
-    candidate.data_elements[eid] = DataElement(id=eid, name=name, data_type=data_type)
+    candidate.data_elements[eid] = DataElement(
+        id=eid, name=clean_label(name, what="data_element"), data_type=data_type
+    )
     return raise_if_invalid(candidate)
 
 
@@ -1523,7 +1546,7 @@ def update_data_element(
             ]
         )
     if name is not None:
-        element.name = name
+        element.name = clean_label(name, what="data_element")
     if data_type is not None:
         element.data_type = data_type
     return raise_if_invalid(candidate)
@@ -1941,7 +1964,9 @@ def register_connector(
                 )
             ]
         )
-    candidate.connectors[cid] = ConnectorDescriptor(id=cid, name=name, kind=kind)
+    candidate.connectors[cid] = ConnectorDescriptor(
+        id=cid, name=clean_label(name, what="connector"), kind=kind
+    )
     return raise_if_invalid(candidate)
 
 
@@ -2116,7 +2141,7 @@ def add_role(schema: ProcessSchema, name: str, role_id: str | None = None) -> Pr
                 )
             ]
         )
-    candidate.org_model.roles[rid] = Role(id=rid, name=name)
+    candidate.org_model.roles[rid] = Role(id=rid, name=clean_label(name, what="role"))
     return raise_if_invalid(candidate)
 
 
@@ -2160,7 +2185,7 @@ def add_org_unit(
             ]
         )
     candidate.org_model.org_units[uid] = OrgUnit(
-        id=uid, name=name, parent_id=parent_id, manager_id=manager_id
+        id=uid, name=clean_label(name, what="org_unit"), parent_id=parent_id, manager_id=manager_id
     )
     return raise_if_invalid(candidate)
 
@@ -2223,7 +2248,7 @@ def add_agent(
         )
     candidate.org_model.agents[aid] = Agent(
         id=aid,
-        name=name,
+        name=clean_label(name, what="agent"),
         role_ids=roles,
         org_unit_id=org_unit_id,
         deputy_id=deputy_id,
@@ -2494,7 +2519,7 @@ def update_agent(
             ]
         )
     if name is not None:
-        agent.name = name
+        agent.name = clean_label(name, what="agent")
     if role_ids is not None:
         for role_id in role_ids:
             if role_id not in candidate.org_model.roles:
@@ -2558,7 +2583,7 @@ def add_activity_template(
         )
     candidate.activity_templates[tid] = ActivityTemplate(
         id=tid,
-        name=name,
+        name=clean_label(name, what="activity_template"),
         executor=executor,
         inputs=list(inputs or []),
         outputs=list(outputs or []),
@@ -2835,7 +2860,7 @@ def save_as_template(
     snapshot = snapshot_for_template(schema, snapshot_id=tid)
     return ProcessTemplate(
         id=tid,
-        name=name,
+        name=clean_label(name, what="template"),
         description=description,
         category=category,
         origin=origin,
@@ -2907,7 +2932,12 @@ def insert_subprocess(
     edge = _single_outgoing(candidate, after_node_id)
     successor_id = edge.target
 
-    new_node = Node(id=_new_id("sub"), type=NodeType.SUBPROCESS, label=label)
+    new_node = Node(
+        id=_new_id("sub"),
+        type=NodeType.SUBPROCESS,
+        # Optional here: an unnamed sub-process shows "Teilprozess".
+        label=clean_label(label, what="node") if label.strip() else "",
+    )
     candidate.nodes[new_node.id] = new_node
     candidate.edges.remove(edge)
     candidate.edges.append(ControlEdge(source=after_node_id, target=new_node.id))

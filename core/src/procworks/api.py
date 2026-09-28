@@ -6406,9 +6406,22 @@ def v1_list_incidents(
         require_scope(SCOPE_TASKS_FETCH, "viewer", "operator", "modeler", "admin")
     ),
 ) -> list[Incident]:
-    """List external-task incidents (optionally only the unresolved ones)."""
+    """List external-task incidents (optionally only the unresolved ones).
 
-    return _external_runtime().list_incidents(unresolved_only=unresolved_only)
+    A limited operator (see :func:`_reads_only_own_instances`) sees only the
+    incidents of instances it is involved in -- the list named every case of
+    the installation before (Nachtest 2026-09-27, NT-14).
+    """
+
+    incidents = _external_runtime().list_incidents(unresolved_only=unresolved_only)
+    if not _reads_only_own_instances(principal):
+        return incidents
+    visible = []
+    for incident in incidents:
+        instance = _instances.get(incident.instance_id)
+        if instance is not None and _is_involved(principal, instance):
+            visible.append(incident)
+    return visible
 
 
 @_v1.post("/incidents/{incident_id}/resolve", response_model=Incident)
@@ -6418,8 +6431,18 @@ def v1_resolve_incident(
         require_scope(SCOPE_TASKS_COMPLETE, "operator", "admin")
     ),
 ) -> Incident:
-    """Resolve an incident and re-queue its task for another attempt."""
+    """Resolve an incident and re-queue its task for another attempt.
 
+    A limited operator may resolve only incidents of instances it can read;
+    any other is 404 like a missing one (NT-14, the VAL-05 rule).
+    """
+
+    if _reads_only_own_instances(principal):
+        known = {i.id: i for i in _external_runtime().list_incidents(unresolved_only=False)}
+        incident = known.get(incident_id)
+        if incident is None:
+            raise HTTPException(status_code=404, detail="incident not found")
+        _readable_instance_or_404(incident.instance_id, principal)
     result = _run_external(
         lambda: _external_runtime().resolve_incident(incident_id)
     )

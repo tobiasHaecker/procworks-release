@@ -48,8 +48,16 @@ eine Menge **Scopes**. Jeder `/v1`-Endpunkt verlangt entweder eine passende Pers
 
 ### 1.1 Token bereitstellen (Betreiber)
 
-Token-Modus aktivieren und Tokens als JSON-Datei hinterlegen (nur SHA-256-Digests werden
-gespeichert):
+**Im ausgelieferten Stack (Passwort-Login für Personen)** bleiben die Personen-Logins
+erhalten; Maschinen-Tokens kommen **zusätzlich** hinzu. Dafür die Tokens als JSON in
+`deploy/.env` eintragen (Variable `PROCWORKS_TOKENS_JSON`, Aufbau wie unten) und den
+Stack neu starten. Neben Passwort-Logins nimmt ProcWorks nur Tokens mit genau der Rolle
+`integration` an – ein Token ist ein Geheimnis ohne Passwort dahinter und soll nie eine
+Person oder einen Administrator vertreten.
+
+**Reiner Token-Betrieb** (ohne Personen-Logins, z. B. für eine reine Integrations-
+Instanz): Token-Modus aktivieren und Tokens als JSON-Datei hinterlegen (nur
+SHA-256-Digests werden gespeichert):
 
 ```jsonc
 // tokens.json
@@ -73,8 +81,12 @@ Aufrufe tragen den Bearer-Header:
 curl -H "Authorization: Bearer <geheimes-token>" https://host/v1/instances/i-123
 ```
 
-> Im Standard (`PROCWORKS_AUTH=open`) sind keine Header nötig — praktisch für lokale Tests,
-> **nicht** für den Produktivbetrieb.
+Statt einer Datei (`PROCWORKS_TOKENS`) geht auch hier `PROCWORKS_TOKENS_JSON` mit dem
+JSON selbst.
+
+> Ohne `PROCWORKS_AUTH` läuft der Kern im offenen Entwicklungsmodus (`open`) – keine
+> Header nötig, praktisch für lokale Tests, **nicht** für den Produktivbetrieb. Der
+> mitgelieferte Stack setzt `PROCWORKS_AUTH=password`.
 
 ---
 

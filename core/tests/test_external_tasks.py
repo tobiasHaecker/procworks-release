@@ -480,3 +480,69 @@ def test_sqlalchemy_external_task_store_round_trip(tmp_path: Path) -> None:
     assert store.get_incident("inc_1") is not None
     assert [i.id for i in store.list_incidents()] == ["inc_1"]
 
+
+
+def _incident_started_by(sid: str, topic: str, starter: dict[str, str],
+                         worker: dict[str, str]) -> str:
+    """Start ``sid`` as ``starter``; the worker fails its automatic step for good.
+
+    Returns the id of the resulting incident.
+    """
+
+    client.post(f"/schemas/{sid}/instances", headers=starter)
+    task = client.post(
+        "/v1/external-tasks/fetch-and-lock",
+        json={"worker_id": "w1", "topics": [topic], "lock_ms": 300_000},
+        headers=worker,
+    ).json()[0]
+    client.post(
+        f"/v1/external-tasks/{task['id']}/failure",
+        json={"worker_id": "w1", "error_message": "boom", "retries": 0},
+        headers=worker,
+    )
+    return next(
+        i["id"] for i in client.get("/v1/incidents", headers=worker).json()
+        if i["external_task_id"] == task["id"]
+    )
+
+
+def test_uninvolved_operator_neither_sees_nor_resolves_foreign_incidents() -> None:
+    """NT-14: the incident list named every case, and any operator could resolve it."""
+
+    from procworks.auth_password import (
+        InMemoryCredentialStore,
+        PasswordAuthBackend,
+        hash_password,
+    )
+
+    backend = PasswordAuthBackend(InMemoryCredentialStore())
+    import procworks.api as api_module
+
+    original = api_module._auth_backend
+
+    def login(name: str, roles: list[str], agent_id: str | None) -> dict[str, str]:
+        backend.create_user(subject=name, login=name, roles=roles, agent_id=agent_id)
+        user = backend.store.get_user(name)
+        assert user is not None
+        backend.store.put_user(
+            user.model_copy(update={"password_hash": hash_password("secret-pw1"),
+                                    "must_change": False})
+        )
+        return {"Authorization": f"Bearer {backend.login(name, 'secret-pw1').token}"}
+
+    topic = _unique_topic()
+    sid, _ = _external_task_schema(topic)  # built in open mode, before the switch
+    try:
+        api_module._auth_backend = backend
+        admin = login("root", ["admin"], None)
+        erika = login("erika", ["operator"], "a1")
+        paul = login("paul", ["operator"], "a2")
+        incident = _incident_started_by(sid, topic, erika, admin)  # erika started it
+
+        assert all(i["id"] != incident for i in client.get("/v1/incidents", headers=paul).json())
+        assert client.post(f"/v1/incidents/{incident}/resolve", headers=paul).status_code == 404
+        assert any(i["id"] == incident for i in client.get("/v1/incidents", headers=erika).json())
+        assert any(i["id"] == incident for i in client.get("/v1/incidents", headers=admin).json())
+        assert client.post(f"/v1/incidents/{incident}/resolve", headers=erika).status_code == 200
+    finally:
+        api_module._auth_backend = original

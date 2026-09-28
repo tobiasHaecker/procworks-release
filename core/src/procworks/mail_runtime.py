@@ -193,7 +193,8 @@ def create_mail_sender() -> MailSender:
         return NullMailSender()
     return SmtpMailSender(
         host=host,
-        port=int(os.getenv("PROCWORKS_SMTP_PORT", "587")),
+        # ``or``: Compose reicht nicht gesetzte Variablen als "" durch (NT-12).
+        port=int(os.getenv("PROCWORKS_SMTP_PORT") or "587"),
         sender=sender,
         username=os.getenv("PROCWORKS_SMTP_USER") or None,
         password=os.getenv("PROCWORKS_SMTP_PASSWORD") or None,

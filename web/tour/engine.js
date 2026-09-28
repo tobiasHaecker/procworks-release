@@ -174,6 +174,13 @@ const Tour = (() => {
    */
   function offer(tour) {
     if (t.tour) return;
+    // Nie ueber einen offenen Dialog (NT-15): Das Angebot legte sich sonst
+    // darueber und zog den Tastatur-Fokus aus dem Dialog. Es wartet, bis der
+    // Dialog zu ist.
+    if (byId("modal-root").children.length) {
+      setTimeout(() => { try { offer(tour); } catch (_e) { /* still */ } }, 1500);
+      return;
+    }
     sessionSet(OFFERED_KEY, "1");
     const resumeAt = savedProgress(tour);
     const root = byId("tour-root");

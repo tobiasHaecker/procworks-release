@@ -88,18 +88,21 @@ class TokenAuthBackend:
 
     @classmethod
     def from_env(cls) -> TokenAuthBackend:
-        """Build the backend from the ``PROCWORKS_TOKENS`` JSON file."""
+        """Build the backend from ``PROCWORKS_TOKENS`` / ``PROCWORKS_TOKENS_JSON``."""
 
-        path = os.environ.get("PROCWORKS_TOKENS")
-        if not path:
+        data = load_token_config()
+        if data is None:
             raise ValueError(
-                "PROCWORKS_AUTH=token requires PROCWORKS_TOKENS to point at a "
-                "JSON token file"
+                "PROCWORKS_AUTH=token requires PROCWORKS_TOKENS (path to a JSON "
+                "token file) or PROCWORKS_TOKENS_JSON (the JSON itself)"
             )
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("token file must contain a JSON object {token: {...}}")
         return cls(data)
+
+    @property
+    def principals(self) -> list[Principal]:
+        """All configured identities (for start-up checks of the caller)."""
+
+        return list(self._by_digest.values())
 
     def authenticate(self, authorization: str | None) -> Principal:
         token = bearer_token(authorization)
@@ -109,3 +112,30 @@ class TokenAuthBackend:
         if principal is None:
             raise AuthError("invalid token")
         return principal
+
+
+def load_token_config() -> dict[str, dict[str, object]] | None:
+    """Read the static token configuration from the environment, if any.
+
+    Two equivalent sources, the file taking precedence:
+
+    * ``PROCWORKS_TOKENS`` -- path to a JSON file ``{token: {subject, roles, scopes}}``;
+    * ``PROCWORKS_TOKENS_JSON`` -- the same JSON as a string. Added for the
+      Compose stack (Nachtest 2026-09-27, NT-13): a variable in ``deploy/.env``
+      reaches the container without mounting a file into it.
+
+    :returns: the parsed mapping, or ``None`` when neither variable is set.
+    :raises ValueError: when the content is not a JSON object.
+    """
+
+    path = os.environ.get("PROCWORKS_TOKENS", "").strip()
+    inline = os.environ.get("PROCWORKS_TOKENS_JSON", "").strip()
+    if path:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    elif inline:
+        data = json.loads(inline)
+    else:
+        return None
+    if not isinstance(data, dict):
+        raise ValueError("token configuration must be a JSON object {token: {...}}")
+    return data

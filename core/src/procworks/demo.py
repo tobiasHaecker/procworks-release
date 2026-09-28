@@ -84,6 +84,11 @@ DEMO_USERS: list[tuple[str, str, frozenset[str], str | None]] = [
     # bedienbar: der Entwurfsprozess liesse sich zwar starten, aber nie
     # durchspielen. Waechter: test_every_demo_staff_rule_has_a_seeded_login.
     ("paul.klein", "Paul Klein", frozenset({"operator"}), "a-paul"),
+    # Sabine leitet die Geschaeftsleitung, also die Abteilung ueber Toms
+    # Vertrieb. Seit „Vorgesetzte:r“ nie den Antragsteller selbst meint (NT-03)
+    # genehmigt sie Toms Urlaubsantrag -- ohne Login blieb der in der Demo bei
+    # „Genehmigung durch Leitung“ stehen (NT-11).
+    ("sabine.chef", "Sabine Chef", frozenset({"operator"}), "a-sabine"),
     ("vera.viewer", "Vera Viewer", frozenset({"viewer"}), None),
 ]
 

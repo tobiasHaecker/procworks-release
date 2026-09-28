@@ -2023,3 +2023,29 @@ def test_small_wording_fixes_of_the_nachtest() -> None:
     assert "typeName(d.data_type)" in src and "sub: d.data_type" not in src
     index = (APP_JS.parent / "index.html").read_text(encoding="utf-8")
     assert 'href="favicon.svg"' in index and (APP_JS.parent / "favicon.svg").is_file()
+
+
+def test_dialogs_are_keyboard_operable() -> None:
+    """NT-15: a dialog without a field kept the focus behind it; Tab never reached
+    „Abschliessen“, Escape did nothing, and Tab left the login mask."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = _fn(src, "function openModal(")
+    assert "(firstInput || confirmBtn).focus();" in body
+    assert 'e.key === "Escape"' in body and "close();" in body
+    assert "opener.focus()" in body
+    sync = _fn(src, "function syncInert(")
+    assert 'app.setAttribute("inert", "")' in sync and 'app.removeAttribute("inert")' in sync
+    assert "new MutationObserver(syncInert)" in _fn(src, "function watchInert(")
+    # Sperre vor dem Zurueckgeben des Fokus aufheben, sonst landet er auf <body>.
+    assert body.index("syncInert();") < body.index("opener.focus()")
+    assert "\nwatchInert();\n" in src
+
+
+def test_a_wrong_api_address_is_refused_and_explained() -> None:
+    """NT-17: „4“ in the API field broke every call with "Unexpected token '<'"."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert "if (!(await isProcWorksApi(candidate)))" in src
+    request = _fn(src, "async function request(")
+    assert "antwortet kein ProcWorks-Server" in request

@@ -712,3 +712,37 @@ def test_seeded_history_has_a_time_course_the_kpis_can_show() -> None:
     assert kpis.avg_cycle_seconds and kpis.avg_cycle_seconds > 60
     assert kpis.activity_stats
     assert all(s.avg_total_seconds is not None for s in kpis.activity_stats)
+
+
+
+def test_a_unit_head_s_leave_request_has_an_approver_with_a_login() -> None:
+    """NT-11: after NT-03 Tom's request goes to the head above (Sabine) -- who had
+    no demo login, so in the demo it stalled at "Genehmigung durch Leitung"."""
+
+    from procworks.store import (
+        InMemoryInstanceStore,
+        InMemoryOrgStore,
+        InMemorySchemaStore,
+        hydrate_org,
+        make_org_resolver,
+    )
+
+    schema_store, org_store = InMemorySchemaStore(), InMemoryOrgStore()
+    demo.load_demo(
+        schema_store=schema_store,
+        instance_store=InMemoryInstanceStore(),
+        org_store=org_store,
+        audit_log=InMemoryAuditLog(),
+    )
+    stored = schema_store.get(demo.SCHEMA_URLAUB)
+    assert stored is not None
+    urlaub = hydrate_org(stored, make_org_resolver(org_store))
+    instance = instantiate(urlaub)
+    by_label = {v.label: n for n, v in urlaub.nodes.items()}
+    instance.performed_by[by_label["Antrag erfassen"]] = "a-tom"  # Tom leitet den Vertrieb
+
+    approvers = assignment.eligible_agents(urlaub, by_label["Genehmigung durch Leitung"], instance)
+
+    logins = {agent for *_, agent in demo.DEMO_USERS if agent}
+    assert approvers and approvers <= logins, approvers
+    assert "a-tom" not in approvers

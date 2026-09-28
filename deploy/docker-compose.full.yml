@@ -39,7 +39,7 @@ services:
   api:
     # Scanned release image (VAL-12); `build` stays for `up --build` and as the
     # fallback when the image cannot be pulled.
-    image: ghcr.io/tobiashaecker/procworks-api:${PROCWORKS_VERSION:-1.29.0}
+    image: ghcr.io/tobiashaecker/procworks-api:${PROCWORKS_VERSION:-1.30.0}
     build:
       context: ../core
     restart: unless-stopped
@@ -65,6 +65,19 @@ services:
       # change its password on first login.
       PROCWORKS_ADMIN_LOGIN: "${PROCWORKS_ADMIN_LOGIN:-}"
       PROCWORKS_ADMIN_PASSWORD: "${PROCWORKS_ADMIN_PASSWORD:-}"
+      # Optional: e-mail notifications. Without a host and sender nothing is
+      # sent (the feature stays modellable). Put the values into deploy/.env,
+      # which Compose reads automatically -- see README "E-Mail einrichten".
+      PROCWORKS_SMTP_HOST: "${PROCWORKS_SMTP_HOST:-}"
+      PROCWORKS_SMTP_PORT: "${PROCWORKS_SMTP_PORT:-587}"
+      PROCWORKS_SMTP_USER: "${PROCWORKS_SMTP_USER:-}"
+      PROCWORKS_SMTP_PASSWORD: "${PROCWORKS_SMTP_PASSWORD:-}"
+      PROCWORKS_SMTP_TLS: "${PROCWORKS_SMTP_TLS:-1}"
+      PROCWORKS_MAIL_FROM: "${PROCWORKS_MAIL_FROM:-}"
+      # Optional: machine tokens for workers/integrations next to the password
+      # logins (JSON {token: {subject, roles: ["integration"], scopes}}); only
+      # the role "integration" is accepted. Also via deploy/.env.
+      PROCWORKS_TOKENS_JSON: "${PROCWORKS_TOKENS_JSON:-}"
       # Read-only backup admin view (GET /admin/backups, POST …/run-now): the API
       # only reads the metadata index the backup scheduler publishes here and
       # writes a .run-now trigger. It has NO access to the dump volume (§9).
@@ -78,7 +91,7 @@ services:
       - procworks_backup_control:/control
 
   web:
-    image: ghcr.io/tobiashaecker/procworks-web:${PROCWORKS_VERSION:-1.29.0}
+    image: ghcr.io/tobiashaecker/procworks-web:${PROCWORKS_VERSION:-1.30.0}
     build:
       context: ..
       dockerfile: web/Dockerfile
@@ -129,7 +142,7 @@ services:
       # Version stamped into every backup's index (app_version) -- the same
       # default as the images above, so a restore shows which release wrote
       # the dump (VAL-34; Helm passes .Chart.AppVersion the same way).
-      PROCWORKS_VERSION: "${PROCWORKS_VERSION:-1.29.0}"
+      PROCWORKS_VERSION: "${PROCWORKS_VERSION:-1.30.0}"
       # Optional hardening/extension hooks (see the concept, left empty here):
       #   BACKUP_PASSPHRASE   -> symmetric encryption at rest (needs gpg/age)
       #   BACKUP_SYNC_CMD     -> off-site copy command (rsync/rclone/aws s3 ...)

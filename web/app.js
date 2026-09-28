@@ -1176,7 +1176,14 @@ async function request(method, path, body) {
   }
   setConnected(true);
   const text = await resp.text();
-  const data = text ? JSON.parse(text) : null;
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch (_e) {
+    // Keine JSON-Antwort: Hinter der Adresse steht kein ProcWorks-Kern, meist
+    // die Weboberflaeche selbst (NT-17: sonst „Unexpected token '<' …“).
+    throw { detail: `Unter ${state.apiBase} antwortet kein ProcWorks-Server. Die API-Adresse unten in der Seitenleiste pr\u00FCfen (\u00FCblich: ${defaultApiBase()}).` };
+  }
   if (!resp.ok) {
     // Demo: Sitzung verloren (VAL-20) -- einmal still neu anmelden, statt den
     // Besucher auf einer nackten Anmeldung abzusetzen. Nicht fuer den Login
@@ -1187,6 +1194,19 @@ async function request(method, path, body) {
     throw { status: resp.status, detail: data && data.detail };
   }
   return data;
+}
+
+/**
+ * Antwortet unter ``base`` ein ProcWorks-Kern? (NT-17)
+ * @param {string} base API-Basisadresse, z. B. "http://localhost/api"
+ * @returns {Promise<boolean>} true bei ``GET /health`` mit JSON ``{status: "ok"}``
+ */
+async function isProcWorksApi(base) {
+  try {
+    const resp = await fetch(`${base}/health`, { cache: "no-store" });
+    const data = await resp.json();
+    return !!(data && data.status === "ok");
+  } catch (_e) { return false; }
 }
 
 /** Laeuft gerade eine Wiederanmeldung der Demo? (nur eine zugleich) */
@@ -1259,8 +1279,22 @@ function showVersion(version) {
 
 function openModal(title, bodyNode, onConfirm, confirmLabel) {
   const root = byId("modal-root");
+  // Wer den Dialog oeffnete, bekommt den Fokus danach zurueck (NT-15). Kommt
+  // der Aufruf aus einem schon offenen Dialog (Dialog ersetzt Dialog), zaehlt
+  // dessen Ausloeser, nicht der verschwindende Knopf darin.
+  const opener = root.contains(document.activeElement)
+    ? openModal._opener : document.activeElement;
+  openModal._opener = opener;
   clear(root);
-  const close = () => clear(root);
+  const close = () => {
+    clear(root);
+    // Sperre sofort aufheben: Der Beobachter meldet sich erst asynchron, und in
+    // eine noch ``inert`` gesetzte App laesst sich kein Fokus zurueckgeben.
+    syncInert();
+    if (opener && opener.isConnected && typeof opener.focus === "function") {
+      try { opener.focus(); } catch (_e) { /* nur Komfort */ }
+    }
+  };
   const confirmBtn = el("button", {
     class: "btn primary",
     onClick: async () => {
@@ -1281,6 +1315,22 @@ function openModal(title, bodyNode, onConfirm, confirmLabel) {
   // und Links (Enter loest deren eigene Aktion aus), Auswahllisten, jede
   // Zusatztaste und laufende IME-Eingaben.
   modal.addEventListener("keydown", (e) => {
+    // Escape schliesst wie „Abbrechen“ (NT-15). Der globale Escape-Handler
+    // ueberlaesst die Taste bewusst dem offenen Dialog.
+    if (e.key === "Escape" && !e.isComposing) { e.preventDefault(); close(); return; }
+    // Tab bleibt im Dialog und laeuft im Kreis (NT-15). ``inert`` sperrt nur die
+    // App; Tour-Angebot, Meldungen und Demo-Leiste liegen daneben und haetten
+    // den Fokus sonst aus dem Dialog gezogen.
+    if (e.key === "Tab") {
+      const focusables = [...modal.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+        .filter((x) => !x.disabled && x.offsetParent !== null);
+      if (!focusables.length) return;
+      const first = focusables[0], last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      return;
+    }
     if (e.key !== "Enter" || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
     const t = e.target;
     const tag = t && t.tagName;
@@ -1289,8 +1339,12 @@ function openModal(title, bodyNode, onConfirm, confirmLabel) {
     confirmBtn.click();
   });
   root.appendChild(modal);
+  // Fokus in den Dialog: ins erste Feld, sonst auf „Bestaetigen“ (NT-15). Ohne
+  // Feld blieb er auf dem Knopf hinter dem Dialog; Tab lief dann nur durch die
+  // Seite und erreichte „Abschliessen“ nie. Die Seite dahinter ist waehrend
+  // des Dialogs ``inert`` (siehe watchInert), Tab bleibt also im Dialog.
   const firstInput = modal.querySelector("input, select, textarea");
-  if (firstInput) firstInput.focus();
+  (firstInput || confirmBtn).focus();
   // Rueckgabe fuer Dialoge, die ihren Bestaetigen-Knopf je nach Eingabe
   // sperren (z. B. der Einfuege-Dialog ohne Diskriminator). Bisherige Aufrufer
   // ignorieren sie.
@@ -8777,7 +8831,7 @@ function renderMailOutboxBody(status, body) {
   if (!status.configured) {
     info.appendChild(el("div", null,
       "Kein SMTP-Server konfiguriert – Benachrichtigungen werden modelliert und " +
-      "protokolliert, aber nicht versendet (PROCWORKS_SMTP_HOST/MAIL_FROM setzen)."));
+      "protokolliert, aber nicht versendet. Den Mailserver in deploy/.env eintragen (PROCWORKS_SMTP_HOST, PROCWORKS_MAIL_FROM u. a.; siehe README, Abschnitt \u201EEinstellungen\u201C)."));
   }
   info.appendChild(el("div", null,
     `Gesamt ${status.total} · ausstehend ${status.pending} · in Wiederholung ` +
@@ -11804,6 +11858,36 @@ function startLiveUpdates() {
   setInterval(tickTimeViews, TIME_TICK_MS);
 }
 
+/**
+ * Haelt die App hinter einem Dialog oder der Anmeldemaske ``inert`` (NT-15).
+ *
+ * ``inert`` nimmt die Seite aus der Tab-Reihenfolge und fuer Klicks aus dem
+ * Spiel. Ohne das sprang Tab aus der Anmeldemaske in die verdeckte App und
+ * lief bei offenem Dialog durch die Liste dahinter. Ein Beobachter statt
+ * Aufrufen in openModal/showOverlay: Dialoge werden an mehreren Stellen
+ * geschlossen (Abbrechen, Hintergrund, Bestaetigen, Escape), und die Sperre
+ * darf nie haengen bleiben.
+ */
+function watchInert() {
+  const modalRoot = byId("modal-root");
+  const overlay = byId("auth-overlay");
+  if (!modalRoot || !overlay || typeof MutationObserver === "undefined") return;
+  const obs = new MutationObserver(syncInert);
+  obs.observe(modalRoot, { childList: true });
+  obs.observe(overlay, { childList: true, attributes: true, attributeFilter: ["style"] });
+  syncInert();
+}
+
+/** Setzt ``inert`` auf der App genau dann, wenn Dialog oder Anmeldemaske offen sind. */
+function syncInert() {
+  const app = document.querySelector(".app");
+  const modalRoot = byId("modal-root");
+  const overlay = byId("auth-overlay");
+  if (!app || !modalRoot || !overlay) return;
+  const blocked = modalRoot.childElementCount > 0 || overlay.style.display !== "none";
+  if (blocked) app.setAttribute("inert", ""); else app.removeAttribute("inert");
+}
+
 function wireNav() {
   byId("nav").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-view]");
@@ -11880,7 +11964,17 @@ function wireNav() {
   const apiInput = byId("api-base");
   apiInput.value = state.apiBase;
   apiInput.addEventListener("change", async () => {
-    state.apiBase = apiInput.value.trim() || defaultApiBase();
+    // Nur eine Adresse uebernehmen, hinter der wirklich ein ProcWorks-Kern
+    // antwortet (NT-17): Eine verirrte Eingabe („4“) legte sonst still jeden
+    // Aufruf lahm und blieb im Browser gespeichert.
+    const candidate = apiInput.value.trim() || defaultApiBase();
+    if (!(await isProcWorksApi(candidate))) {
+      toast("err", "Keine ProcWorks-API unter dieser Adresse",
+        [`${candidate} antwortet nicht wie ein ProcWorks-Server. Die bisherige Adresse bleibt: ${state.apiBase}`]);
+      apiInput.value = state.apiBase;
+      return;
+    }
+    state.apiBase = candidate;
     localStorage.setItem("apiBase", state.apiBase);
     await boot();
   });
@@ -11975,4 +12069,5 @@ async function boot() {
 }
 
 wireNav();
+watchInert();
 boot();

@@ -455,6 +455,26 @@ def test_full_stack_compose_passes_the_seed_switches_through_defaulting_to_off()
         assert f"{var}: 1" not in compose, f"{var} must not default to on"
 
 
+def test_full_stack_compose_passes_mail_and_machine_token_settings_through() -> None:
+    """NT-12/NT-13: SMTP and machine tokens are configurable without editing files.
+
+    The admin view told customers to set ``PROCWORKS_SMTP_HOST``/``..._MAIL_FROM``,
+    but the Compose file never handed any of it to the API container. Every
+    variable now comes through with a harmless default (empty = off, port 587,
+    TLS on), so ``deploy/.env`` is enough.
+    """
+    compose = (
+        Path(__file__).resolve().parents[2] / "deploy" / "docker-compose.full.yml"
+    ).read_text(encoding="utf-8")
+    expected = {
+        "PROCWORKS_SMTP_HOST": "", "PROCWORKS_SMTP_PORT": "587", "PROCWORKS_SMTP_USER": "",
+        "PROCWORKS_SMTP_PASSWORD": "", "PROCWORKS_SMTP_TLS": "1", "PROCWORKS_MAIL_FROM": "",
+        "PROCWORKS_TOKENS_JSON": "",
+    }
+    for var, default in expected.items():
+        assert f'{var}: "${{{var}:-{default}}}"' in compose, f"{var} is not passed through"
+
+
 def test_co_served_spa_carries_csp_but_the_api_and_swagger_do_not() -> None:
     """VAL-06: the SPA gets CSP and X-Frame-Options, also in the demo container.
 

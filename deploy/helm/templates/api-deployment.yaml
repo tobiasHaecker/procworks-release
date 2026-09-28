@@ -45,6 +45,13 @@ spec:
                   name: {{ .Values.api.adminSecret }}
                   key: password
             {{- end }}
+          {{- with .Values.api.envFromSecret }}
+          # Weitere Einstellungen aus einem Secret, z. B. PROCWORKS_SMTP_* oder
+          # PROCWORKS_TOKENS_JSON (Nachtest 2026-09-27, NT-12/NT-13).
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health

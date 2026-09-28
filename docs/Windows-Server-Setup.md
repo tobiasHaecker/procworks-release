@@ -282,7 +282,7 @@ Lieferung → Rechnung → Zahlungseingang → Mahnwesen), sechs Prozessen, eine
 eigenen Beispielfirma und neun vorbereiteten Vorgängen. Beide Datensätze lassen
 sich auch nacheinander laden; jedes Laden setzt vorher alle Daten zurück.
 
-Anschließend stehen fünf **Testbenutzer** zum Anmelden bereit. Ihr gemeinsames
+Anschließend stehen sechs **Testbenutzer** zum Anmelden bereit. Ihr gemeinsames
 Passwort vergibt ProcWorks bei jedem Laden neu und zufällig; die Oberfläche zeigt
 es nach dem Laden **einmal** an – notieren Sie es gleich:
 
@@ -292,6 +292,7 @@ es nach dem Laden **einmal** an – notieren Sie es gleich:
 | `erika.sander` | Bearbeiter (hat offene Aufgaben) |
 | `tom.berger` | Bearbeiter / Leitung (genehmigt) |
 | `paul.klein` | Bearbeiter / Einkauf (Beschaffungsantrag) |
+| `sabine.chef` | Bearbeiter / Geschäftsleitung (genehmigt Toms Anträge) |
 | `vera.viewer` | Leser (nur Monitoring) |
 
 Über **„Auf Null zurücksetzen"** im selben Bereich werden alle Daten **und** die
@@ -328,6 +329,37 @@ docker compose -f deploy/docker-compose.full.yml down
 # wieder starten
 docker compose -f deploy/docker-compose.full.yml up -d
 ```
+
+### E-Mail und Anbindungen einrichten
+
+Einstellungen wie der Mailserver oder Zugänge für andere Programme gehören in
+eine Datei `C:\ProcWorks\deploy\.env` – Docker liest sie beim Start
+automatisch, die Compose-Datei bleibt unverändert. Anlegen im Editor:
+
+```powershell
+notepad C:\ProcWorks\deploy\.env
+```
+
+Inhalt für E-Mail-Benachrichtigungen (Werte Ihres Mailservers):
+
+```ini
+PROCWORKS_SMTP_HOST=smtp.ihre-firma.de
+PROCWORKS_SMTP_PORT=587
+PROCWORKS_SMTP_USER=procworks@ihre-firma.de
+PROCWORKS_SMTP_PASSWORD=geheim
+PROCWORKS_MAIL_FROM=procworks@ihre-firma.de
+```
+
+Speichern (Dateityp „Alle Dateien“, damit keine Endung `.txt` angehängt wird)
+und den Stack neu starten:
+
+```powershell
+docker compose -f deploy/docker-compose.full.yml up -d
+```
+
+In der Verwaltung zeigt der Bereich **„E-Mail-Ausgang"**, ob Mails versendet
+werden. Zugänge für Worker und andere Programme (Maschinen-Tokens) werden in
+derselben Datei eingetragen, siehe README, Abschnitt „Einstellungen“.
 
 ### Update auf eine neue Version
 

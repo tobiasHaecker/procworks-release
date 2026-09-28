@@ -169,11 +169,46 @@ docker compose -f deploy/docker-compose.full.yml logs api | grep "Example accoun
 | `erika.sander` | Erika Sander | Bearbeiter | Aufgaben erledigen (hat offene Urlaubsanträge) |
 | `tom.berger` | Tom Berger | Bearbeiter (Leitung) | Genehmigungen erteilen |
 | `paul.klein` | Paul Klein | Bearbeiter (Einkauf) | Angebote einholen (Beschaffungsantrag) |
+| `sabine.chef` | Sabine Chef | Bearbeiter (Geschäftsleitung) | Toms Urlaubsantrag genehmigen (Vorgesetzte der Leitung) |
 | `vera.viewer` | Vera Viewer | Leser | Monitoring nur ansehen |
 
 > Die Testbenutzer existieren erst **nach** dem Laden der Beispieldaten und nur
 > im Login-Betrieb (Standard im mitgelieferten Stack). Bitte vor dem
 > Produktivbetrieb über **„Auf Null zurücksetzen"** entfernen.
+
+### Einstellungen: E-Mail und Anbindungen (`deploy/.env`)
+
+Zusätzliche Einstellungen gehören in eine Datei **`deploy/.env`** neben der
+Compose-Datei – Docker liest sie beim Start automatisch, die Compose-Datei
+selbst bleibt unverändert (und ein `git pull` überschreibt nichts). Danach
+einmal `docker compose -f deploy/docker-compose.full.yml up -d` ausführen.
+
+**E-Mail-Benachrichtigungen** (modellierte Mails an Bearbeiter oder
+Gruppenpostfächer):
+
+```ini
+PROCWORKS_SMTP_HOST=smtp.ihre-firma.de
+PROCWORKS_SMTP_PORT=587
+PROCWORKS_SMTP_USER=procworks@ihre-firma.de
+PROCWORKS_SMTP_PASSWORD=geheim
+PROCWORKS_MAIL_FROM=procworks@ihre-firma.de
+# PROCWORKS_SMTP_TLS=0   nur für Server ohne STARTTLS
+```
+
+Ob es funktioniert, zeigt die Verwaltung im Bereich **„E-Mail-Ausgang"**.
+
+**Anbindungen und Worker** (andere Programme, die Aufgaben abholen oder
+Vorgänge starten): Sie melden sich nicht mit Passwort an, sondern mit einem
+**Maschinen-Token** der Rolle `integration`. Ein langes Zufallswort als Token
+wählen und mit den nötigen Rechten eintragen:
+
+```ini
+PROCWORKS_TOKENS_JSON={"<langes-zufallswort>": {"subject": "erp-worker", "roles": ["integration"], "scopes": ["tasks:fetch", "tasks:complete"]}}
+```
+
+Welche Rechte (`scopes`) es gibt und wie ein Worker arbeitet, beschreibt der
+[Integrations-Leitfaden](docs/Integrations-Leitfaden.md). Andere Rollen als
+`integration` nimmt ProcWorks für Tokens neben den Passwort-Logins nicht an.
 
 ## Inhalt dieses Repositories
 

@@ -28,6 +28,11 @@ api:
   # initial admin instead of the auto-generated one. Leave empty to use the
   # logged auto-generated password.
   adminSecret: ""
+  # Optional: name of a Secret whose keys become environment variables of the
+  # API, e.g. PROCWORKS_SMTP_HOST, PROCWORKS_SMTP_PORT, PROCWORKS_SMTP_USER,
+  # PROCWORKS_SMTP_PASSWORD, PROCWORKS_MAIL_FROM (e-mail notifications) or
+  # PROCWORKS_TOKENS_JSON (machine tokens with role "integration" for workers).
+  envFromSecret: ""
   # DATABASE_URL is read from a Kubernetes Secret (never hard-code credentials).
   # When `database.createSecret` is true the chart creates it from
   # `database.url`; otherwise set `database.existingSecret` to your own secret.

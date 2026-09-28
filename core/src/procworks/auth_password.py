@@ -36,7 +36,8 @@ from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from procworks.auth import ALL_ROLES, AuthError, Principal, bearer_token
+from procworks.auth import ALL_ROLES, INTEGRATION, AuthError, Principal, bearer_token
+from procworks.auth_token import TokenAuthBackend, load_token_config
 
 #: Login used for the auto-provisioned initial admin when none is configured.
 DEFAULT_ADMIN_LOGIN = "admin"
@@ -317,10 +318,14 @@ class PasswordAuthBackend:
         *,
         session_ttl: timedelta = timedelta(hours=12),
         sessions: SessionStore | None = None,
+        machine_tokens: TokenAuthBackend | None = None,
     ) -> None:
         self._store = store
         self._ttl = session_ttl
         self._sessions: SessionStore = sessions or InMemorySessionStore()
+        #: Static tokens of machine identities (role ``integration``), accepted
+        #: next to the session tokens of people -- see :meth:`authenticate`.
+        self._machine_tokens = machine_tokens
 
     @property
     def store(self) -> CredentialStore:
@@ -330,7 +335,12 @@ class PasswordAuthBackend:
     def from_env(cls) -> PasswordAuthBackend:
         minutes = os.environ.get("PROCWORKS_SESSION_TTL_MINUTES")
         ttl = timedelta(minutes=int(minutes)) if minutes else timedelta(hours=12)
-        backend = cls(create_credential_store(), session_ttl=ttl, sessions=create_session_store())
+        backend = cls(
+            create_credential_store(),
+            session_ttl=ttl,
+            sessions=create_session_store(),
+            machine_tokens=machine_tokens_from_env(),
+        )
         backend._bootstrap_admin()
         return backend
 
@@ -395,10 +405,23 @@ class PasswordAuthBackend:
     # -- AuthBackend protocol ----------------------------------------------
 
     def authenticate(self, authorization: str | None) -> Principal:
+        """Resolve a bearer token: a person's session, else a machine token.
+
+        People log in with a password and get a session token. A worker or an
+        ERP bridge cannot do that sensibly (sessions expire, a password is a
+        person's secret) -- before the Nachtest 2026-09-27 (NT-13) the only way
+        for an integration in the delivered stack was a personal operator
+        account. When static machine tokens are configured
+        (:func:`machine_tokens_from_env`), an unknown session token is tried
+        against them; they carry only the ``integration`` role with its scopes.
+        """
+
         token = bearer_token(authorization)
         if token is None:
             raise AuthError("missing session token")
         session = self._sessions.get(_digest(token))
+        if session is None and self._machine_tokens is not None:
+            return self._machine_tokens.authenticate(authorization)
         if session is None:
             raise AuthError("invalid session")
         if session.expires_at <= datetime.now(UTC):
@@ -608,3 +631,28 @@ class LoginThrottle:
         """Clear the login key after a successful login (not the address)."""
 
         self._strikes.pop("login:" + login.strip().casefold(), None)
+
+
+def machine_tokens_from_env() -> TokenAuthBackend | None:
+    """Static machine tokens for the password mode, or ``None`` (NT-13).
+
+    Same configuration as the token mode (``PROCWORKS_TOKENS`` or
+    ``PROCWORKS_TOKENS_JSON``), with one restriction: every entry must carry
+    exactly the role ``integration``. A token is a long-lived secret without a
+    password behind it; next to personal password logins it must never stand
+    in for a person or an administrator.
+
+    :raises ValueError: at start-up, when an entry has any other role.
+    """
+
+    config = load_token_config()
+    if config is None:
+        return None
+    backend = TokenAuthBackend(config)
+    for principal in backend.principals:
+        if principal.roles != frozenset({INTEGRATION}):
+            raise ValueError(
+                f"token '{principal.subject}': in password mode only machine tokens "
+                f"with exactly the role '{INTEGRATION}' are allowed"
+            )
+    return backend

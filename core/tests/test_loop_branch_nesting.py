@@ -224,4 +224,6 @@ def test_simulation_of_a_stored_crossed_loop_returns(
     schema = _legacy_crossed(monkeypatch)
     with _deadline(5):
         result = simulation.simulate(schema, {"d": False, "r": True})
-    assert "repeated without any work" in json.dumps(result.model_dump(mode="json"))
+    assert "wiederholt sich ohne Arbeit dazwischen" in json.dumps(
+        result.model_dump(mode="json"), ensure_ascii=False
+    )

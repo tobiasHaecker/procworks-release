@@ -83,7 +83,7 @@ def simulate(
     except exe.ExecutionError as err:
         return SimulationResult(
             completed=False,
-            findings=[f"Abbruch beim Start: {err.message}"],
+            findings=[f"Abbruch beim Start: {_engine_reason(err)}"],
         )
 
     executed: list[str] = []
@@ -106,7 +106,7 @@ def simulate(
         try:
             instance = exe.complete_activity(instance, schema, node_id)
         except exe.ExecutionError as err:
-            findings.append(f"Abbruch bei „{label_of(node_id)}“: {err.message}")
+            findings.append(f"Abbruch bei „{label_of(node_id)}“: {_engine_reason(err)}")
             break
         executed.append(node_id)
         if sum(instance.loop_iterations.values()) > loop_cap:
@@ -209,3 +209,26 @@ def _expected_duration(
             if indegree[target] == 0:
                 queue.append(target)
     return max(longest.values(), default=0.0)
+
+
+def _engine_reason(err: exe.ExecutionError) -> str:
+    """German reason for an engine refusal inside a simulation (NT-07).
+
+    Simulation findings are plain sentences (no codes), so the few refusals a
+    what-if run realistically hits are worded here; anything else falls back
+    to the technical message rather than hiding it.
+    """
+
+    element = err.params.get("element", "")
+    texts = {
+        "EX.value-missing": f"Für die Entscheidung fehlt der Wert „{element}“.",
+        "EX.no-branch": f"Für den Wert von „{element}“ passt kein Zweig der Entscheidung.",
+        "EX.no-decision": "Eine Entscheidung hat keine Regel, nach der sie verzweigt.",
+        "EX.loop-broken": (
+            "Eine Schleife wiederholt sich ohne Arbeit dazwischen – das Modell ist "
+            "nicht sauber geschachtelt und muss korrigiert werden."
+        ),
+        "EX.target-missing": "Ein Teil- oder Folgeprozess ist nicht (mehr) vorhanden.",
+        "EX.not-released": "Der Prozess ist nicht freigegeben.",
+    }
+    return texts.get(err.code, err.message)

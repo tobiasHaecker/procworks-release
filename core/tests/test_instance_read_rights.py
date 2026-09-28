@@ -162,3 +162,38 @@ def test_aggregated_kpis_stay_visible_to_operators(login: Any) -> None:
     erika = login("erika", ["operator"], "a1")
 
     assert client.get("/monitoring/kpis", headers=erika).status_code == 200
+
+
+_ACTIONS = ("claim", "return", "suspend", "resume", "fail", "reset", "start", "complete")
+
+
+def test_uninvolved_operator_gets_404_on_every_action(login: Any) -> None:
+    """NT-08: the action paths answered a foreign case with 409 naming its open
+    step ("not eligible to claim activity 'act_144'") -- now they say nothing."""
+
+    iid, erfassen, _ = _instance("Aktion – fremd")
+    before = client.get(f"/instances/{iid}").json()
+    paul = login("paul", ["operator"], "a2")
+
+    for action in _ACTIONS:
+        resp = client.post(
+            f"/instances/{iid}/{action}",
+            json={"node_id": erfassen, "reason": "x"},
+            headers=paul,
+        )
+        assert resp.status_code == 404, (action, resp.json())
+        assert resp.json()["detail"] == "instance not found"
+    v1 = client.post(f"/v1/instances/{iid}/nodes/{erfassen}/complete", json={}, headers=paul)
+    assert v1.status_code == 404
+    admin = login("root", ["admin"])
+    assert client.get(f"/instances/{iid}", headers=admin).json() == before
+
+
+def test_responsible_operator_still_reaches_the_engine(login: Any) -> None:
+    iid, erfassen, _ = _instance("Aktion – zuständig")
+    erika = login("erika", ["operator"], "a1")
+
+    claimed = client.post(f"/instances/{iid}/claim", json={"node_id": erfassen}, headers=erika)
+    assert claimed.status_code == 200, claimed.json()
+    done = client.post(f"/instances/{iid}/complete", json={"node_id": erfassen}, headers=erika)
+    assert done.status_code == 200, done.json()

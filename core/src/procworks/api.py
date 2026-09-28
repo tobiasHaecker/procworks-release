@@ -1623,8 +1623,19 @@ def _run_or_409(result_fn: Callable[[], ProcessInstance]) -> ProcessInstance:
     try:
         instance = result_fn()
     except ExecutionError as exc:
-        raise HTTPException(status_code=409, detail={"message": exc.message}) from exc
+        raise HTTPException(status_code=409, detail=_execution_error_detail(exc)) from exc
     return _instances.put(instance)
+
+
+def _execution_error_detail(exc: ExecutionError) -> dict[str, object]:
+    """409 body of an engine refusal: the technical message plus ``code``/``params``.
+
+    ``message`` stays unchanged for API users and tests; ``code``/``params`` let
+    the web client word the refusal in German (NT-07), exactly like a rule
+    finding (``describeError`` -> ``findingText``).
+    """
+
+    return {"message": exc.message, "code": exc.code, "params": exc.params}
 
 
 def _effective_schema_for(instance: ProcessInstance) -> ProcessSchema:
@@ -3123,7 +3134,8 @@ def post_import_bpmn(req: ImportBpmnRequest) -> ProcessSchema:
             )
         except BpmnError as exc:
             raise HTTPException(
-                status_code=422, detail={"message": str(exc)}
+                status_code=422,
+                detail={"message": str(exc), "code": exc.code, "params": exc.params},
             ) from exc
         except CorrectnessError as exc:
             raise HTTPException(
@@ -4153,18 +4165,41 @@ def _involved_instance_ids(principal: Principal) -> set[str]:
     return ids
 
 
+def _is_involved(principal: Principal, instance: ProcessInstance) -> bool:
+    """Is the bound agent involved in this one instance? (VAL-05 rule)
+
+    The single-instance form of :func:`_involved_instance_ids` -- same
+    definition (acting agent of any event of the instance, or eligible for /
+    owner of an open step right now) -- without scanning every instance. Used
+    on every read and, since NT-08, on every action path, so it must stay cheap.
+    """
+
+    agent = principal.agent_id
+    if agent is None:
+        return False
+    if any(e.agent_id == agent for e in _audit.for_instance(instance.id)):
+        return True
+    if instance.state is not InstanceState.RUNNING:
+        return False
+    tasks = assignment.open_tasks(
+        _effective_schema_for(instance), instance, absent_agents=_current_absent_agents()
+    )
+    return any(t.claimed_by == agent or agent in t.eligible_agents for t in tasks)
+
+
 def _readable_instance_or_404(instance_id: str, principal: Principal) -> ProcessInstance:
-    """Load an instance for a read, hiding foreign ones from limited callers.
+    """Load an instance for a read or an action, hiding foreign ones from limited callers.
 
     A limited caller gets **404** for an instance it is not involved in -- the
     same answer as for a missing one, so the endpoint does not reveal which
-    instance ids exist.
+    instance ids exist. Since the Nachtest 2026-09-27 (NT-08) the action
+    endpoints (claim, return, suspend, resume, fail, reset, start, complete,
+    data) load through here too: they used to answer a foreign instance with a
+    409 that named its open step, or with a D3 finding about its data.
     """
 
     instance = _get_instance_or_404(instance_id)
-    if _reads_only_own_instances(principal) and instance_id not in _involved_instance_ids(
-        principal
-    ):
+    if _reads_only_own_instances(principal) and not _is_involved(principal, instance):
         raise HTTPException(status_code=404, detail="instance not found")
     return instance
 
@@ -4711,7 +4746,7 @@ def post_claim_activity(
     (the engine stays clock-free), idempotently for a re-claim by the owner.
     """
 
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     acting = _require_acting_agent(principal, req.agent_id, instance)
 
@@ -4755,7 +4790,7 @@ def post_return_activity(
     ACTIVATED, and the task reappears in every eligible agent's list.
     """
 
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     acting = _resolve_acting_agent(principal, req.agent_id, instance)
     holder = instance.claimed_by.get(req.node_id)
@@ -4829,7 +4864,7 @@ def post_suspend_activity(
     keep running (Aktivitaets-Detailzustaende-Konzept §4).
     """
 
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     acting = _require_acting_agent(principal, req.agent_id, instance)
 
@@ -4868,7 +4903,7 @@ def post_resume_activity(
 ) -> ProcessInstance:
     """Continue a suspended activity (E2, V2) -- owner-only."""
 
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     acting = _require_acting_agent(principal, req.agent_id, instance)
 
@@ -4912,7 +4947,7 @@ def post_fail_activity(
     recovery reset -- the instance is never in an undefined state.
     """
 
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     acting = _require_acting_agent(principal, req.agent_id, instance)
     after = _run_or_409(
@@ -4952,7 +4987,7 @@ def post_reset_activity(
     deadline and a fresh escalation ladder.
     """
 
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     acting = _resolve_acting_agent(principal, req.agent_id, instance)
     holder = instance.claimed_by.get(req.node_id)
@@ -4994,7 +5029,7 @@ def post_start_activity(
     implicitly for the acting agent, a step claimed by someone else is a 409.
     """
 
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     acting = _require_acting_agent(principal, req.agent_id, instance)
 
@@ -5032,7 +5067,7 @@ def post_complete_activity(
     req: CompleteActivityRequest,
     principal: Principal = Depends(require_role("operator", "modeler", "admin")),
 ) -> ProcessInstance:
-    before = _get_instance_or_404(instance_id)
+    before = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(before)
     before_states = dict(before.node_states)
     acting_agent = _resolve_acting_agent(principal, req.agent_id, before)
@@ -5962,8 +5997,11 @@ def _set_instance_data(
 ) -> dict[str, object]:
     """Shared body of both data endpoints: authorise, type-check, store, audit.
 
-    Order matters: the D3 type check runs first (a malformed request is a 422
-    regardless of who sends it), then :func:`_authorize_data_write`. Every
+    Order matters: first the instance must be readable for the caller (a
+    foreign one is 404 -- before NT-08 the D3 check ran first and told an
+    uninvolved operator which values a colleague's case holds), then the D3
+    type check (a malformed request is a 422 regardless of who sends it), then
+    :func:`_authorize_data_write`. Every
     element whose value actually changes gets one ``INSTANCE_DATA_SET`` event
     with ``old``/``new`` as JSON (``null`` for a previously unset element),
     the sender as ``actor`` where it is not the bound agent itself, and the
@@ -5971,7 +6009,7 @@ def _set_instance_data(
     Test instances are stored but never audited (as everywhere else).
     """
 
-    instance = _get_instance_or_404(instance_id)
+    instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     findings = _validate_data_values(schema, req.values)
     if findings:

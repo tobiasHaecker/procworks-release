@@ -165,7 +165,10 @@ def test_bound_but_ineligible_login_is_still_refused_by_the_core(
     """A reason never unlocks a *bound* login: the core BZR check stays in charge."""
 
     iid, act_id, backend = task
-    headers = _login(backend, "fremd", roles=["operator"], agent_id="ghost")
+    # A modeller role keeps the case visible (a pure operator who is not
+    # involved gets 404 before the core is asked, NT-08) -- so this still
+    # reaches the core's eligibility check.
+    headers = _login(backend, "fremd", roles=["operator", "modeler"], agent_id="ghost")
 
     resp = client.post(
         f"/instances/{iid}/complete",

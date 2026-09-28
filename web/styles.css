@@ -1136,3 +1136,29 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   font-size: 16px;
   user-select: all;
 }
+
+/* Werte, die ein Schritt ohne Maske nur liest (NT-06): kompakt als „Name: Wert“. */
+.read-values {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elev2);
+}
+.read-values dt { color: var(--txt-dim); }
+.read-values dd { margin: 0; color: var(--txt); font-weight: 600; }
+
+/* Rollenwechsel der Demo-Leiste auf dem Handy: eine Auswahlliste statt vieler
+   Knoepfe (NT-05), damit die Leiste flach bleibt. */
+.demo-switch-select {
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elev2);
+  color: var(--txt);
+  font-size: 13px;
+}

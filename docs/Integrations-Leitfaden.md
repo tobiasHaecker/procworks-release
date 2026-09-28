@@ -132,6 +132,11 @@ curl -X POST https://host/v1/instances/instance_42/nodes/act_pruefen/complete \
   antwortet der Abschluss mit `422` (Befund D3) und der Schritt bleibt offen.
   Der Typ **`DECIMAL`** (Betrag) ist eine JSON-Zahl mit höchstens zwei
   Nachkommastellen: `499.99` ist gültig, `499.999` nicht.
+* Lehnt die Engine eine Aktion ab (`409`), enthält die Antwort neben
+  `message` jetzt `code` (z. B. `EX.claimed-by-other`) und `params` (z. B.
+  `step`, `agent`); ebenso ein abgelehnter BPMN-Import (`422`, `BPMN.*`).
+  Ein persönlicher Bearbeiter-Login, der am Vorgang nicht beteiligt ist,
+  bekommt bei jeder Aktion `404`.
 * **Ad-hoc-Änderungen** eines laufenden Vorgangs
   (`POST /instances/{id}/adhoc/insert|rename|delete`) stehen nur den Rollen
   Modellierer und Administrator offen und verlangen für echte Vorgänge einen

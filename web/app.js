@@ -385,6 +385,11 @@ function toast(kind, title, lines) {
   // Eine erfolgreiche Folgeaktion erledigt die offenen Fehler: Sie standen
   // sonst neben der Erfolgsmeldung, als waere noch etwas falsch (VAL-13).
   if (kind === "ok") clearToasts("err");
+  // Dieselbe Meldung ein zweites Mal ersetzt die erste, statt sich darunter zu
+  // stapeln (NT-10: zweimal „Abschliessen“ = zweimal derselbe Pflichtfeld-Hinweis).
+  [...root.querySelectorAll(".toast." + kind)]
+    .filter((o) => o.textContent.replace(/^\u00D7/, "") === t.textContent.replace(/^\u00D7/, ""))
+    .forEach((o) => o.remove());
   root.appendChild(t);
   if (sticky) {
     const open = [...root.querySelectorAll(".toast.err")];
@@ -467,7 +472,7 @@ const FINDING_TEXTS = {
   "K2.end-count": (p) => ({ text: `Ein Prozess braucht genau ein Ende, hier sind es ${p.count}.` }),
   "K1.unbalanced": (p) => ({
     text: `Die Verzweigungen sind nicht vollständig: ${p.splits}× ${p.kind}, aber ${p.joins} passende Zusammenführung(en).`,
-    hint: "Jede Verzweigung braucht genau eine Zusammenführung derselben Art.",
+    hint: "Jede Verzweigung braucht genau eine Zusammenführung derselben Art. Beim BPMN-Import zählt auch ein Schritt mit mehreren ausgehenden bzw. eingehenden Pfeilen als Verzweigung bzw. Zusammenführung.",
   }),
   "K1.wrong-join": (p) => ({
     text: `„${p.split}“ wird von „${p.join}“ geschlossen – das ist die falsche Art der Zusammenführung.`,
@@ -558,6 +563,70 @@ const FINDING_TEXTS = {
   }),
   // --- Ziel-Pruefung der Webhooks (Regel I6, SSRF) -----------------------
   // Der Kern bleibt sprachneutral; formuliert wird hier, wie bei jedem Befund.
+  // Laufzeit (NT-07): Die Engine lehnt eine Aktion ab (409). Bis 1.28.0 kam
+  // nur der englische Text, etwa „activity 'act_1' is already claimed by
+  // 'a-tom' (W1)“. ``step`` ist der Schrittname, ``agent`` eine Agenten-ID.
+  "EX.not-allowed": () => ({ text: "Das ist im aktuellen Zustand des Vorgangs nicht möglich." }),
+  "EX.not-released": () => ({
+    text: "Nur ein freigegebener Prozess lässt sich starten.",
+    hint: "Den Entwurf freigeben oder als Prüfinstanz starten.",
+  }),
+  "EX.automatic": (p) => ({ text: `${stepOf(p)} ist ein automatischer Schritt – ihn übernimmt niemand von Hand.` }),
+  "EX.not-ready": (p) => ({
+    text: `${stepOf(p)} ist gerade nicht zu bearbeiten – der Vorgang steht an anderer Stelle.`,
+    hint: "Die Ansicht aktualisieren; vermutlich hat jemand anderes den Schritt schon erledigt.",
+  }),
+  "EX.claimed-by-other": (p) => ({
+    text: `${stepOf(p)} hat bereits ${p.agent ? agentNameOf(p.agent) : "jemand anderes"} übernommen.`,
+    hint: "Abschließen oder zurücklegen kann nur, wer den Schritt übernommen hat.",
+  }),
+  "EX.not-eligible": (p) => ({ text: `Für ${stepOf(p)} bist du nicht zuständig.` }),
+  "EX.failed": (p) => ({
+    text: `${stepOf(p)} ist als gescheitert gemeldet und wartet auf den Wiederanlauf.`,
+    hint: "Erst den Wiederanlauf auslösen, dann weiterarbeiten.",
+  }),
+  "EX.not-claimed": (p) => ({ text: `${stepOf(p)} hat niemand übernommen – es gibt nichts zurückzulegen.` }),
+  "EX.suspended-by-other": (p) => ({ text: `${stepOf(p)} hat eine andere Person angehalten.` }),
+  "EX.not-suspended": (p) => ({ text: `${stepOf(p)} ist nicht angehalten.` }),
+  "EX.owner-only": (p) => ({ text: `Das darf bei ${stepOf(p)} nur, wer den Schritt übernommen hat.` }),
+  "EX.suspended": (p) => ({ text: `${stepOf(p)} ist angehalten – bitte zuerst fortsetzen.` }),
+  "EX.not-failed": (p) => ({ text: `${stepOf(p)} ist nicht als gescheitert gemeldet.` }),
+  "EX.loop-broken": () => ({
+    text: "Eine Schleife wiederholt sich ohne Arbeit dazwischen – das Modell ist nicht sauber geschachtelt.",
+    hint: "Das Schema in einer neuen Revision korrigieren und den Vorgang migrieren.",
+  }),
+  "EX.no-decision": () => ({ text: "Eine Entscheidung hat keine Regel, nach der sie verzweigt." }),
+  "EX.value-missing": (p) => ({
+    text: `Für die Entscheidung fehlt der Wert „${p.element}“.`,
+    hint: "Den Wert im Schritt davor setzen.",
+  }),
+  "EX.no-branch": (p) => ({ text: `Für den Wert von „${p.element}“ passt kein Zweig der Entscheidung.` }),
+  "EX.follow-up-condition": () => ({ text: "Die Bedingung eines Folgeprozesses lässt sich nicht auswerten." }),
+  "EX.target-missing": () => ({ text: "Ein Teil- oder Folgeprozess ist nicht (mehr) vorhanden." }),
+  "EX.not-running": () => ({ text: "Der Vorgang läuft nicht mehr." }),
+  "EX.unknown-step": () => ({ text: "Diesen Schritt gibt es im Vorgang nicht." }),
+  "EX.not-activity": (p) => ({ text: `${stepOf(p)} ist kein Aufgaben-Schritt.` }),
+  // BPMN-Import (NT-07): vorher roh „unsupported BPMN element 'inclusiveGateway'“.
+  "BPMN.invalid": () => ({ text: "Die BPMN-Datei lässt sich nicht übernehmen." }),
+  "BPMN.no-process": () => ({ text: "Die Datei enthält keinen Prozess (<process>)." }),
+  "BPMN.bad-extension": () => ({
+    text: "Die ProcWorks-Zusatzdaten in der Datei sind beschädigt.",
+    hint: "Die Datei ohne den Block <extensionElements> importieren oder neu exportieren.",
+  }),
+  "BPMN.invalid-xml": () => ({
+    text: "Die Datei ist kein gültiges XML.",
+    hint: "Ist es wirklich die .bpmn-Datei aus dem Modellierwerkzeug?",
+  }),
+  "BPMN.flow-incomplete": () => ({ text: "Ein Pfeil (sequenceFlow) hat keinen Anfang oder kein Ziel." }),
+  "BPMN.missing-id": (p) => ({ text: `Ein Element <${p.element}> hat keine ID.` }),
+  "BPMN.unsupported": (p) => ({
+    text: `ProcWorks übernimmt das Element „${bpmnElementName(p.element)}“ nicht.`,
+    hint: "Unterstützt werden Start, Ende, Aufgaben, Teilprozesse sowie exklusive (XOR) und parallele (UND) Gateways in sauberer Blockstruktur.",
+  }),
+  "BPMN.mixed-gateway": () => ({
+    text: "Ein Gateway verzweigt und führt zugleich zusammen.",
+    hint: "In zwei Gateways aufteilen: eines führt zusammen, das nächste verzweigt.",
+  }),
   "WH.egress-locked": () => ({
     text: "Auf dieser Instanz sind ausgehende Verbindungen gesperrt.",
     hint: "Der Probelauf zeigt trotzdem, was gesendet würde.",
@@ -995,6 +1064,25 @@ function schemaName(id) { return (state.schemaNames && state.schemaNames[id]) ||
  * @param {object} p Parameter (``step`` ergaenzt ``findingText`` aus ``node_id``)
  * @param {string} [fallback] Ersatz, wenn der Befund keinen Schritt nennt
  */
+/**
+ * Deutscher Name eines BPMN-Elements, das der Import ablehnt (NT-07).
+ * @param {string} element lokaler Elementname, z. B. "inclusiveGateway"
+ * @returns {string} Name mit dem BPMN-Begriff in Klammern
+ */
+function bpmnElementName(element) {
+  const names = {
+    inclusiveGateway: "ODER-Gateway (inclusiveGateway)",
+    eventBasedGateway: "ereignisbasiertes Gateway (eventBasedGateway)",
+    complexGateway: "komplexes Gateway (complexGateway)",
+    intermediateCatchEvent: "Zwischenereignis (intermediateCatchEvent)",
+    intermediateThrowEvent: "ausl\u00F6sendes Zwischenereignis (intermediateThrowEvent)",
+    boundaryEvent: "angeheftetes Ereignis (boundaryEvent)",
+    transaction: "Transaktion (transaction)",
+    adHocSubProcess: "Ad-hoc-Teilprozess (adHocSubProcess)",
+  };
+  return names[element] || element || "?";
+}
+
 function stepOf(p, fallback) { return p.step ? `„${p.step}“` : (fallback || "Dieser Schritt"); }
 
 /** „in=1, out>=2“ aus K2 als Satzteil. */
@@ -1672,7 +1760,7 @@ function renderGraph(schema, opts) {
     root.appendChild(svg("path", { class: cls, "marker-end": "url(#arrow)",
       d: `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}` }));
     if (e.condition) {
-      root.appendChild(svg("text", { class: "gcond", x: mx, y: (y1 + y2) / 2 - 6, "text-anchor": "middle" }, document.createTextNode(e.condition)));
+      root.appendChild(svg("text", { class: "gcond", x: mx, y: (y1 + y2) / 2 - 6, "text-anchor": "middle" }, document.createTextNode(conditionCaption(e.condition))));
     }
     if (opts.onPlus) {
       // data-tour/-src: Anker der gefuehrten Tour. Sie zeigt gezielt auf das
@@ -2227,6 +2315,49 @@ function attachPanZoom(wrap, svgEl) {
   wrap.appendChild(moreLeft);
   wrap.appendChild(moreRight);
 
+  /**
+   * Der tatsaechlich sichtbare Streifen der Canvas (NT-09).
+   *
+   * Die Canvas ist ``clamp(420px, 66vh, 900px)`` hoch; auf Laptop-Hoehe (etwa
+   * 1054 x 676) ragt sie unter den Fensterrand. Einpassen zentrierte deshalb
+   * ueber eine Hoehe, von der ein Teil unsichtbar war, und die Randpfeile
+   * sassen unten ausserhalb des Fensters. Ist der sichtbare Streifen zu schmal
+   * (Canvas weit weggescrollt), gilt die volle Hoehe wie bisher.
+   * @returns {{top: number, h: number}} Oberkante (relativ zur Canvas) und Hoehe
+   */
+  function visibleBand() {
+    const full = { top: 0, h: wrap.clientHeight };
+    if (typeof wrap.getBoundingClientRect !== "function" || typeof window === "undefined") return full;
+    const r = wrap.getBoundingClientRect();
+    // Sichtbar ist, was Fenster UND jeder scrollende Vorfahre (``.main``) zeigen;
+    // die App macht der Demo-Leiste unten Platz, ``.main`` endet also darueber.
+    let clipTop = 0, clipBottom = window.innerHeight || 0;
+    for (let a = wrap.parentElement; a && a !== document.body; a = a.parentElement) {
+      const oy = getComputedStyle(a).overflowY;
+      if (oy === "visible") continue;
+      const ar = a.getBoundingClientRect();
+      clipTop = Math.max(clipTop, ar.top);
+      clipBottom = Math.min(clipBottom, ar.bottom);
+    }
+    const top = Math.max(0, clipTop - r.top);
+    const bottom = Math.min(wrap.clientHeight, clipBottom - r.top);
+    const h = bottom - top;
+    return h >= 160 ? { top, h } : full;
+  }
+
+  /**
+   * Senkrechte Mitte des Start-Knotens in Modellkoordinaten, falls vorhanden.
+   * Die lesbare Einpassen-Stufe legt die Hauptlinie ab Start in die Mitte des
+   * sichtbaren Streifens: Bei einem hohen Modell (Zweige ober- und unterhalb)
+   * zeigte die obere Ausrichtung sonst zuerst leere Flaeche (NT-09).
+   * @returns {number|null}
+   */
+  function startCenterY() {
+    const node = svgEl.querySelector && svgEl.querySelector('[data-node-id="start"]');
+    if (!node || typeof node.getBBox !== "function") return null;
+    try { const b = node.getBBox(); return b.height ? b.y + b.height / 2 : null; } catch (_e) { return null; }
+  }
+
   function apply() {
     svgEl.style.transformOrigin = "0 0";
     svgEl.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
@@ -2238,6 +2369,10 @@ function attachPanZoom(wrap, svgEl) {
       moreLeft.style.display = left < -4 ? "" : "none";
       moreRight.style.display = right > vw - reserveRight + 4 ? "" : "none";
       moreRight.style.right = `${10 + reserveRight}px`;  // nicht unter der Schritt-Karte
+      // Pfeile am unteren Rand des *sichtbaren* Streifens, nicht der Canvas (NT-09).
+      const band = visibleBand();
+      const lift = Math.max(0, wrap.clientHeight - (band.top + band.h));
+      moreLeft.style.bottom = moreRight.style.bottom = `${8 + lift}px`;
     }
   }
   apply();
@@ -2353,7 +2488,8 @@ function attachPanZoom(wrap, svgEl) {
     const by = vb && vb.width ? vb.y : 0;
     const bw = vb && vb.width ? vb.width : svgEl.clientWidth;
     const bh = vb && vb.height ? vb.height : svgEl.clientHeight;
-    const vw = wrap.clientWidth, vh = wrap.clientHeight;
+    const band = visibleBand();
+    const vw = wrap.clientWidth, vh = band.h;
     if (!bw || !bh || !vw || !vh) return;
     const MARGIN = 16;
     const vwFree = Math.max(120, vw - reserveRight);
@@ -2368,7 +2504,17 @@ function attachPanZoom(wrap, svgEl) {
       scale = FIT_READABLE;
       tx = MARGIN - bx * scale;
       const h = bh * scale;
-      ty = h <= vh - MARGIN * 2 ? (vh - h) / 2 - by * scale : MARGIN - by * scale;
+      if (h <= vh - MARGIN * 2) {
+        ty = band.top + (vh - h) / 2 - by * scale;
+      } else {
+        // Hauptlinie ab Start mittig, aber keine Leerflaeche ueber der Ober-
+        // bzw. unter der Unterkante des Modells.
+        const cy = startCenterY();
+        const topAligned = band.top + MARGIN - by * scale;
+        const bottomAligned = band.top + vh - MARGIN - (by + bh) * scale;
+        ty = cy == null ? topAligned
+          : Math.min(topAligned, Math.max(bottomAligned, band.top + vh / 2 - cy * scale));
+      }
       fitState.readableShown = true;
     } else {
       scale = Math.min(MAX, Math.max(Math.max(MIN, FIT_OVERVIEW_MIN), Math.min(1, fit)));
@@ -2377,7 +2523,7 @@ function attachPanZoom(wrap, svgEl) {
       // mittig abgeschnitten zu sein; der Rest ist per Ziehen erreichbar.
       tx = w <= vwFree - MARGIN * 2 ? (vwFree - w) / 2 - bx * scale : MARGIN - bx * scale;
       const h = bh * scale;
-      ty = h <= vh - MARGIN * 2 ? (vh - h) / 2 - by * scale : MARGIN - by * scale;
+      ty = band.top + (h <= vh - MARGIN * 2 ? (vh - h) / 2 - by * scale : MARGIN - by * scale);
       fitState.readableShown = false;
     }
     apply();
@@ -2443,6 +2589,24 @@ function attachPanZoom(wrap, svgEl) {
   };
 }
 
+/**
+ * Anzeigetext einer Kantenbedingung (NT-10).
+ *
+ * Der Kern leitet die Bedingung als technischen Text ab („Entscheidung:
+ * otherwise“, „Freigabe == true“); der BPMN-Import liest genau diesen Text
+ * zurueck, er bleibt deshalb unveraendert gespeichert. Nur die Anzeige wird
+ * deutsch.
+ * @param {string} text Bedingung wie gespeichert
+ * @returns {string}
+ */
+function conditionCaption(text) {
+  return String(text)
+    .replace(/:\s*otherwise$/, ": sonst")
+    .replace(/ == true\b/g, " = Ja")
+    .replace(/ == false\b/g, " = Nein")
+    .replace(/ or /g, " oder ");
+}
+
 function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + "\u2026" : s; }
 // --------------------------------------------------------------------------
 // Laden / Auswahl
@@ -2470,6 +2634,28 @@ async function loadSchemas() {
     state.schemaId = state.schemaIds[0];
   }
   if (!state.schemaIds.length) state.schemaId = null;
+}
+
+/**
+ * Laedt die Namen von Prozessen nach, die seit dem Anmelden entstanden sind (NT-10).
+ *
+ * ``loadSchemas`` holt Namen nur beim Laden der Liste; ein Prozess, den jemand
+ * anderes spaeter freigab, stand in „Meine Aufgaben“ und im Monitoring bis zum
+ * Neuladen als ``schema_245 (v1)``. Die Sichten, die ueber mehrere Prozesse
+ * reichen, rufen dies vor dem Zeichnen mit den ids auf, die sie anzeigen.
+ * @param {string[]} ids anzuzeigende Schema-ids
+ * @returns {Promise<void>}
+ */
+async function ensureSchemaNames(ids) {
+  const missing = [...new Set(ids)].filter((id) => id && !(id in state.schemaNames));
+  if (!missing.length) return;
+  await Promise.all(missing.map(async (id) => {
+    try {
+      const s = await api.get(`/schemas/${id}`);
+      state.schemaNames[id] = s.name;
+      state.schemaVersions[id] = s.version;
+    } catch (_e) { /* nicht lesbar: dann bleibt die id stehen */ }
+  }));
 }
 
 async function refreshSchema() {
@@ -3192,7 +3378,7 @@ function dataPaletteTab(schema, draft, target) {
     if (draft) actions.push(chipAction("✎", "Datenelement bearbeiten", () => editDataElement(d)));
     wrap.appendChild(paletteChip({
       label: d.name,
-      sub: d.data_type + (d.source === "EXTERNAL" ? " · extern" : ""),
+      sub: typeName(d.data_type) + (d.source === "EXTERNAL" ? " · extern" : ""),
       title: `${d.name} (${typeName(d.data_type)}) – klicken zeigt die Herkunft im Graph`,
       active: state.dataElemFocus === d.id,
       onClick: () => { state.dataElemFocus = state.dataElemFocus === d.id ? null : d.id; render(); },
@@ -3884,7 +4070,7 @@ function cardBranchSection(body, schema, node, draft) {
     const empty = target && (target.type === NODE_TYPE.XOR_JOIN || target.type === NODE_TYPE.AND_JOIN);
     list.appendChild(el("div", { class: "insp-bind" },
       el("span", { class: "insp-bind-name" }, empty ? "leerer Zweig" : nodeCaption(target)),
-      e.condition ? el("span", { class: "muted", style: "font-size:11px" }, e.condition) : null));
+      e.condition ? el("span", { class: "muted", style: "font-size:11px" }, conditionCaption(e.condition)) : null));
   });
   if (branches.length) body.appendChild(list);
   if (!draft) return;
@@ -4007,7 +4193,7 @@ function bindDataDialog(nodeId, preselect) {
   const items = elems.map((d) => ({
     id: d.id,
     label: d.name,
-    sub: d.data_type + (d.source === "EXTERNAL" ? " · extern" : "") + (writtenBefore.has(d.id) ? " · davor gesetzt" : ""),
+    sub: typeName(d.data_type) + (d.source === "EXTERNAL" ? " · extern" : "") + (writtenBefore.has(d.id) ? " · davor gesetzt" : ""),
     group: writtenBefore.has(d.id) ? "Von einem vorgelagerten Schritt gesetzt" : "Übrige Datenelemente",
   })).sort((a, b) => (a.group === b.group ? a.label.localeCompare(b.label) : a.group < b.group ? -1 : 1));
   if (!items.length) {
@@ -7387,7 +7573,7 @@ async function renderInstanceDetail(container, withActions) {
   const wl = state.worklist;
   // Schema, gegen das die Instanz laeuft (ggf. Ad-hoc-Variante)
   const runSchema = inst.ad_hoc_schema || state.schema;
-  const statePill = el("span", { class: "pill " + (inst.state === "COMPLETED" ? "pill-green" : "pill-blue") }, inst.state);
+  const statePill = statePillFor(inst.state);
 
   const graphPanel = el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "Live-Prozesslandkarte"), el("span", { class: "sub" }, instanceCaption(inst, runSchema)), statePill,
@@ -8003,6 +8189,11 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       return { group: f.group, node: wrap };
     }), form.columns || 1));
   } else {
+    // Was der Schritt nur liest, steht als Nur-Lese-Zeile darueber (NT-06): Wer
+    // „Freigabe pruefen“ ohne Maske erledigte, sah den Betrag nicht, den er
+    // freigab. Lesen-und-Schreiben erscheint unten als vorbelegtes Feld.
+    const readOnly = readOnlyValues(schema, nodeId, values);
+    if (readOnly) body.appendChild(readOnly);
     const writes = (schema.data_accesses || []).filter((a) => a.node_id === nodeId && (a.mode === "WRITE" || a.mode === "READ_WRITE"));
     writes.forEach((a) => {
       const elem = schema.data_elements[a.element_id];
@@ -8064,8 +8255,33 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       const d = describeError(err); toast("err", d.title, d.lines); return false;
     }
   };
-  if (form || Object.keys(inputs).length) openModal(`Abschlie\u00DFen: ${label}`, body, doComplete, "Abschlie\u00DFen");
+  if (form || body.childNodes.length) openModal(`Abschlie\u00DFen: ${label}`, body, doComplete, "Abschlie\u00DFen");
   else doComplete();
+}
+
+/**
+ * Nur-Lese-Anzeige der Werte, die ein Schritt ohne Maske liest (NT-06).
+ *
+ * Ein Schritt mit gestalteter Maske zeigt Lesefelder selbst (deaktiviert); ohne
+ * Maske gab es bisher nur die Schreibfelder -- eine Freigabe geschah blind.
+ * Reine Anzeige, keine Logik: welche Werte ein Schritt liest, sagt die
+ * Datenbindung des Modells.
+ * @param {object} schema wirksames Schema der Instanz
+ * @param {string} nodeId der abzuschliessende Schritt
+ * @param {Record<string, *>} values aktuelle Vorgangsdaten
+ * @returns {HTMLElement|null} Liste „Name: Wert“ oder null ohne Lesezugriffe
+ */
+function readOnlyValues(schema, nodeId, values) {
+  const reads = (schema.data_accesses || []).filter((a) => a.node_id === nodeId && a.mode === "READ");
+  if (!reads.length) return null;
+  return el("dl", { class: "read-values" },
+    ...reads.flatMap((a) => {
+      const elem = (schema.data_elements || {})[a.element_id];
+      return [
+        el("dt", null, elem ? elem.name : a.element_id),
+        el("dd", null, formatValue(elem, values[a.element_id])),
+      ];
+    }));
 }
 
 // --------------------------------------------------------------------------
@@ -8180,6 +8396,7 @@ async function viewMonitor() {
   try {
     const ids = await api.get("/instances");
     instances = await Promise.all(ids.map((id) => api.get(`/instances/${id}`)));
+    await ensureSchemaNames(instances.map((i) => i.schema_id));
   } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 
   const running = instances.filter((i) => i.state === "RUNNING").length;
@@ -8704,8 +8921,12 @@ function showExamplePassword(password) {
     async () => true, "Verstanden");
 }
 
+/** Deutsche Namen der Vorgangszustaende (NT-10: bisher RUNNING/COMPLETED roh). */
+const INSTANCE_STATE_LABELS = { RUNNING: "l\u00E4uft", COMPLETED: "abgeschlossen" };
+
 function statePillFor(s) {
-  return el("span", { class: "pill " + (s === "COMPLETED" ? "pill-green" : "pill-blue") }, s);
+  return el("span", { class: "pill " + (s === "COMPLETED" ? "pill-green" : "pill-blue"), title: s },
+    INSTANCE_STATE_LABELS[s] || s);
 }
 
 // Inzident eines externen Tasks aufloesen (Aufgabe wird erneut eingereiht).
@@ -8925,7 +9146,10 @@ async function viewTasks() {
   content.appendChild(picker);
 
   let tasks = [];
-  try { tasks = await api.get(bound ? "/me/tasks" : `/agents/${agentId}/tasks`); }
+  try {
+    tasks = await api.get(bound ? "/me/tasks" : `/agents/${agentId}/tasks`);
+    await ensureSchemaNames(tasks.map((t) => t.schema_id));
+  }
   catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
 
   // Announce tasks that arrived while this list was open (self-dismissing).
@@ -9544,7 +9768,7 @@ function testMonitorPanel(inst, runSchema) {
   const pct = Math.round((done / total) * 100);
 
   const kpis = el("div", { class: "kpis kpis-compact" },
-    kpi("Status", inst.state),
+    kpi("Status", INSTANCE_STATE_LABELS[inst.state] || inst.state),
     kpi("Fortschritt", pct + "%"),
     kpi("Schritte", done + "/" + steps.length),
     kpi("Datenwerte", Object.keys(inst.data_values || {}).length));
@@ -10657,6 +10881,8 @@ const HELP_RULES = [
     ["M0", "Migration: die Instanz l\u00E4uft auf einer fr\u00FCheren Version genau dieses Schemas."],
     ["R1\u2013R2", "Ad-hoc-\u00C4nderungen nur zustandsvertr\u00E4glich und unter Erhalt aller K/D-Regeln."],
     ["M1\u2013M5", "Migration nur, wenn Ziel korrekt ist und der bisherige Verlauf vertr\u00E4glich bleibt."],
+    ["EX", "Laufzeit: Die Aktion passt nicht zum Zustand des Vorgangs \u2013 etwa: jemand anderes hat den Schritt \u00FCbernommen, er ist angehalten oder gescheitert, oder man ist nicht zust\u00E4ndig."],
+    ["BPMN", "BPMN-Import: Die Datei ist kein g\u00FCltiges BPMN oder enth\u00E4lt Elemente au\u00DFerhalb der unterst\u00FCtzten Block-Teilsprache (etwa ODER-Gateways oder Zwischenereignisse)."],
   ]],
   ["Modellhinweise (G, 7PMG)", [
     ["G1", "Hinweis: sehr gro\u00DFes Modell (>50 Knoten) \u2013 ggf. in Sub-Prozesse zerlegen."],
@@ -10775,7 +11001,7 @@ const VIEW_META = {
   data: { title: "Datensicht", sub: "Datenelemente + Lese/Schreib-Bindung (D/C)", fn: viewData },
   org: { title: "Ressourcensicht", sub: "Organisationsmodell + Bearbeiterregeln (Z/A)", fn: viewOrg },
   run: { title: "Ausf\u00FChrung", sub: "Instanzen starten und Arbeitsliste abarbeiten", fn: viewRun },
-  tasks: { title: "Meine Aufgaben", sub: "Bearbeiter-Aufgabenliste mit Z-Laufzeitaufl\u00F6sung", fn: viewTasks },
+  tasks: { title: "Meine Aufgaben", sub: "Deine offenen Aufgaben \u00FCber alle Prozesse, inklusive Vertretung", fn: viewTasks },
   testrun: { title: "Pr\u00FCfinstanz", sub: "Test-Instanz eines Entwurfs im 4-Quadranten-Cockpit durchspielen", fn: viewTestRun },
   monitor: { title: "Monitoring", sub: "Live-Status aktiver Instanzen", fn: viewMonitor },
   integration: { title: "Integration", sub: "Connectoren, Datenanbindung, Automatik & Webhooks", fn: viewIntegration },
@@ -11317,13 +11543,25 @@ function mountDemoBanner() {
   const meRole = ((state.principal && state.principal.roles) || [])
     .map((r) => ROLE_LABELS[r] || r).join(", ") || "ohne Rolle";
 
-  const switches = state.demoLogins
-    .filter((u) => u.login !== meLogin)
-    .map((u) => el("button", {
-      class: "demo-switch",
-      title: `Als ${u.name} anmelden`,
-      onClick: () => switchDemoRole(u.login),
-    }, `${ROLE_LABELS[u.role] || u.role}: ${u.name}`));
+  const others = state.demoLogins.filter((u) => u.login !== meLogin);
+  const caption = (u) => `${ROLE_LABELS[u.role] || u.role}: ${u.name}`;
+  // Auf dem Handy eine Auswahlliste statt eines Knopfs je Rolle (NT-05): Die
+  // 13 Knoepfe brachen auf 390 px in viele Zeilen um, die Leiste wurde so hoch,
+  // dass die App (sie macht der Leiste Platz, --demo-banner-h) kaum noch Raum
+  // hatte -- und die Tour ihre Blase oben ueber den Menueknopf legen musste.
+  const narrow = typeof window !== "undefined" && window.innerWidth <= 720;
+  const switches = narrow && others.length
+    ? [el("select", {
+        class: "demo-switch-select", "aria-label": "Andere Rolle testen",
+        onChange: (e) => { if (e.target.value) switchDemoRole(e.target.value); },
+      },
+        el("option", { value: "" }, "Andere Rolle testen \u2026"),
+        ...others.map((u) => el("option", { value: u.login }, caption(u))))]
+    : others.map((u) => el("button", {
+        class: "demo-switch",
+        title: `Als ${u.name} anmelden`,
+        onClick: () => switchDemoRole(u.login),
+      }, caption(u)));
 
   const banner = el("div", { id: "demo-banner", class: "demo-banner", role: "region", "aria-label": "Demo-Hinweis" },
     el("div", { class: "demo-banner-main" },
@@ -11331,7 +11569,8 @@ function mountDemoBanner() {
       el("span", {}, `Angemeldet als ${meName} (${meRole}).`),
       switches.length
         ? el("span", { class: "demo-switch-wrap" },
-            el("span", { class: "demo-switch-label" }, "Andere Rolle testen:"), ...switches)
+            narrow ? null : el("span", { class: "demo-switch-label" }, "Andere Rolle testen:"),
+            ...switches)
         : null,
       state.demoPassword
         ? el("span", { class: "demo-pw" }, `Passwort: ${state.demoPassword}`)

@@ -179,8 +179,10 @@ def test_operator_not_responsible_for_any_open_step_is_refused(password: Any) ->
 
     resp = _put(iid, {"betrag": 5_000_000}, paul)
 
-    assert resp.status_code == 403
-    assert resp.json()["detail"].startswith(_NOT_YOURS)
+    # Paul is not involved at all: the case does not exist for him (404, like a
+    # read -- NT-08). An *involved* operator without the right gets the 403
+    # text, see test_operator_may_not_set_elements_its_step_does_not_write.
+    assert resp.status_code == 404
     assert "betrag" not in api_module._get_instance_or_404(iid).data_values
     assert _data_events(iid) == []
 
@@ -307,15 +309,27 @@ def test_unchanged_value_writes_no_event(password: Any) -> None:
 
 
 def test_type_errors_are_reported_before_the_rights_check(password: Any) -> None:
-    # A malformed request is a 422 (D3) whoever sends it -- the rights check
-    # must not mask it, and it must not leak whether the caller would be allowed.
+    # A malformed request from someone who can see the case is a 422 (D3) --
+    # the rights check must not mask it. Erika may not set "notiz" at all, yet
+    # the type error comes first.
     iid, _ = _instance("Daten – Typfehler")
-    paul = password("paul", ["operator"], "a2")
+    erika = password("erika", ["operator"], "a1")
 
-    resp = _put(iid, {"betrag": "viel"}, paul)
+    resp = _put(iid, {"notiz": 12}, erika)
 
     assert resp.status_code == 422
     assert "D3" in {f["rule"] for f in resp.json()["detail"]["findings"]}
+
+
+def test_uninvolved_operator_learns_nothing_about_the_data(password: Any) -> None:
+    # Before NT-08 the D3 check ran first and told an uninvolved operator which
+    # elements a colleague's case has and of which type. Now the case is 404.
+    iid, _ = _instance("Daten – fremd, Typfehler")
+    paul = password("paul", ["operator"], "a2")
+
+    for values in ({"betrag": "viel"}, {"gibtsnicht": 1}):
+        resp = _put(iid, values, paul)
+        assert resp.status_code == 404, values
 
 
 # --- paths that stay open ---------------------------------------------------------
@@ -341,10 +355,11 @@ def test_static_integration_token_keeps_the_v1_path_and_is_named_in_the_audit(
 
 
 def test_test_instances_stay_free_and_unaudited(password: Any) -> None:
+    # A test instance is the modeller's sandbox: no reason needed, no audit.
     iid, _ = _instance("Daten – Prüfinstanz", release=False)
-    paul = password("paul", ["operator"], "a2")
+    mara = password("mara", ["modeler"])
 
-    resp = _put(iid, {"notiz": "x"}, paul)
+    resp = _put(iid, {"notiz": "x"}, mara)
 
     assert resp.status_code == 200, resp.text
     assert _data_events(iid) == []

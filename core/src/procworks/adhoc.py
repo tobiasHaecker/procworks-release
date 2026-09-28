@@ -214,6 +214,17 @@ def adhoc_delete_node(
     ]
     candidate.staff_rules.pop(node_id, None)
     candidate.service_bindings.pop(node_id, None)
+    # Everything else keyed by the node goes too -- exactly what
+    # ``operations._drop_nodes`` removes on a modelling-time delete. Before the
+    # Nachtest 2026-09-27 (NT-10) a step carrying a target time could not be
+    # removed ad hoc at all: its time constraint survived as a stale key and T1
+    # ("time constraint references unknown node") rejected the whole change.
+    candidate.sub_process_bindings.pop(node_id, None)
+    candidate.forms.pop(node_id, None)
+    candidate.time_constraints.pop(node_id, None)
+    candidate.mail_bindings.pop(node_id, None)
+    candidate.node_priorities.pop(node_id, None)
+    candidate.escalation_policies.pop(node_id, None)
     candidate.edges.append(ControlEdge(source=predecessor_id, target=successor_id))
     candidate.lifecycle_state = LifecycleState.RELEASED
     raise_if_invalid(candidate, resolver)

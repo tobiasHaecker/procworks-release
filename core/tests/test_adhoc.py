@@ -253,3 +253,33 @@ def test_rename_gateway_violates_r1() -> None:
         adhoc_rename_activity(instance, schema, "end", "Neues Ende")
     assert exc.value.findings[0].rule == "R1"
 
+
+
+def test_a_step_with_a_target_time_can_be_removed_ad_hoc() -> None:
+    """NT-10: its time constraint survived as a stale key and T1 refused the delete.
+
+    The modelling-time delete (``operations._drop_nodes``) always removed every
+    annotation keyed by the node; the ad-hoc delete removed only accesses,
+    staff rule and service -- so a step with a target time, a priority or a
+    mail binding could not be removed from a running case at all.
+    """
+
+    from procworks import set_node_priority, set_time_constraint
+    from procworks.model import PriorityLevel, TimeConstraint
+
+    schema = create_empty_schema("AdhocZeit")
+    schema = serial_insert(schema, "A", after_node_id="start")
+    a = next(n.id for n in schema.nodes.values() if n.label == "A")
+    schema = serial_insert(schema, "B", after_node_id=a)
+    b = next(n.id for n in schema.nodes.values() if n.label == "B")
+    schema = set_time_constraint(schema, b, TimeConstraint(target_lead_seconds=3600))
+    schema = set_node_priority(schema, b, PriorityLevel.HIGH)
+    rel = release(staffed(schema))
+    instance = instantiate(rel)
+
+    changed = adhoc_delete_node(instance, rel, b)
+
+    variant = changed.ad_hoc_schema
+    assert variant is not None and b not in variant.nodes
+    assert b not in variant.time_constraints
+    assert b not in variant.node_priorities

@@ -112,7 +112,19 @@ TARGET_NS = "https://procworks/bpmn"
 
 
 class BpmnError(ValueError):
-    """Raised when a BPMN document cannot be mapped onto the checked subset."""
+    """Raised when a BPMN document cannot be mapped onto the checked subset.
+
+    ``str(exc)`` stays the technical English message. ``code``/``params`` let
+    the web client explain the refusal in German (Nachtest 2026-09-27, NT-07:
+    "unsupported BPMN element 'inclusiveGateway'" was shown raw).
+    """
+
+    def __init__(
+        self, message: str, *, code: str = "BPMN.invalid", params: dict[str, str] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.params = params or {}
 
 
 # --- export --------------------------------------------------------------
@@ -682,7 +694,7 @@ def _find_process(root: ET.Element) -> ET.Element:
     for child in root.iter():
         if _localname(child.tag) == "process":
             return child
-    raise BpmnError("no <process> element found in the BPMN document")
+    raise BpmnError("no <process> element found in the BPMN document", code="BPMN.no-process")
 
 
 def _condition_of(flow: ET.Element) -> str | None:
@@ -721,9 +733,13 @@ def _procworks_model_of(process: ET.Element) -> dict[str, object]:
             try:
                 parsed = json.loads(text)
             except ValueError as exc:
-                raise BpmnError(f"invalid procworks:model payload: {exc}") from exc
+                raise BpmnError(
+                    f"invalid procworks:model payload: {exc}", code="BPMN.bad-extension"
+                ) from exc
             if not isinstance(parsed, dict):
-                raise BpmnError("procworks:model payload must be an object")
+                raise BpmnError(
+                    "procworks:model payload must be an object", code="BPMN.bad-extension"
+                )
             return parsed
     return {}
 
@@ -745,7 +761,7 @@ def import_bpmn(
     try:
         root = ET.fromstring(xml)
     except ET.ParseError as exc:
-        raise BpmnError(f"invalid BPMN XML: {exc}") from exc
+        raise BpmnError(f"invalid BPMN XML: {exc}", code="BPMN.invalid-xml") from exc
 
     process = _find_process(root)
     raw_nodes: dict[str, tuple[str, str]] = {}
@@ -756,7 +772,9 @@ def import_bpmn(
             source = child.get("sourceRef")
             target = child.get("targetRef")
             if not source or not target:
-                raise BpmnError("sequenceFlow is missing sourceRef/targetRef")
+                raise BpmnError(
+                    "sequenceFlow is missing sourceRef/targetRef", code="BPMN.flow-incomplete"
+                )
             flows.append((source, target, _condition_of(child)))
         elif local in _ACTIVITY_TAGS or local in _GATEWAY_TAGS or local in {
             "startEvent",
@@ -764,16 +782,26 @@ def import_bpmn(
         }:
             node_id = child.get("id")
             if not node_id:
-                raise BpmnError(f"<{local}> is missing its id")
+                raise BpmnError(
+                    f"<{local}> is missing its id",
+                    code="BPMN.missing-id",
+                    params={"element": local},
+                )
             raw_nodes[node_id] = (local, child.get("name") or "")
         elif local in _IGNORED_TAGS:
             continue
         else:
-            raise BpmnError(f"unsupported BPMN element '{local}'")
+            raise BpmnError(
+                f"unsupported BPMN element '{local}'",
+                code="BPMN.unsupported",
+                params={"element": local},
+            )
 
     for source, target, _ in flows:
         if source not in raw_nodes or target not in raw_nodes:
-            raise BpmnError("sequenceFlow references an unknown flow node")
+            raise BpmnError(
+                "sequenceFlow references an unknown flow node", code="BPMN.flow-incomplete"
+            )
 
     # Implicit splits/merges (a task with several outgoing or incoming flows)
     # become explicit gateways first -- they are ordinary BPMN, and the
@@ -1224,5 +1252,6 @@ def _resolve_node_type(local: str, indegree: int, outdegree: int) -> NodeType:
         return NodeType.AND_JOIN if is_parallel else NodeType.XOR_JOIN
     raise BpmnError(
         f"gateway is neither a pure split nor a pure join "
-        f"(in={indegree}, out={outdegree}); only block-structured gateways are supported"
+        f"(in={indegree}, out={outdegree}); only block-structured gateways are supported",
+        code="BPMN.mixed-gateway",
     )

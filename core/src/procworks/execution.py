@@ -85,11 +85,43 @@ _AUTO_COMPLETE = frozenset(
 
 
 class ExecutionError(Exception):
-    """Raised when a runtime operation is not allowed in the current state."""
+    """Raised when a runtime operation is not allowed in the current state.
 
-    def __init__(self, message: str) -> None:
+    ``message`` stays the technical English base (tests, API users, logs).
+    ``code``/``params`` let a client word it -- the web client formulates it in
+    its one catalogue ``FINDING_TEXTS`` like any rule finding. Before the
+    Nachtest 2026-09-27 (NT-07) the 409 carried only the message, and a
+    colleague who claimed the same task a second earlier was shown
+    "activity 'act_1' is already claimed by 'a-tom' (W1)". ``params`` name
+    steps by their label (``step``) and agents by id (``agent``), never only
+    by node id: the client may be showing another schema than the instance's.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "EX.not-allowed",
+        params: dict[str, str] | None = None,
+    ) -> None:
         self.message = message
+        self.code = code
+        self.params = params or {}
         super().__init__(message)
+
+
+def _step(schema: ProcessSchema, node_id: str) -> str:
+    """Readable name of a step for an error's ``params`` (label, else its id)."""
+
+    node = schema.nodes.get(node_id)
+    return node.label if node is not None and node.label else node_id
+
+
+def _element(schema: ProcessSchema, element_id: str) -> str:
+    """Readable name of a data element for an error's ``params``."""
+
+    element = schema.data_elements.get(element_id)
+    return element.name if element is not None and element.name else element_id
 
 
 def _new_instance_id() -> str:
@@ -138,7 +170,9 @@ def instantiate(
     if schema.lifecycle_state is not LifecycleState.RELEASED and not allow_unreleased:
         raise ExecutionError(
             f"cannot instantiate schema in state {schema.lifecycle_state.value}; "
-            "only RELEASED schemas can be instantiated"
+            "only RELEASED schemas can be instantiated",
+            code="EX.not-released",
+            params={},
         )
     instance = ProcessInstance(
         id=instance_id or _new_instance_id(),
@@ -212,19 +246,25 @@ def claim_activity(
     binding = schema.service_bindings.get(node_id)
     if binding is not None and binding.automatic:
         raise ExecutionError(
-            f"activity '{node_id}' is automatic and cannot be claimed (W4)"
+            f"activity '{node_id}' is automatic and cannot be claimed (W4)",
+            code="EX.automatic",
+            params={"step": _step(schema, node_id)},
         )
     if instance.node_states[node.id] is not NodeState.ACTIVATED:
         raise ExecutionError(
             f"activity '{node_id}' is not activated "
-            f"(state {instance.node_states[node.id].value})"
+            f"(state {instance.node_states[node.id].value})",
+            code="EX.not-ready",
+            params={"step": _step(schema, node_id)},
         )
     holder = instance.claimed_by.get(node.id)
     if holder == agent_id:
         return instance.model_copy(deep=True)
     if holder is not None:
         raise ExecutionError(
-            f"activity '{node_id}' is already claimed by '{holder}' (W1)"
+            f"activity '{node_id}' is already claimed by '{holder}' (W1)",
+            code="EX.claimed-by-other",
+            params={"step": _step(schema, node_id), "agent": str(holder)},
         )
     if node_id in schema.staff_rules:
         eligible = assignment.eligible_agents(
@@ -233,7 +273,9 @@ def claim_activity(
         if agent_id not in eligible:
             raise ExecutionError(
                 f"agent '{agent_id}' is not eligible to claim activity "
-                f"'{node_id}' (W2)"
+                f"'{node_id}' (W2)",
+                code="EX.not-eligible",
+                params={"step": _step(schema, node_id)},
             )
     result = instance.model_copy(deep=True)
     result.claimed_by[node.id] = agent_id
@@ -263,14 +305,22 @@ def return_activity(
         # E2 (V4): a failed step is recovered via reset (fresh offer +
         # re-stamped clock), never silently returned.
         raise ExecutionError(
-            f"activity '{node_id}' is marked FAILED -- use its reset instead (V4)"
+            f"activity '{node_id}' is marked FAILED -- use its reset instead (V4)",
+            code="EX.failed",
+            params={"step": _step(schema, node_id)},
         )
     holder = instance.claimed_by.get(node.id)
     if holder is None:
-        raise ExecutionError(f"activity '{node_id}' is not claimed")
+        raise ExecutionError(
+            f"activity '{node_id}' is not claimed",
+            code="EX.not-claimed",
+            params={"step": _step(schema, node_id)},
+        )
     if not force and holder != agent_id:
         raise ExecutionError(
-            f"activity '{node_id}' is claimed by '{holder}', not '{agent_id}' (W3)"
+            f"activity '{node_id}' is claimed by '{holder}', not '{agent_id}' (W3)",
+            code="EX.claimed-by-other",
+            params={"step": _step(schema, node_id), "agent": str(holder)},
         )
     result = instance.model_copy(deep=True)
     result.claimed_by.pop(node.id, None)
@@ -323,14 +373,18 @@ def _require_started_owner(
 
     if instance.node_details.get(node_id) is NodeDetailState.FAILED:
         raise ExecutionError(
-            f"activity '{node_id}' is marked FAILED and awaits its reset (V4)"
+            f"activity '{node_id}' is marked FAILED and awaits its reset (V4)",
+            code="EX.failed",
+            params={"step": _step(schema, node_id)},
         )
     if instance.node_states.get(node_id) is NodeState.RUNNING:
         holder = instance.claimed_by.get(node_id)
         if holder != agent_id:
             raise ExecutionError(
                 f"activity '{node_id}' is worked on by '{holder}', not "
-                f"'{agent_id}' (V1)"
+                f"'{agent_id}' (V1)",
+                code="EX.claimed-by-other",
+                params={"step": _step(schema, node_id), "agent": str(holder)},
             )
         return instance.model_copy(deep=True)
     return start_activity(
@@ -362,7 +416,9 @@ def suspend_activity(
     if instance.node_details.get(node_id) is NodeDetailState.SUSPENDED:
         if instance.claimed_by.get(node_id) != agent_id:
             raise ExecutionError(
-                f"activity '{node_id}' is suspended by its owner, not '{agent_id}'"
+                f"activity '{node_id}' is suspended by its owner, not '{agent_id}'",
+                code="EX.suspended-by-other",
+                params={"step": _step(schema, node_id)},
             )
         return instance.model_copy(deep=True)
     result = _require_started_owner(instance, schema, node_id, agent_id, absent_agents)
@@ -381,10 +437,16 @@ def resume_activity(
     _require_running(instance)
     _require_activity(schema, node_id)
     if instance.node_details.get(node_id) is not NodeDetailState.SUSPENDED:
-        raise ExecutionError(f"activity '{node_id}' is not suspended")
+        raise ExecutionError(
+            f"activity '{node_id}' is not suspended",
+            code="EX.not-suspended",
+            params={"step": _step(schema, node_id)},
+        )
     if instance.claimed_by.get(node_id) != agent_id:
         raise ExecutionError(
-            f"activity '{node_id}' can only be resumed by its owner (V2)"
+            f"activity '{node_id}' can only be resumed by its owner (V2)",
+            code="EX.owner-only",
+            params={"step": _step(schema, node_id)},
         )
     result = instance.model_copy(deep=True)
     result.node_details.pop(node_id, None)
@@ -412,7 +474,9 @@ def fail_activity(
     _require_activity(schema, node_id)
     if instance.node_details.get(node_id) is NodeDetailState.SUSPENDED:
         raise ExecutionError(
-            f"activity '{node_id}' is suspended -- resume before failing (V3)"
+            f"activity '{node_id}' is suspended -- resume before failing (V3)",
+            code="EX.suspended",
+            params={"step": _step(schema, node_id)},
         )
     result = _require_started_owner(instance, schema, node_id, agent_id, absent_agents)
     result.node_details[node_id] = NodeDetailState.FAILED
@@ -441,12 +505,18 @@ def reset_activity(
     _require_running(instance)
     _require_activity(schema, node_id)
     if instance.node_details.get(node_id) is not NodeDetailState.FAILED:
-        raise ExecutionError(f"activity '{node_id}' is not marked FAILED")
+        raise ExecutionError(
+            f"activity '{node_id}' is not marked FAILED",
+            code="EX.not-failed",
+            params={"step": _step(schema, node_id)},
+        )
     holder = instance.claimed_by.get(node_id)
     if not force and holder != agent_id:
         raise ExecutionError(
             f"activity '{node_id}' failed under '{holder}'; only they or a "
-            "supervisor may reset it (V4)"
+            "supervisor may reset it (V4)",
+            code="EX.owner-only",
+            params={"step": _step(schema, node_id)},
         )
     result = instance.model_copy(deep=True)
     result.node_details.pop(node_id, None)
@@ -486,7 +556,9 @@ def complete_activity(
     if instance.node_states[node.id] not in (NodeState.ACTIVATED, NodeState.RUNNING):
         raise ExecutionError(
             f"activity '{node_id}' cannot be completed "
-            f"(state {instance.node_states[node.id].value})"
+            f"(state {instance.node_states[node.id].value})",
+            code="EX.not-ready",
+            params={"step": _step(schema, node_id)},
         )
     if agent_id is not None and node_id in schema.staff_rules:
         eligible = assignment.eligible_agents(
@@ -494,7 +566,9 @@ def complete_activity(
         )
         if agent_id not in eligible:
             raise ExecutionError(
-                f"agent '{agent_id}' is not eligible to perform activity '{node_id}'"
+                f"agent '{agent_id}' is not eligible to perform activity '{node_id}'",
+                code="EX.not-eligible",
+                params={"step": _step(schema, node_id)},
             )
     holder = instance.claimed_by.get(node.id)
     if holder is not None and holder != agent_id:
@@ -502,17 +576,23 @@ def complete_activity(
         # nobody else (including an anonymous caller) may complete it.
         raise ExecutionError(
             f"activity '{node_id}' is claimed by '{holder}' and can only be "
-            "completed by them (W2)"
+            "completed by them (W2)",
+            code="EX.claimed-by-other",
+            params={"step": _step(schema, node_id), "agent": str(holder)},
         )
     detail = instance.node_details.get(node.id)
     if detail is NodeDetailState.SUSPENDED:
         # E2 (V2): the §4 automaton only finishes from RUNNING -- resume first.
         raise ExecutionError(
-            f"activity '{node_id}' is suspended -- resume it before completing"
+            f"activity '{node_id}' is suspended -- resume it before completing",
+            code="EX.suspended",
+            params={"step": _step(schema, node_id)},
         )
     if detail is NodeDetailState.FAILED:
         raise ExecutionError(
-            f"activity '{node_id}' is marked FAILED and awaits its reset (V4)"
+            f"activity '{node_id}' is marked FAILED and awaits its reset (V4)",
+            code="EX.failed",
+            params={"step": _step(schema, node_id)},
         )
     result = instance.model_copy(deep=True)
     if agent_id is not None:
@@ -583,7 +663,9 @@ def _advance(
                         raise ExecutionError(
                             f"LOOP_END '{node.id}' repeated without any work in "
                             "between -- the loop is not properly nested with a "
-                            "branch block (K6a); the model must be corrected"
+                            "branch block (K6a); the model must be corrected",
+                            code="EX.loop-broken",
+                            params={},
                         )
                     repeated.add(node.id)
                 progress = True
@@ -608,18 +690,26 @@ def _resolve_xor_branch(
 
     decision = schema.xor_decisions.get(node.id)
     if decision is None:  # pragma: no cover - guarded by K7 at release time
-        raise ExecutionError(f"XOR split '{node.id}' has no branch decision")
+        raise ExecutionError(
+            f"XOR split '{node.id}' has no branch decision",
+            code="EX.no-decision",
+            params={},
+        )
     if decision.discriminator not in instance.data_values:
         raise ExecutionError(
             f"XOR split '{node.id}' needs data element "
-            f"'{decision.discriminator}' but it is not set"
+            f"'{decision.discriminator}' but it is not set",
+            code="EX.value-missing",
+            params={"element": _element(schema, decision.discriminator)},
         )
     value = instance.data_values[decision.discriminator]
     target = resolve_xor_target(decision, value)
     if target is None:
         raise ExecutionError(
             f"XOR split '{node.id}' could not resolve a branch for "
-            f"'{decision.discriminator}'={value!r}"
+            f"'{decision.discriminator}'={value!r}",
+            code="EX.no-branch",
+            params={"element": _element(schema, decision.discriminator)},
         )
     return target
 
@@ -649,18 +739,26 @@ def _resolve_loop_end(
 
     decision = schema.loop_decisions.get(node.id)
     if decision is None:  # pragma: no cover - guarded by K6b at commit time
-        raise ExecutionError(f"LOOP_END '{node.id}' has no loop decision")
+        raise ExecutionError(
+            f"LOOP_END '{node.id}' has no loop decision",
+            code="EX.no-decision",
+            params={},
+        )
     if decision.discriminator not in instance.data_values:
         raise ExecutionError(
             f"LOOP_END '{node.id}' needs data element "
-            f"'{decision.discriminator}' but it is not set"
+            f"'{decision.discriminator}' but it is not set",
+            code="EX.value-missing",
+            params={"element": _element(schema, decision.discriminator)},
         )
     value = instance.data_values[decision.discriminator]
     repeat = resolve_loop_repeat(decision, value)
     if repeat is None:
         raise ExecutionError(
             f"LOOP_END '{node.id}' could not classify "
-            f"'{decision.discriminator}'={value!r} into repeat or exit"
+            f"'{decision.discriminator}'={value!r} into repeat or exit",
+            code="EX.no-branch",
+            params={"element": _element(schema, decision.discriminator)},
         )
     if repeat and decision.max_iterations is not None:
         # Deterministic hard brake (S3): the body has already run
@@ -771,7 +869,9 @@ def _follow_up_fires(link: FollowUpLink, instance: ProcessInstance) -> bool:
     except ConditionError as exc:
         raise ExecutionError(
             f"follow-up '{link.id}' condition '{link.condition}' "
-            f"could not be evaluated: {exc}"
+            f"could not be evaluated: {exc}",
+            code="EX.follow-up-condition",
+            params={},
         ) from exc
 
 
@@ -796,7 +896,9 @@ def _trigger_follow_ups(
         target = context.resolver(link.target_schema_id, link.target_version)
         if target is None:
             raise ExecutionError(
-                f"follow-up target '{link.target_schema_id}' cannot be resolved"
+                f"follow-up target '{link.target_schema_id}' cannot be resolved",
+                code="EX.target-missing",
+                params={},
             )
         initial_data = {
             target_elem: instance.data_values[source_elem]
@@ -837,7 +939,9 @@ def _handle_subprocess(
     if target is None:
         raise ExecutionError(
             f"sub-process target '{binding.target_schema_id}' "
-            f"v{binding.target_version} cannot be resolved"
+            f"v{binding.target_version} cannot be resolved",
+            code="EX.target-missing",
+            params={},
         )
     input_data = {
         target_elem: instance.data_values[parent_elem]
@@ -991,14 +1095,24 @@ def _evaluate_targets(instance: ProcessInstance, schema: ProcessSchema) -> bool:
 def _require_running(instance: ProcessInstance) -> None:
     if instance.state is not InstanceState.RUNNING:
         raise ExecutionError(
-            f"instance '{instance.id}' is not running (state {instance.state.value})"
+            f"instance '{instance.id}' is not running (state {instance.state.value})",
+            code="EX.not-running",
+            params={},
         )
 
 
 def _require_activity(schema: ProcessSchema, node_id: str) -> Node:
     node = schema.nodes.get(node_id)
     if node is None:
-        raise ExecutionError(f"node '{node_id}' does not exist")
+        raise ExecutionError(
+            f"node '{node_id}' does not exist",
+            code="EX.unknown-step",
+            params={},
+        )
     if node.type is not NodeType.ACTIVITY:
-        raise ExecutionError(f"node '{node_id}' is not an ACTIVITY")
+        raise ExecutionError(
+            f"node '{node_id}' is not an ACTIVITY",
+            code="EX.not-activity",
+            params={"step": _step(schema, node_id)},
+        )
     return node

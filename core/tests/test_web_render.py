@@ -1968,3 +1968,58 @@ def test_loading_example_data_shows_the_example_password_once() -> None:
     # Container, ein Schliessen entfernte den Passwort-Dialog sofort wieder.
     assert "showExamplePassword(password); return false;" in confirm.group(0)
     assert "function showExamplePassword(password)" in src
+
+
+# ---------------------------------------------------------------------------
+# Nachtest 2026-09-27, NT-05 bis NT-10 (Web-Client)
+# ---------------------------------------------------------------------------
+
+
+def _fn(src: str, header: str) -> str:
+    body = re.search(rf"\n{re.escape(header)}.*?\n\}}", src, re.S)
+    assert body, f"{header} nicht gefunden -- Waechter angleichen"
+    return body.group(0)
+
+
+def test_step_without_mask_shows_what_it_reads() -> None:
+    """NT-06: „Freigabe pruefen“ ohne Maske zeigte den Betrag nicht, den es freigab."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    body = _fn(src, "async function promptComplete(")
+    assert "readOnlyValues(schema, nodeId, values)" in body
+    # Auch ein Schritt, der nur liest, oeffnet den Dialog (sonst blind abgeschlossen).
+    assert "body.childNodes.length" in body
+    assert 'a.mode === "READ"' in _fn(src, "function readOnlyValues(")
+
+
+def test_demo_banner_uses_one_select_on_narrow_screens() -> None:
+    """NT-05: 13 Rollen-Knoepfe machten die Leiste auf dem Handy bildschirmhoch."""
+
+    body = _fn(APP_JS.read_text(encoding="utf-8"), "function mountDemoBanner(")
+    assert "window.innerWidth <= 720" in body
+    assert "demo-switch-select" in body
+
+
+def test_fit_uses_the_visible_part_of_the_canvas() -> None:
+    """NT-09: Einpassen zentrierte ueber eine teils unsichtbare Hoehe."""
+
+    body = _fn(APP_JS.read_text(encoding="utf-8"), "function attachPanZoom(")
+    assert "function visibleBand()" in body
+    fit = body[body.index("function fitToView()"):]
+    assert "const band = visibleBand();" in fit
+    assert fit.count("ty = band.top +") == 2
+
+
+def test_small_wording_fixes_of_the_nachtest() -> None:
+    """NT-10: technische Woerter und gestapelte Meldungen."""
+
+    src = APP_JS.read_text(encoding="utf-8")
+    assert src.count("conditionCaption(e.condition)") == 2
+    assert "INSTANCE_STATE_LABELS[s]" in _fn(src, "function statePillFor(")
+    assert "Z-Laufzeitaufl" not in src
+    assert "ensureSchemaNames(tasks.map" in _fn(src, "async function viewTasks(")
+    assert "ensureSchemaNames(instances.map" in _fn(src, "async function viewMonitor(")
+    assert 'querySelectorAll(".toast." + kind)' in _fn(src, "function toast(")
+    assert "typeName(d.data_type)" in src and "sub: d.data_type" not in src
+    index = (APP_JS.parent / "index.html").read_text(encoding="utf-8")
+    assert 'href="favicon.svg"' in index and (APP_JS.parent / "favicon.svg").is_file()

@@ -10,3 +10,12 @@
 .venv/
 tests/
 deploy/
+
+# Interne Arbeitsnotizen, nie ins Image.
+CLAUDE.md
+**/CLAUDE.md
+**/CLAUDE*.md
+.claude
+**/.claude
+**/AGENTS.md
+**/SKILL.md

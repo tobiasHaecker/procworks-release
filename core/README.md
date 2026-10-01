@@ -1,7 +1,6 @@
 # ProcWorks — Headless Process Engine Kernel
 
-Der vollständige Backend-Kern von ProcWorks (alle Roadmap-Schritte des
-Architektur-Konzepts sind umgesetzt: Meta-Modell, Validator, Change-Operationen,
+Der vollständige Backend-Kern von ProcWorks (umgesetzt sind Meta-Modell, Validator, Change-Operationen,
 Execution Engine, Komposition, Ad-hoc-Änderung, Migration, Activity Repository,
 Daten-Connectoren, BPMN-Import/Export, Monitoring/Audit und die offene
 `/v1`-Integrationsschicht). Er setzt **Correctness by Construction (CbC)** durch:
@@ -794,10 +793,14 @@ construction. Mit `password_backend` entstehen zusätzlich acht Logins
 durchklicken will, sieht unter dieser Anmeldung jede Aufgabe in einer Liste, ohne
 dass die Rollentrennung im Modell aufgeweicht wäre.
 
-Die Begründung jeder Modellierungsentscheidung — warum die Bonitätsprüfung
-hinter dem AND-Block steht, warum die Folgeprozess-Bedingungen an Ankreuzfeldern
-hängen, wie der kritische Pfad in den 60-Tage-Termin passt — steht im
-Konzeptdokument des Datensatzes (projektintern, `docs/`).
+Drei Modellierungsentscheidungen, die man beim Durchklicken sieht: Die
+Bonitätsprüfung steht **hinter** dem AND-Block, weil sie den Auftragswert als
+Eingang braucht, der erst in der Kalkulation entsteht. Die
+Folgeprozess-Bedingungen lesen Ankreuzfelder des Abschlussschritts, weil ein
+Ankreuzfeld auf jedem Pfad einen Wert liefert – ein Betrag, der auf dem
+Absage-Pfad nie geschrieben wird, ließe die Bedingung beim Abschluss scheitern.
+Und der kritische Pfad passt mit gut einem Tag Puffer in den 60-Tage-Termin, so
+dass eine unbedachte Fristverlängerung im Editor abgelehnt wird (Regel T2).
 
 ### Reset über die API
 
@@ -857,8 +860,7 @@ Instanzzustände.
 
 ## Deployment (Container, Reverse Proxy, Helm, CI/CD)
 
-Der gesamte Stack ist quelloffen und containerisiert (Abschnitt 11 des
-Architektur-Konzepts). Der API-Server ist **zustandslos** und horizontal
+Der gesamte Stack ist quelloffen und containerisiert. Der API-Server ist **zustandslos** und horizontal
 skalierbar; der Web-Client wird statisch über **Caddy** ausgeliefert, das
 zugleich als Reverse Proxy mit automatischem TLS dient und `/api/*` an die API
 weiterreicht.
@@ -880,10 +882,13 @@ docker compose -f deploy/docker-compose.full.yml up --build
   öffentliches HTTPS `SITE_ADDRESS` auf die Domain und `ACME_EMAIL` setzen.
 - **Kubernetes:** Helm-Chart unter [`../deploy/helm/`](../deploy/helm/)
   (API-/Web-Deployment + Service, optionales Ingress, `DATABASE_URL`-Secret;
-  PostgreSQL wird extern bereitgestellt).
-- **CI/CD:** [`../.github/workflows/release.yml`](../.github/workflows/release.yml)
-  baut beide Images, scannt sie mit **Trivy** und pusht sie bei einem
-  Versions-Tag (`v*`) nach **ghcr.io**.
+  PostgreSQL wird extern bereitgestellt). Ohne Anpassung zieht es die
+  veröffentlichten Images `ghcr.io/tobiashaecker/procworks-api` und
+  `-web` in der Version des Charts (`appVersion`); eine eigene Registry
+  setzen `image.registry` und `image.repository` (gemeinsames Präfix, das
+  Chart hängt `-api`/`-web` an) in `values.yaml`.
+- **CI/CD:** Die Images werden bei jedem Release gebaut, mit **Trivy** geprüft
+  und auf **ghcr.io** veröffentlicht.
 
 ## Lizenz
 

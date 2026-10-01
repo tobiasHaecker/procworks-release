@@ -111,7 +111,7 @@ def test_api_reports_history_of_a_real_run() -> None:
     assert steps["A"]["completed"] == 1 and steps["A"]["avg_total_seconds"] is not None
 
 
-# --- Teilprozesse im Soll/Ist (Nachtest 2026-09-22, Mangel 6) --------------
+# --- Teilprozesse im Soll/Ist ----------------------------------------------
 
 
 def _parent_with_subprocess(name: str, *, subprocess_last: bool) -> tuple[str, str, str]:

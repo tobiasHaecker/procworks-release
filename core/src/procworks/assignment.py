@@ -23,7 +23,7 @@ and the instance markings.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
@@ -34,6 +34,7 @@ from procworks.model import (
     AbsenceEntry,
     EscalationKind,
     InstanceState,
+    Node,
     NodeDetailState,
     NodeState,
     NodeType,
@@ -53,7 +54,7 @@ _DEFAULT_PRIORITY = WorkItemPriority()
 
 
 class DisplayValue(BaseModel):
-    """One value that names an instance (``ProcessSchema.display_fields``, VAL-17).
+    """One value that names an instance (``ProcessSchema.display_fields``).
 
     ``value`` is the raw instance value (``None`` while unset); wording and
     number/date formatting are the client's matter, as everywhere.
@@ -91,7 +92,7 @@ class OpenTask(BaseModel):
 
     The time fields (``target_seconds`` .. ``time_criticality``) are the derived,
     never-persisted view of the time-based worklist prioritisation
-    (Zeitbasierte-Priorisierung-Konzept). They are all optional / ``NONE`` by
+    (see :mod:`procworks.worklist_priority`). They are all optional / ``NONE`` by
     default, so a task without a modelled target time behaves exactly as before.
     """
 
@@ -133,7 +134,7 @@ class OpenTask(BaseModel):
     detail: NodeDetailState | None = None
     #: Reason text of a FAILED detail (empty otherwise).
     detail_reason: str = ""
-    #: The values that name the instance (``display_fields``, VAL-17) -- two
+    #: The values that name the instance (``display_fields``) -- two
     #: equal tasks of different instances were indistinguishable in a worklist.
     context: list[DisplayValue] = Field(default_factory=list)
 
@@ -252,7 +253,7 @@ def open_tasks(
       priority (most urgent first, roadmap E8), then label/node_id. Fully
       backward compatible.
     * **with** a ``TimeContext``: by the time-based lexicographic key of the
-      prioritisation concept (Section 5.3) -- time criticality band first
+      worklist prioritisation -- time criticality band first
       (deadline risk dominates), then business priority, then earliest due date,
       then label/node_id. The time fields of each :class:`OpenTask` are filled
       from the derived assessment.
@@ -266,12 +267,7 @@ def open_tasks(
     if instance.state is not InstanceState.RUNNING:
         return tasks
     context = display_values(schema, instance)
-    for node_id, node_state in instance.node_states.items():
-        if node_state not in (NodeState.ACTIVATED, NodeState.RUNNING):
-            continue
-        node = schema.nodes.get(node_id)
-        if node is None or node.type is not NodeType.ACTIVITY:
-            continue
+    for node_id, node in _open_activities(schema, instance):
         if node_id not in schema.staff_rules:
             continue
         priority = schema.node_priorities.get(node_id, _DEFAULT_PRIORITY)
@@ -315,9 +311,29 @@ def open_tasks(
     return tasks
 
 
+def _open_activities(
+    schema: ProcessSchema, instance: ProcessInstance
+) -> Iterator[tuple[str, Node]]:
+    """Yield the open ACTIVITY nodes of ``instance`` as ``(node_id, node)``.
+
+    Open means marked ACTIVATED or RUNNING. Nodes of the marking that the
+    schema does not know are skipped, as are all non-ACTIVITY nodes (gateways,
+    sub-processes). The order is that of ``instance.node_states``; callers sort
+    their result themselves. Staff rules, service bindings and the instance
+    state are deliberately *not* looked at here -- :func:`open_tasks` and
+    :func:`unstaffed_steps` filter those differently.
+    """
+
+    for node_id, node_state in instance.node_states.items():
+        if node_state not in (NodeState.ACTIVATED, NodeState.RUNNING):
+            continue
+        node = schema.nodes.get(node_id)
+        if node is not None and node.type is NodeType.ACTIVITY:
+            yield node_id, node
+
 
 class UnstaffedStep(BaseModel):
-    """An open human step of a running instance that nobody may work (VAL-09).
+    """An open human step of a running instance that nobody may work.
 
     ``reason`` is ``"no_rule"`` (an interactive step without a staff rule --
     e.g. an ad-hoc step from before the B2 gate) or ``"nobody"`` (the rule
@@ -358,12 +374,7 @@ def unstaffed_steps(
     result: list[UnstaffedStep] = []
     if instance.state is not InstanceState.RUNNING:
         return result
-    for node_id, node_state in instance.node_states.items():
-        if node_state not in (NodeState.ACTIVATED, NodeState.RUNNING):
-            continue
-        node = schema.nodes.get(node_id)
-        if node is None or node.type is not NodeType.ACTIVITY:
-            continue
+    for node_id, node in _open_activities(schema, instance):
         binding = schema.service_bindings.get(node_id)
         if binding is not None and binding.automatic:
             continue
@@ -407,15 +418,9 @@ def _resolve(org: OrgModel, rule: StaffRule, instance: ProcessInstance) -> set[s
     if not operands:
         return set()
     if rule.kind is StaffRuleKind.AND:
-        result = set(operands[0])
-        for operand in operands[1:]:
-            result &= operand
-        return result
+        return operands[0].intersection(*operands[1:])
     if rule.kind is StaffRuleKind.OR:
-        result = set()
-        for operand in operands:
-            result |= operand
-        return result
+        return set[str]().union(*operands)
     # EXCEPT: left minus right.
     return operands[0] - operands[1] if len(operands) >= 2 else set(operands[0])
 
@@ -428,12 +433,12 @@ def _supervisor_of_performer(
     The supervisor is the nearest manager **above the performer**: the manager
     of the performer's org unit -- unless that is the performer themself or the
     unit has no manager; then the search goes up the ``parent_id`` chain
-    (Nachtest 2026-09-27, NT-03). Before, a unit head who filed their own
-    leave request was its only approver: "Vorgesetzte:r" resolved to the head
-    of their own unit, i.e. to themself, and the four-eyes principle was gone.
+    -- so a unit head who files their own leave request is never its only
+    approver: "Vorgesetzte:r" must not resolve to the performer themself, or
+    the four-eyes principle would be gone.
 
     Returns ``None`` -- an empty eligible set, which the monitoring shows as
-    "Niemand zuständig" (VAL-09) -- when the referenced node has no recorded
+    "Niemand zuständig" -- when the referenced node has no recorded
     performer yet, the performer is not in the org model or has no org unit,
     or no unit up the chain has a manager other than the performer. The result
     is always the manager of *some* unit, so the design-time over-approximation
@@ -461,7 +466,7 @@ def _supervisor_of_performer(
 
 
 def _four_eyes_performers(rule: StaffRule, instance: ProcessInstance) -> frozenset[str]:
-    """Performers whose work a rule has someone *else* approve (NT-03).
+    """Performers whose work a rule has someone *else* approve.
 
     Every ``NODE_PERFORMING_AGENT_SUPERVISOR`` term in the rule tree names a
     step whose performer must not end up approving it. The supervisor itself
@@ -498,7 +503,7 @@ def _with_deputies(
     visited guard so deputy cycles terminate. The base agents are always kept.
 
     ``never`` are agents a deputy edge must not lead to -- the performers a
-    four-eyes rule is about (:func:`_four_eyes_performers`, NT-03). The chain
+    four-eyes rule is about (:func:`_four_eyes_performers`). The chain
     does not continue through them either.
     """
 

@@ -257,7 +257,11 @@ helm upgrade <release> ./deploy/helm \
 kubectl scale deploy/<release>-procworks-api --replicas=2
 ```
 
-Danach den fertigen Restore-Job wieder abschalten (`backup.restore.enabled=false`).
+Ohne `backup.restore.file` spielt der Job die neueste Sicherung zurück. Solange
+noch API-Pods mit der Datenbank verbunden sind, bricht er ab, statt über einen
+laufenden Betrieb zu schreiben; die API wendet nach dem Hochskalieren nötige
+Datenbank-Updates selbst an. Danach den fertigen Restore-Job wieder abschalten
+(`backup.restore.enabled=false`).
 
 ---
 

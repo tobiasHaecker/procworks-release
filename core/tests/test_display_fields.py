@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Instances and tasks are named by their data (Validierung 2026-09-25, VAL-17).
+"""Instances and tasks are named by their data.
 
 Instances were called ``instance_14``; a worklist showed only step and process,
 so two equal tasks of different instances looked the same. A schema names up

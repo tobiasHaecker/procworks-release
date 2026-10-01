@@ -4,8 +4,7 @@
 Neben dem schlanken Demo-Kosmos (:mod:`procworks.demo`, Urlaubsantrag und
 Beschaffung) laedt dieses Modul den **kompletten Order-to-Cash-Wertstrom**:
 Kundenanfrage -> Angebot -> Auftrag -> Lieferung -> Rechnung -> Zahlungseingang
--> Forderungsmanagement. Konzept und Begruendung der Modellierung stehen in
-``docs/Order-to-Cash-Demoprozess-Konzept.md``.
+-> Forderungsmanagement.
 
 Warum eine **Prozessfamilie** statt eines einzigen Schemas: Der Kern ist
 block-strukturiert und zyklenfrei, und ein Schema mit ~100 Knoten waere auf der
@@ -48,8 +47,8 @@ from procworks import execution as exe
 from procworks import operations as ops
 from procworks import org as org_ops
 from procworks.audit import AuditLog, EventType
-from procworks.auth_password import PasswordAuthBackend, User, hash_password
-from procworks.demo import DEMO_PASSWORD, BackdatedAudit
+from procworks.auth_password import PasswordAuthBackend
+from procworks.demo import DEMO_PASSWORD, BackdatedAudit, _emit, _seed_logins
 from procworks.model import (
     AbsenceEntry,
     AccessMode,
@@ -185,6 +184,30 @@ def _system_form(
         )
     )
     return ops.set_form(schema, node_id, title=title, fields=marked)
+
+
+def _schema_resolver(schemas: dict[str, ProcessSchema]) -> SchemaResolver:
+    """Aufloeser ueber die in diesem Lauf gebauten Schemata der Prozessfamilie.
+
+    Teil- und Folgeprozesse muessen beim Binden (H1/F1) und beim Ausfuehren
+    aufloesbar sein, bevor irgendetwas im Store liegt -- deshalb loest dieser
+    Aufloeser gegen das lokale Woerterbuch auf, nicht gegen den Store.
+
+    :param schemas: Schema-Id -> Schema; wird **nicht kopiert**, spaeter
+        eingetragene Schemata sind also ebenfalls aufloesbar (``load_o2c``
+        fuellt das Woerterbuch erst nach dem Anlegen des Aufloesers)
+    :returns: ``resolver(schema_id, version)``: das Schema, oder ``None``, wenn
+        die Id unbekannt ist oder eine *verlangte* Version nicht passt
+        (``version=None`` nimmt die vorliegende)
+    """
+
+    def resolver(schema_id: str, version: int | None) -> ProcessSchema | None:
+        schema = schemas.get(schema_id)
+        if schema is None or (version is not None and schema.version != version):
+            return None
+        return schema
+
+    return resolver
 
 
 # --- Organisation ---------------------------------------------------------
@@ -2107,26 +2130,6 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
 # --- Laufzeit: geseedete Instanzen ----------------------------------------
 
 
-def _emit(
-    audit: AuditLog,
-    event_type: EventType,
-    instance: ProcessInstance,
-    *,
-    node_id: str | None = None,
-    label: str | None = None,
-    agent_id: str | None = None,
-) -> None:
-    audit.append(
-        event_type,
-        instance.id,
-        instance.schema_id,
-        schema_version=instance.schema_version,
-        node_id=node_id,
-        label=label,
-        agent_id=agent_id,
-    )
-
-
 class _Seeder:
     """Kleiner Fahrer fuer die geseedete Startlage.
 
@@ -2235,10 +2238,9 @@ class _Seeder:
         Aufruf von aussen. Ohne diesen Nachtrag fehlten im Eltern-Vorgang der
         **Abschluss des Teilprozess-Schritts** und -- wenn der Teilprozess sein
         letzter Schritt war -- der **Abschluss des Vorgangs selbst**. Folge im
-        Schaufenster: Die Soll/Ist-Karte hielt jeden Teilprozess fuer „nie
+        Schaufenster: Die Soll/Ist-Karte hielte jeden Teilprozess fuer „nie
         ausgefuehrt" und meldete den Uebergang darueber hinweg als Abweichung
-        (Nachtest 2026-09-22, Mangel 6) -- beide gemeldeten Abweichungen des
-        Order-to-Cash-Datensatzes waren genau dieser Fehlalarm.
+        -- ein Fehlalarm im Order-to-Cash-Datensatz.
 
         Laeuft die Elternkette hoch und haelt an der ersten Stelle an, an der der
         Rueckfluss nachweislich nicht stattgefunden hat (veraltete Kind-Instanz
@@ -2403,6 +2405,99 @@ def _kalkulation(einzelpreis: float, menge: int) -> dict[str, object]:
     }
 
 
+def _seed_anfrage(
+    seeder: _Seeder,
+    instance_id: str,
+    *,
+    kunde: str,
+    kunden_nr: int,
+    artikel: str,
+    menge: int,
+    tage_zurueck: int,
+    lager_bestand: int,
+    einzelpreis: float,
+) -> None:
+    """Startet einen Vorgang und spielt ihn bis zur fertigen Kalkulation.
+
+    Der gemeinsame Anfang fast aller geseedeten Vorgaenge: Start, "Kundenanfrage
+    erfassen" (Nadja), "Verfuegbarkeit vorab klaeren" (Lars) und "Preis und
+    Konditionen kalkulieren" (Nadja) -- genau in dieser Reihenfolge, denn die
+    Reihenfolge der Aufrufe bestimmt die Reihenfolge der Audit-Ereignisse und
+    damit den zurueckdatierten Zeitverlauf (:class:`BackdatedAudit`).
+
+    Danach steht der Vorgang am Teilprozess Bonitaet (die Kind-Instanz laeuft
+    bereits), weiter geht es mit :func:`_seed_angebot`.
+
+    :param seeder: der Fahrer der geseedeten Startlage
+    :param instance_id: Id des neu zu startenden Hauptprozess-Vorgangs
+    :param kunde: Kundenname (auch Teil der Lieferadresse)
+    :param kunden_nr: Kundennummer
+    :param artikel: angefragter Artikel
+    :param menge: angefragte Menge -- geht in Anfrage *und* Kalkulation ein
+    :param tage_zurueck: wie viele Tage vor heute die Anfrage einging
+    :param lager_bestand: Ergebnis der Verfuegbarkeitspruefung
+    :param einzelpreis: Einzelpreis der Kalkulation (EUR)
+    """
+
+    seeder.start(SCHEMA_MAIN, instance_id)
+    seeder.do(
+        instance_id,
+        "Kundenanfrage erfassen",
+        "a-nadja",
+        _anfrage_daten(kunde, kunden_nr, artikel, menge, tage_zurueck),
+    )
+    seeder.do(
+        instance_id, "Verfügbarkeit vorab klären", "a-lars", {"lager_bestand": lager_bestand}
+    )
+    seeder.do(
+        instance_id,
+        "Preis und Konditionen kalkulieren",
+        "a-nadja",
+        _kalkulation(einzelpreis, menge),
+    )
+
+
+def _seed_angebot(
+    seeder: _Seeder,
+    instance_id: str,
+    *,
+    score: int,
+    limit: float,
+    angebots_nr: str,
+    angebot_status: str,
+) -> None:
+    """Spielt Bonitaetspruefung, Angebot und Kundenrueckmeldung eines Vorgangs.
+
+    Fortsetzung von :func:`_seed_anfrage`: der Teilprozess Bonitaet komplett
+    (:func:`_run_bonitaet`), dann "Angebot erstellen und versenden" und
+    "Kundenrueckmeldung erfassen" (beide Nadja). Die Rueckmeldung entscheidet
+    den XOR-Split der Kundenentscheidung -- welcher Zweig danach offen ist,
+    ergibt sich aus ``angebot_status`` durch die Engine, nicht durch den Seeder.
+
+    :param seeder: der Fahrer der geseedeten Startlage
+    :param instance_id: Id des Vorgangs (steht am Teilprozess Bonitaet)
+    :param score: Bonitaetsindex; bestimmt den Zweig im Teilprozess
+    :param limit: vorgeschlagenes und gesetztes Kreditlimit (EUR)
+    :param angebots_nr: Nummer des versendeten Angebots
+    :param angebot_status: Antwort des Kunden ("Angenommen", "Abgelehnt",
+        "Nachverhandlung")
+    """
+
+    _run_bonitaet(seeder, instance_id, score=score, limit=limit)
+    seeder.do(
+        instance_id,
+        "Angebot erstellen und versenden",
+        "a-nadja",
+        {"angebots_nr": angebots_nr},
+    )
+    seeder.do(
+        instance_id,
+        "Kundenrückmeldung erfassen",
+        "a-nadja",
+        {"angebot_status": angebot_status},
+    )
+
+
 def _seed_instances(
     schemas: dict[str, ProcessSchema], instance_store: InstanceStore, audit: AuditLog
 ) -> None:
@@ -2415,15 +2510,7 @@ def _seed_instances(
     zwanzig Schritte klicken.
     """
 
-    ctx = exe.ExecutionContext(
-        lambda schema_id, version: (
-            None
-            if (s := schemas.get(schema_id)) is None
-            or (version is not None and s.version != version)
-            else s
-        ),
-        instance_store,
-    )
+    ctx = exe.ExecutionContext(_schema_resolver(schemas), instance_store)
     seeder = _Seeder(schemas, ctx, audit)
     heute = datetime.now(UTC).date()
 
@@ -2441,39 +2528,37 @@ def _seed_instances(
     seeder.do("o2c-2026-002", "Verfügbarkeit vorab klären", "a-lars", {"lager_bestand": 950})
 
     # 3) Der Teilprozess Bonitaet laeuft -- eine echte Kind-Instanz wartet.
-    seeder.start(SCHEMA_MAIN, "o2c-2026-003")
-    seeder.do(
+    _seed_anfrage(
+        seeder,
         "o2c-2026-003",
-        "Kundenanfrage erfassen",
-        "a-nadja",
-        _anfrage_daten("Süd-West Anlagenbau AG", 10044, "Hydraulikzylinder HZ-90", 12, 4),
-    )
-    seeder.do("o2c-2026-003", "Verfügbarkeit vorab klären", "a-lars", {"lager_bestand": 4})
-    seeder.do(
-        "o2c-2026-003", "Preis und Konditionen kalkulieren", "a-nadja", _kalkulation(740.0, 12)
+        kunde="Süd-West Anlagenbau AG",
+        kunden_nr=10044,
+        artikel="Hydraulikzylinder HZ-90",
+        menge=12,
+        tage_zurueck=4,
+        lager_bestand=4,
+        einzelpreis=740.0,
     )
 
     # 4) Grossauftrag -- wartet auf die Freigabe der Geschaeftsfuehrung.
-    seeder.start(SCHEMA_MAIN, "o2c-2026-004")
-    seeder.do(
+    _seed_anfrage(
+        seeder,
         "o2c-2026-004",
-        "Kundenanfrage erfassen",
-        "a-nadja",
-        _anfrage_daten("Nordlicht Energietechnik GmbH", 10077, "Schaltschrank NX-40", 25, 9),
+        kunde="Nordlicht Energietechnik GmbH",
+        kunden_nr=10077,
+        artikel="Schaltschrank NX-40",
+        menge=25,
+        tage_zurueck=9,
+        lager_bestand=0,
+        einzelpreis=1940.0,
     )
-    seeder.do("o2c-2026-004", "Verfügbarkeit vorab klären", "a-lars", {"lager_bestand": 0})
-    seeder.do(
-        "o2c-2026-004", "Preis und Konditionen kalkulieren", "a-nadja", _kalkulation(1940.0, 25)
-    )
-    _run_bonitaet(seeder, "o2c-2026-004", score=55, limit=60000.0)
-    seeder.do(
+    _seed_angebot(
+        seeder,
         "o2c-2026-004",
-        "Angebot erstellen und versenden",
-        "a-nadja",
-        {"angebots_nr": "AN-2026-0231"},
-    )
-    seeder.do(
-        "o2c-2026-004", "Kundenrückmeldung erfassen", "a-nadja", {"angebot_status": "Angenommen"}
+        score=55,
+        limit=60000.0,
+        angebots_nr="AN-2026-0231",
+        angebot_status="Angenommen",
     )
     seeder.do(
         "o2c-2026-004",
@@ -2483,26 +2568,24 @@ def _seed_instances(
     )
 
     # 5) In der Logistik: Fertigungsauftrag steht, Kommissionierung offen.
-    seeder.start(SCHEMA_MAIN, "o2c-2026-005")
-    seeder.do(
+    _seed_anfrage(
+        seeder,
         "o2c-2026-005",
-        "Kundenanfrage erfassen",
-        "a-nadja",
-        _anfrage_daten("Alpin Fenster GmbH", 10088, "Aluprofil AP-220", 300, 16),
+        kunde="Alpin Fenster GmbH",
+        kunden_nr=10088,
+        artikel="Aluprofil AP-220",
+        menge=300,
+        tage_zurueck=16,
+        lager_bestand=40,
+        einzelpreis=38.0,
     )
-    seeder.do("o2c-2026-005", "Verfügbarkeit vorab klären", "a-lars", {"lager_bestand": 40})
-    seeder.do(
-        "o2c-2026-005", "Preis und Konditionen kalkulieren", "a-nadja", _kalkulation(38.0, 300)
-    )
-    _run_bonitaet(seeder, "o2c-2026-005", score=88, limit=25000.0)
-    seeder.do(
+    _seed_angebot(
+        seeder,
         "o2c-2026-005",
-        "Angebot erstellen und versenden",
-        "a-nadja",
-        {"angebots_nr": "AN-2026-0198"},
-    )
-    seeder.do(
-        "o2c-2026-005", "Kundenrückmeldung erfassen", "a-nadja", {"angebot_status": "Angenommen"}
+        score=88,
+        limit=25000.0,
+        angebots_nr="AN-2026-0198",
+        angebot_status="Angenommen",
     )
     seeder.do(
         "o2c-2026-005",
@@ -2558,52 +2641,45 @@ def _seed_instances(
 
     # 8) Nachverhandlung -- der dritte Zweig der Kundenentscheidung, und die
     #    einzige offene Aufgabe der Vertriebsleitung.
-    seeder.start(SCHEMA_MAIN, "o2c-2026-008")
-    seeder.do(
+    _seed_anfrage(
+        seeder,
         "o2c-2026-008",
-        "Kundenanfrage erfassen",
-        "a-nadja",
-        _anfrage_daten("Bergmann Kunststofftechnik GmbH", 10126, "Spritzgussform SF-3", 2, 12),
+        kunde="Bergmann Kunststofftechnik GmbH",
+        kunden_nr=10126,
+        artikel="Spritzgussform SF-3",
+        menge=2,
+        tage_zurueck=12,
+        lager_bestand=0,
+        einzelpreis=9800.0,
     )
-    seeder.do("o2c-2026-008", "Verfügbarkeit vorab klären", "a-lars", {"lager_bestand": 0})
-    seeder.do(
-        "o2c-2026-008", "Preis und Konditionen kalkulieren", "a-nadja", _kalkulation(9800.0, 2)
-    )
-    _run_bonitaet(seeder, "o2c-2026-008", score=64, limit=30000.0)
-    seeder.do(
+    _seed_angebot(
+        seeder,
         "o2c-2026-008",
-        "Angebot erstellen und versenden",
-        "a-nadja",
-        {"angebots_nr": "AN-2026-0260"},
-    )
-    seeder.do(
-        "o2c-2026-008",
-        "Kundenrückmeldung erfassen",
-        "a-nadja",
-        {"angebot_status": "Nachverhandlung"},
+        score=64,
+        limit=30000.0,
+        angebots_nr="AN-2026-0260",
+        angebot_status="Nachverhandlung",
     )
 
     # 9) Abbruchpfad: der Kunde hat abgelehnt, der Vorgang endet frueh.
-    seeder.start(SCHEMA_MAIN, "o2c-2026-009")
-    seeder.do(
+    _seed_anfrage(
+        seeder,
         "o2c-2026-009",
-        "Kundenanfrage erfassen",
-        "a-nadja",
-        _anfrage_daten("Tiefbau Zeller GmbH", 10131, "Rohrschelle RS-160", 500, 25),
+        kunde="Tiefbau Zeller GmbH",
+        kunden_nr=10131,
+        artikel="Rohrschelle RS-160",
+        menge=500,
+        tage_zurueck=25,
+        lager_bestand=1200,
+        einzelpreis=4.2,
     )
-    seeder.do("o2c-2026-009", "Verfügbarkeit vorab klären", "a-lars", {"lager_bestand": 1200})
-    seeder.do(
-        "o2c-2026-009", "Preis und Konditionen kalkulieren", "a-nadja", _kalkulation(4.2, 500)
-    )
-    _run_bonitaet(seeder, "o2c-2026-009", score=72, limit=8000.0)
-    seeder.do(
+    _seed_angebot(
+        seeder,
         "o2c-2026-009",
-        "Angebot erstellen und versenden",
-        "a-nadja",
-        {"angebots_nr": "AN-2026-0088"},
-    )
-    seeder.do(
-        "o2c-2026-009", "Kundenrückmeldung erfassen", "a-nadja", {"angebot_status": "Abgelehnt"}
+        score=72,
+        limit=8000.0,
+        angebots_nr="AN-2026-0088",
+        angebot_status="Abgelehnt",
     )
     seeder.do(
         "o2c-2026-009",
@@ -2621,7 +2697,6 @@ def _seed_instances(
             "abschluss_notiz": "Kunde hat sich für einen Mitbewerber entschieden.",
         },
     )
-
 
 def _seed_completed_order(
     seeder: _Seeder,
@@ -2647,32 +2722,24 @@ def _seed_completed_order(
 
     heute = datetime.now(UTC).date()
     wert = round(einzelpreis * menge, 2)
-    seeder.start(SCHEMA_MAIN, instance_id)
-    seeder.do(
+    _seed_anfrage(
+        seeder,
         instance_id,
-        "Kundenanfrage erfassen",
-        "a-nadja",
-        _anfrage_daten(kunde, kunden_nr, artikel, menge, 40),
+        kunde=kunde,
+        kunden_nr=kunden_nr,
+        artikel=artikel,
+        menge=menge,
+        tage_zurueck=40,
+        lager_bestand=menge * 3,
+        einzelpreis=einzelpreis,
     )
-    seeder.do(instance_id, "Verfügbarkeit vorab klären", "a-lars", {"lager_bestand": menge * 3})
-    seeder.do(
+    _seed_angebot(
+        seeder,
         instance_id,
-        "Preis und Konditionen kalkulieren",
-        "a-nadja",
-        _kalkulation(einzelpreis, menge),
-    )
-    _run_bonitaet(seeder, instance_id, score=84, limit=max(wert * 2, 20000.0))
-    seeder.do(
-        instance_id,
-        "Angebot erstellen und versenden",
-        "a-nadja",
-        {"angebots_nr": angebots_nr},
-    )
-    seeder.do(
-        instance_id,
-        "Kundenrückmeldung erfassen",
-        "a-nadja",
-        {"angebot_status": "Angenommen"},
+        score=84,
+        limit=max(wert * 2, 20000.0),
+        angebots_nr=angebots_nr,
+        angebot_status="Angenommen",
     )
     seeder.do(
         instance_id,
@@ -2777,28 +2844,17 @@ def _seed_absences(absence_store: AbsenceStore) -> None:
 def _seed_users(backend: PasswordAuthBackend, password: str = DEMO_PASSWORD) -> int:
     """Legt die Logins dieses Datensatzes an (idempotent); zaehlt die neuen.
 
-    ``password`` gilt fuer alle angelegten Logins: das veroeffentlichte
-    ``DEMO_PASSWORD`` nur in der oeffentlichen Demo, sonst ein zufaelliges
-    (NT-04, siehe ``demo._seed_users``).
+    Legt :data:`O2C_USERS` ueber den gemeinsamen Helfer ``demo._seed_logins``
+    an -- derselbe Weg wie im Basis-Demo, ein vorhandener Login bleibt unberuehrt.
+
+    :param backend: das Passwort-Backend, das die Logins aufnimmt
+    :param password: gilt fuer alle angelegten Logins: das veroeffentlichte
+        ``DEMO_PASSWORD`` nur in der oeffentlichen Demo, sonst ein zufaelliges
+        (siehe ``demo._seed_users``)
+    :returns: Anzahl der neu angelegten Logins
     """
 
-    seeded = 0
-    for login, name, roles, agent_id in O2C_USERS:
-        if backend.store.get_user(login) is not None:
-            continue
-        backend.store.put_user(
-            User(
-                login=login,
-                password_hash=hash_password(password),
-                subject=login,
-                agent_id=agent_id,
-                roles=roles,
-                display_name=name,
-                must_change=False,
-            )
-        )
-        seeded += 1
-    return seeded
+    return _seed_logins(backend, O2C_USERS, password)
 
 
 def load_o2c(
@@ -2834,12 +2890,7 @@ def load_o2c(
     org_store.put(org)
 
     schemas: dict[str, ProcessSchema] = {}
-
-    def resolver(schema_id: str, version: int | None) -> ProcessSchema | None:
-        schema = schemas.get(schema_id)
-        if schema is None or (version is not None and schema.version != version):
-            return None
-        return schema
+    resolver = _schema_resolver(schemas)
 
     for build in (
         _build_bonitaet,

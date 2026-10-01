@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Waechter fuer die gefuehrte Tour des Web-Clients (``docs/Tutorial-Konzept.md``).
+"""Waechter fuer die gefuehrte Tour des Web-Clients.
 
 Die Tour traegt **keine** Korrektheitslogik -- aber drei Zusagen, die still
 brechen koennen, weil sie ueber die Grenze zwischen Web-Client und Kern laufen:
@@ -116,7 +116,7 @@ def test_tour_writes_nothing(app_js: str) -> None:
     Statischer Nachweis, dass ``request()`` die Tour zuerst fragt und erst
     danach ``fetch`` erreicht. Rutscht die Abfrage hinter das ``fetch`` (oder
     verschwindet sie), wuerden Tutorial-Eingaben echte, dauerhafte Daten
-    erzeugen -- genau das, was das Konzept ausschliesst.
+    erzeugen -- genau das, was die Tour ausschliesst.
     """
 
     body = re.search(r"async function request\(.*?\n\}", app_js, re.S)
@@ -532,7 +532,7 @@ def test_tour_rejection_matches_the_shape_the_client_renders() -> None:
 
 
 def test_cutouts_never_cancel_each_other_out() -> None:
-    """Nachtest 2026-09-22, Mangel 5: Schritt 5 und 7 waren nicht ausfuehrbar.
+    """Tour-Schritte mit Anker in der Schritt-Karte bleiben ausfuehrbar.
 
     ``cutoutStyle`` schneidet die freien Bereiche als Loecher in EIN Polygon.
     Bei der nonzero-Fuellregel zaehlt jedes Loch einmal gegen die Umlaufzahl des
@@ -606,7 +606,7 @@ def test_overlay_follows_a_scroll_without_scrolling_again() -> None:
 
 
 def test_menu_anchors_on_mobile_point_to_the_menu_button() -> None:
-    """VAL-32: Auf Handy-Breite zeigte die Admin-Tour auf „Administration“ in
+    """Auf Handy-Breite zeigte die Admin-Tour sonst auf „Administration“ in
     der geschlossenen Menue-Schublade (ausserhalb des Bildes) und sagte „links
     im Menue“ -- sie liess sich nicht fortsetzen. Solange die Schublade zu ist,
     zeigt die Tour auf den Menue-Knopf und nennt den Eintrag."""

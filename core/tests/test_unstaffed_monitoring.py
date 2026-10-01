@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Stalled instances show up in the monitoring (Validierung 2026-09-25, VAL-09).
+"""Stalled instances show up in the monitoring.
 
 Instances whose open step nobody may work -- an empty rule, an ad-hoc step
 without rule, a four-eyes step after a supervision act -- appeared with

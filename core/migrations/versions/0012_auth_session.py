@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: BUSL-1.1
 """login sessions survive a restart (auth_session)
 
-Adds the ``auth_session`` table for password-mode sessions. Before, sessions
-lived only in the API process, so every restart or update logged everybody out
-(Validierung aus Aussensicht 2026-09-25, VAL-11). Only the SHA-256 digest of a
+Adds the ``auth_session`` table for password-mode sessions, so a restart or
+update of the API process no longer logs everybody out. Only the SHA-256 digest of a
 token is stored, never the token. Purely additive -- no existing table is
 touched.
 

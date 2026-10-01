@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Login sessions survive a restart (Validierung 2026-09-25, VAL-11).
+"""Login sessions survive a restart.
 
 After ``docker compose restart api`` every user got 401 -- the password backend
 kept its sessions in memory, so each update logged everybody out. With

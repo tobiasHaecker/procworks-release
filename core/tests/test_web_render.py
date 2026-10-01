@@ -292,7 +292,7 @@ def test_both_columns_stay_viewport_high_and_scroll_their_overflow() -> None:
 # ---------------------------------------------------------------------------
 # Modellieren im Kontrollfluss (Schritt-Karte)
 #
-# Waechter fuer die Zusagen aus docs/Modellieren-im-Kontrollfluss-Konzept.md.
+# Waechter fuer die Zusagen der Schritt-Karte.
 # Sie pruefen die Quelle (wie die uebrigen Web-Tests): es gibt bewusst keinen
 # JS-Build und keinen Browser in der CI.
 # ---------------------------------------------------------------------------
@@ -541,7 +541,7 @@ def test_simulation_panel_is_wired_into_the_test_view() -> None:
 
 
 def test_z4_filter_rho_bar_and_overdue_summary_are_wired() -> None:
-    """Z4 (Priorisierungs-Konzept §7): die drei UI-Verfeinerungen sind da.
+    """Z4: die drei UI-Verfeinerungen sind da.
 
     Kritikalitaets-Filter in "Meine Aufgaben" (persistiert, rein clientseitig
     ueber die vorhandenen API-Felder), Rho-Verbrauchsbalken in der
@@ -833,7 +833,7 @@ def test_empty_process_offers_the_first_step() -> None:
 def test_arrow_keys_move_the_selection_in_both_surfaces() -> None:
     """Die Tastaturnavigation gehoert beiden Modellier-Oberflaechen.
 
-    Stufe U4 des Konzepts (§5.2): Pfeiltasten bewegen die Auswahl im
+    Stufe U4: Pfeiltasten bewegen die Auswahl im
     Kontrollfluss. Weil beide Sichten dieselbe Auswahl fuehren, liegt der Weg
     bewusst **nicht** in einer Sichtfunktion, sondern in einer geteilten
     Operation (``moveSelection``) am globalen Tastenweg -- sonst haette die
@@ -1048,8 +1048,8 @@ def test_time_dialog_offers_the_net_time_opt_in() -> None:
     """Der geteilte Frist-Dialog traegt das Netto-Zeit-Opt-in (E2 Stufe C).
 
     ``pause_stops_clock`` ist ein bewusstes Opt-in des Modellierers: ohne
-    Haekchen laeuft die Uhr in Pausen weiter (Anti-Schlupfloch-Linie des
-    Detailzustaende-Konzepts §4). Der Waechter sichert zu, dass das Feld im
+    Haekchen laeuft die Uhr in Pausen weiter (sonst waere eine Pause ein
+    Schlupfloch, um eine Frist zu schieben). Der Waechter sichert zu, dass das Feld im
     EINEN geteilten Dialog ``setTimeConstraintFor`` lebt -- beide
     Modellier-Oberflaechen rufen ihn auf, keine formuliert ihn selbst aus.
     """
@@ -1067,7 +1067,7 @@ def test_time_dialog_offers_the_net_time_opt_in() -> None:
 
 
 def test_monitoring_shows_the_escalation_view() -> None:
-    """Das Monitoring traegt die Eskalations-Sicht (Eskalations-Konzept §8 C).
+    """Das Monitoring traegt die Eskalations-Sicht (Stufe C).
 
     Kachel „Eskalierte Aufgaben" + Panel „Eskalationen" (Aufgaben mit
     gefeuerten Stufen, klickbar zur Instanz) leben in ``viewMonitor`` und
@@ -1088,7 +1088,7 @@ def test_monitoring_shows_the_escalation_view() -> None:
 
 
 def test_simulation_playback_animates_the_executed_order() -> None:
-    """Die Simulation traegt die Abspiel-Animation (Simulations-Konzept §6 B).
+    """Die Simulation traegt die Abspiel-Animation (Stufe B).
 
     Zusagen: (1) ``renderGraph`` adressiert jede Knoten-Gruppe ueber
     ``data-node-id`` -- darauf baut die Animation auf. (2) Das
@@ -1122,7 +1122,7 @@ def test_simulation_playback_animates_the_executed_order() -> None:
 
 
 def test_oidc_redirect_login_is_wired_with_pkce() -> None:
-    """Der OIDC-Redirect-Login (Auth-Konzept §12.4, Opt-in) haengt korrekt.
+    """Der OIDC-Redirect-Login (Opt-in) haengt korrekt.
 
     Zusagen: (1) PKCE mit S256 -- der Verifier verlaesst den Browser nie
     unhehasht Richtung Authorize-Endpunkt. (2) Der Ruecksprung wird gegen den
@@ -1280,13 +1280,13 @@ def test_insert_dialog_blocks_variants_without_their_data_element() -> None:
     assert 'dialog = openModal("Schritt einf' in body
     assert "dialog.confirmBtn.disabled = blocked" in body
     # Nur noch die Schleife: Fuer die Verzweigung legt der Dialog das Merkmal
-    # seit VAL-15 selbst an, statt den Nutzer wegzuschicken.
+    # selbst an, statt den Nutzer wegzuschicken.
     assert body.count("insert-blocked") == 1
 
 
 def test_xor_insert_offers_to_create_and_bind_its_discriminator() -> None:
-    """VAL-15: Das Entscheidungsmerkmal musste vorher woanders entstehen und an
-    einem Schritt davor geschrieben werden."""
+    """Das Entscheidungsmerkmal muss nicht vorher woanders entstehen und an
+    einem Schritt davor geschrieben werden -- der Dialog legt es an."""
 
     src = APP_JS.read_text(encoding="utf-8")
     body = _function_body(src, "function openInsertModal(")
@@ -1445,7 +1445,7 @@ def test_process_map_is_drawn_over_the_model_with_deviations() -> None:
     panel = _function_body(src, "async function conformancePanel(")
     assert "/conformance`" in panel and "renderGraph(schema, { observed" in panel
     # Beim ersten Oeffnen lag das Modell ausserhalb des Ausschnitts
-    # (Nachtest 2026-09-22, Mangel 13) -- die Karte passt sich jetzt selbst ein.
+    # -- die Karte passt sich deshalb selbst ein.
     assert "fitOnShow: true" in panel
     assert "report.deviations" in panel and "report.foreign_steps" in panel
     graph = _function_body(src, "function renderGraph(")
@@ -1475,9 +1475,8 @@ def test_staff_rule_can_be_applied_to_several_steps_in_both_surfaces() -> None:
     """Zuordnung ging nur einzeln je Schritt. ``bindStaffDialog`` ist beiden
     Oberflaechen gemeinsam; jede Zuordnung bleibt eine eigene Kern-Operation.
 
-    Seit dem Nachtest 2026-09-22 (Mangel 10) bietet **auch** der Dialog der
-    Ressourcensicht die Mehrfachzuordnung an -- wer sie dort suchte, fand sie
-    vorher nicht. Beide schreiben ueber dieselbe Funktion, damit sie nicht
+    **Auch** der Dialog der Ressourcensicht bietet die Mehrfachzuordnung an --
+    wer sie dort sucht, findet sie. Beide schreiben ueber dieselbe Funktion, damit sie nicht
     wieder auseinanderlaufen.
     """
 
@@ -1545,14 +1544,13 @@ def test_every_operation_precondition_carries_a_code_the_client_can_word() -> No
 
 
 # ---------------------------------------------------------------------------
-# Nachtest 2026-09-22: die vier Maengel, die den Alltag der Sachbearbeitung
-# betreffen. Diese Waechter halten fest, woran sie lagen -- jeder von ihnen
-# scheitert, wenn die Ursache zurueckkehrt.
+# Vier Zusagen fuer den Alltag der Sachbearbeitung. Diese Waechter halten die
+# jeweilige Ursache fest -- jeder von ihnen scheitert, wenn sie zurueckkehrt.
 # ---------------------------------------------------------------------------
 
 
 def test_sample_read_shows_its_result_instead_of_closing_over_it() -> None:
-    """Mangel 1: Der Server lieferte die Datensaetze, die Oberflaeche nicht.
+    """Was der Server an Datensaetzen liefert, zeigt die Oberflaeche auch.
 
     Das Ergebnis wurde in demselben Modal-Container geoeffnet, den ``openModal``
     unmittelbar danach leerte, weil der Rueckruf nicht ``false`` zurueckgab. Das
@@ -1573,8 +1571,8 @@ def test_sample_read_shows_its_result_instead_of_closing_over_it() -> None:
 
 
 def test_unstaffed_ready_step_is_named_as_such() -> None:
-    """Mangel 2: Nach einem Aufsichtseingriff fand die Vier-Augen-Regel
-    niemanden -- die Sicht sah aber aus wie ein Schritt ohne Regel."""
+    """Findet die Vier-Augen-Regel nach einem Aufsichtseingriff niemanden, sieht
+    die Sicht nicht aus wie ein Schritt ohne Regel."""
 
     src = APP_JS.read_text(encoding="utf-8")
     detail = _function_body(src, "async function renderInstanceDetail(")
@@ -1591,7 +1589,7 @@ def test_unstaffed_ready_step_is_named_as_such() -> None:
 
 
 def test_personal_worklist_does_not_depend_on_the_selected_process() -> None:
-    """Mangel 3: „Meine Aufgaben" haengt nicht am oben gewaehlten Prozess.
+    """„Meine Aufgaben" haengt nicht am oben gewaehlten Prozess.
 
     Die Liste reicht ueber alle Prozesse; sie darf weder an dessen
     Organisationsmodell scheitern noch Namen daraus aufloesen."""
@@ -1611,8 +1609,8 @@ def test_personal_worklist_does_not_depend_on_the_selected_process() -> None:
 
 
 def test_webhook_messages_are_worded_in_the_one_catalogue() -> None:
-    """Mangel 9: Der Probelauf zeigte englische Saetze und ein Beispielziel,
-    das an der eigenen Pruefung scheitert.
+    """Der Probelauf zeigt keine englischen Saetze und kein Beispielziel, das
+    an der eigenen Pruefung scheitert.
 
     Die Zielpruefung ist ein Boundary-Befund, kein Regelbefund -- sie lief
     deshalb am Katalog vorbei und landete ungefiltert in der Oberflaeche.
@@ -1636,8 +1634,7 @@ def test_webhook_messages_are_worded_in_the_one_catalogue() -> None:
 
 
 def test_typed_inputs_are_never_guessed_into_false() -> None:
-    """VAL-04 (Validierung 2026-09-25): „vielleicht" im Ja/Nein-Feld wurde still
-    zu ``false`` gespeichert, der Vorgang lief weiter.
+    """„vielleicht" im Ja/Nein-Feld wird nie still zu ``false`` gespeichert.
 
     Ursache war dasselbe Muster an zwei Stellen -- ``val === "true" || val ===
     "1"`` im Abschliessen-Dialog und im Dialog „Instanzdaten eingeben". Beide
@@ -1670,7 +1667,7 @@ def test_typed_inputs_are_never_guessed_into_false() -> None:
 
 
 def test_instance_data_form_asks_for_a_reason_and_the_audit_shows_the_change() -> None:
-    """VAL-01: Datenkorrekturen ausserhalb des eigenen Schritts sind ein
+    """Datenkorrekturen ausserhalb des eigenen Schritts sind ein
     Aufsichtseingriff. Die Regel entscheidet der Kern; der Dialog reagiert nur
     auf dessen 422 und fragt nach der Begruendung. Der Verlauf zeigt jede
     Aenderung mit altem und neuem Wert.
@@ -1689,8 +1686,8 @@ def test_instance_data_form_asks_for_a_reason_and_the_audit_shows_the_change() -
 
 
 def test_adhoc_insert_dialog_names_who_works_the_new_step() -> None:
-    """VAL-03: Ein ad hoc eingefuegter Schritt hatte nie einen Bearbeiter und
-    stand in keiner Arbeitsliste. Der Kern verlangt die Regel jetzt (B2 fuer den
+    """Ein ad hoc eingefuegter Schritt braucht einen Bearbeiter, sonst steht er
+    in keiner Arbeitsliste. Der Kern verlangt die Regel (B2 fuer den
     neuen Schritt); der Dialog fragt sie ab, schlaegt die des Schritts davor vor
     und schickt sie mit. Kein Pflichtfeld ohne Rueckmeldung: ohne Auswahl bleibt
     der Dialog offen.
@@ -1710,7 +1707,7 @@ def test_adhoc_insert_dialog_names_who_works_the_new_step() -> None:
 
 
 def test_binding_dialog_names_d1_for_reading_without_writing() -> None:
-    """VAL-35: „Lesen ohne vorheriges Schreiben" ist D1, nicht D2."""
+    """„Lesen ohne vorheriges Schreiben" ist D1, nicht D2."""
 
     src = APP_JS.read_text(encoding="utf-8")
     assert "sonst weist der Kern die Bindung ab (D1)." in src
@@ -1718,8 +1715,8 @@ def test_binding_dialog_names_d1_for_reading_without_writing() -> None:
 
 
 def test_monitoring_shows_steps_nobody_may_work() -> None:
-    """VAL-09: Vorgaenge, deren offener Schritt niemanden hat, standen im
-    Monitoring mit „ueberfaellig 0, eskaliert 0“. Kachel, Liste und Filter
+    """Vorgaenge, deren offener Schritt niemanden hat, stehen im Monitoring
+    nicht unauffaellig mit „ueberfaellig 0, eskaliert 0“. Kachel, Liste und Filter
     kommen aus ``GET /monitoring/unstaffed`` (Rechnung im Kern)."""
 
     src = APP_JS.read_text(encoding="utf-8")
@@ -1731,13 +1728,13 @@ def test_monitoring_shows_steps_nobody_may_work() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Validierung aus Aussensicht 2026-09-25, P2-Welle (VAL-13 bis VAL-22)
+# Bedienung: Meldungen, Namen, Regeln, Demo
 # ---------------------------------------------------------------------------
 
 
 def test_error_toasts_close_after_success_expiry_and_login_change() -> None:
-    """VAL-13: Fehlermeldungen blieben stehen -- neben Erfolgsmeldungen und ueber
-    einen Benutzerwechsel hinweg (Maras Fehler bei Erika und Tom)."""
+    """Fehlermeldungen bleiben nicht stehen -- weder neben Erfolgsmeldungen noch
+    ueber einen Benutzerwechsel hinweg (Maras Fehler bei Erika und Tom)."""
 
     src = APP_JS.read_text(encoding="utf-8")
     toast = _function_body(src, "function toast(")
@@ -1748,14 +1745,14 @@ def test_error_toasts_close_after_success_expiry_and_login_change() -> None:
 
 
 def test_monitor_reloads_the_selected_instance() -> None:
-    """VAL-14: Das Monitoring zeigte die gewaehlte Instanz im Startzustand."""
+    """Das Monitoring zeigt die gewaehlte Instanz aktuell, nicht im Startzustand."""
 
     view = _function_body(APP_JS.read_text(encoding="utf-8"), "async function viewMonitor(")
     assert "await loadInstance(state.instanceId)" in view
 
 
 def test_data_types_are_shown_with_business_names() -> None:
-    """VAL-16: INTEGER/FLOAT/STRING standen roh in Dialogen und Tabellen."""
+    """INTEGER/FLOAT/STRING stehen nicht roh in Dialogen und Tabellen."""
 
     src = APP_JS.read_text(encoding="utf-8")
     assert 'INTEGER: "Ganzzahl", FLOAT: "Kommazahl"' in src
@@ -1764,7 +1761,7 @@ def test_data_types_are_shown_with_business_names() -> None:
 
 
 def test_combined_staff_rules_can_be_built_in_the_dialog() -> None:
-    """VAL-18: UND/ODER/AUSSER gab es nur per API."""
+    """UND/ODER/AUSSER gibt es auch im Dialog, nicht nur per API."""
 
     src = APP_JS.read_text(encoding="utf-8")
     dialog = _function_body(src, "function addStaffRule(")
@@ -1775,8 +1772,8 @@ def test_combined_staff_rules_can_be_built_in_the_dialog() -> None:
 
 
 def test_demo_bar_and_tour_offer_do_not_get_in_the_way() -> None:
-    """VAL-19: Die Leiste schien durch die Tour-Aussparung, und nach jedem
-    Rollenwechsel fragte die Tour erneut."""
+    """Die Leiste scheint nicht durch die Tour-Aussparung, und nicht jeder
+    Rollenwechsel fragt die Tour erneut an."""
 
     css = (APP_JS.parent / "tour" / "tour.css").read_text(encoding="utf-8")
     assert "html[data-tour-active] .demo-banner" in css
@@ -1787,7 +1784,7 @@ def test_demo_bar_and_tour_offer_do_not_get_in_the_way() -> None:
 
 
 def test_lost_demo_session_logs_the_same_person_back_in() -> None:
-    """VAL-20: Nach einer Pause landete man ohne Hinweis auf der Anmeldung."""
+    """Nach einer Pause landet man nicht ohne Hinweis auf der Anmeldung."""
 
     src = APP_JS.read_text(encoding="utf-8")
     req = _function_body(src, "async function request(")
@@ -1797,7 +1794,7 @@ def test_lost_demo_session_logs_the_same_person_back_in() -> None:
 
 
 def test_modelling_buttons_are_hidden_from_operators() -> None:
-    """VAL-21: Bearbeiter sahen „+ Neu“, „Aus Vorlage“, „BPMN-Import“."""
+    """Bearbeiter sehen weder „+ Neu“ noch „Aus Vorlage“ oder „BPMN-Import“."""
 
     picker = _function_body(APP_JS.read_text(encoding="utf-8"), "function renderSchemaPicker(")
     guard = picker.index('if (!hasRole("modeler", "admin")) return;')
@@ -1805,7 +1802,7 @@ def test_modelling_buttons_are_hidden_from_operators() -> None:
 
 
 def test_mask_fields_carry_input_rules_and_show_errors_at_the_field() -> None:
-    """VAL-22: keine Pruefregeln, Pflichtfehler nur als Meldung."""
+    """Pruefregeln an Maskenfeldern; Pflichtfehler stehen am Feld, nicht nur in der Meldung."""
 
     src = APP_JS.read_text(encoding="utf-8")
     complete = _function_body(src, "async function promptComplete(")
@@ -1817,8 +1814,8 @@ def test_mask_fields_carry_input_rules_and_show_errors_at_the_field() -> None:
 
 
 def test_tasks_and_instances_are_named_by_their_data() -> None:
-    """VAL-17: Vorgaenge hiessen ``instance_14``; zwei gleiche Aufgaben waren
-    in der Arbeitsliste nicht zu unterscheiden."""
+    """Vorgaenge heissen nicht nur ``instance_14``; zwei gleiche Aufgaben sind
+    in der Arbeitsliste zu unterscheiden."""
 
     src = APP_JS.read_text(encoding="utf-8")
     assert "contextTitle(t.context)" in _function_body(src, "async function viewTasks(")
@@ -1829,8 +1826,8 @@ def test_tasks_and_instances_are_named_by_their_data() -> None:
 
 
 def test_help_glossary_names_every_rule_the_core_reports() -> None:
-    """VAL-38: Im Glossar fehlten u. a. C4-C7, U2, H2/H3 und OP, obwohl sie in
-    Meldungen vorkommen. Jede Regel mit Code im Kern muss im Glossar stehen --
+    """Jede Regel, die in Meldungen vorkommt (auch C4-C7, U2, H2/H3 und OP), steht
+    im Glossar. Jede Regel mit Code im Kern muss im Glossar stehen --
     einzeln oder in einem Bereich wie „C4–C6“."""
 
     src_dir = Path(__file__).resolve().parents[1] / "src" / "procworks"
@@ -1852,12 +1849,12 @@ def test_help_glossary_names_every_rule_the_core_reports() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Validierung aus Aussensicht 2026-09-25, P3 (VAL-23 bis VAL-37)
+# Modellieren: Einpassen, Freigabe, Dialoge, Darstellung
 # ---------------------------------------------------------------------------
 
 
 def test_fit_keeps_the_overview_readable_and_shows_more() -> None:
-    """VAL-23: „Einpassen“ schnitt das Ende ab, die Uebersicht wurde winzig."""
+    """„Einpassen“ schneidet das Ende nicht ab, die Uebersicht bleibt lesbar."""
 
     body = _function_body(APP_JS.read_text(encoding="utf-8"), "function attachPanZoom(")
     assert "const FIT_OVERVIEW_MIN = 0.35;" in body
@@ -1865,7 +1862,7 @@ def test_fit_keeps_the_overview_readable_and_shows_more() -> None:
 
 
 def test_release_asks_first_and_is_green_only_when_ready() -> None:
-    """VAL-24: Freigabe ohne Rueckfrage, gruen trotz offener B2, „• ·“."""
+    """Freigabe mit Rueckfrage, gruen nur ohne offene B2, kein doppeltes „• ·“."""
 
     src = APP_JS.read_text(encoding="utf-8")
     release = _function_body(src, "async function releaseSchema(")
@@ -1875,14 +1872,14 @@ def test_release_asks_first_and_is_green_only_when_ready() -> None:
 
 
 def test_performer_references_come_from_the_core() -> None:
-    """VAL-25: Der Dialog bot Schritte des anderen XOR-Zweigs an."""
+    """Der Dialog bietet keine Schritte des anderen XOR-Zweigs an."""
 
     picker = _function_body(APP_JS.read_text(encoding="utf-8"), "function staffTermPicker(")
     assert "/performer-candidates`" in picker
 
 
 def test_binding_dialog_defaults_to_write_and_returns_after_creating() -> None:
-    """VAL-26/27: Vorgabe „Lesen“ am ersten Schritt; das neue Element kam nicht
+    """Vorgabe „Schreiben“, solange nichts davor schreibt; das neue Element kommt
     zurueck in den Dialog."""
 
     src = APP_JS.read_text(encoding="utf-8")
@@ -1894,14 +1891,14 @@ def test_binding_dialog_defaults_to_write_and_returns_after_creating() -> None:
 
 
 def test_non_numeric_thresholds_are_reported() -> None:
-    """VAL-28: „abc“ als Schwellwert wurde still verworfen."""
+    """„abc“ als Schwellwert wird gemeldet, nicht still verworfen."""
 
     body = _function_body(APP_JS.read_text(encoding="utf-8"), "function openInsertModal(")
     assert "validity.badInput" in body and '"Grenzwert ist keine Zahl"' in body
 
 
 def test_layout_fixes_for_long_labels_header_and_links() -> None:
-    """VAL-30: gekuerzte Knoten ohne Tooltip, ueberlaufende Kopfzeile, dunkle Links."""
+    """Gekuerzte Knoten mit Tooltip, umbrechende Kopfzeile, lesbare Links."""
 
     src = APP_JS.read_text(encoding="utf-8")
     assert 'if (caption.length > 18) g.appendChild(svg("title"' in src
@@ -1911,7 +1908,7 @@ def test_layout_fixes_for_long_labels_header_and_links() -> None:
 
 
 def test_empty_model_view_speaks_german_and_offers_next_steps() -> None:
-    """VAL-33: „Kein Schema ausgewaehlt“ ohne Weg nach vorn."""
+    """„Kein Schema ausgewählt“ mit Weg nach vorn."""
 
     src = APP_JS.read_text(encoding="utf-8")
     assert "ausgewaehlt." not in src.replace("// ", "")  # nur noch in Kommentaren
@@ -1921,7 +1918,7 @@ def test_empty_model_view_speaks_german_and_offers_next_steps() -> None:
 
 
 def test_amounts_are_a_first_class_type_in_the_client() -> None:
-    """VAL-16: Betraege gab es nur als Kommazahl. DECIMAL steht in jeder
+    """Betraege sind ein eigener Typ, keine Kommazahl. DECIMAL steht in jeder
     Typauswahl, ist fuer Masken, Entscheidungen und Schleifen eine Zahl, nimmt
     Eingaben in 0,01-Schritten an und wird mit zwei Stellen angezeigt."""
 
@@ -1939,7 +1936,7 @@ def test_amounts_are_a_first_class_type_in_the_client() -> None:
 
 
 def test_every_adhoc_dialog_asks_for_the_reason() -> None:
-    """Der Kern verlangt fuer echte Vorgaenge einen Anlass (NT-02).
+    """Der Kern verlangt fuer echte Vorgaenge einen Anlass.
 
     Fragte ein Dialog ihn nicht ab, schluege jede Aenderung dort mit 422 fehl --
     Einfuegen, Umbenennen und Entfernen muessen alle das gemeinsame Feld nutzen
@@ -1956,7 +1953,7 @@ def test_every_adhoc_dialog_asks_for_the_reason() -> None:
 
 
 def test_loading_example_data_shows_the_example_password_once() -> None:
-    """Das Zufallspasswort der Beispiel-Anmeldungen steht nur in der Antwort (NT-04)."""
+    """Das Zufallspasswort der Beispiel-Anmeldungen steht nur in der Antwort."""
 
     src = APP_JS.read_text(encoding="utf-8")
     body = re.search(r"\nasync function runReset\(kind\) \{.*?\n\}", src, re.S)
@@ -1971,7 +1968,7 @@ def test_loading_example_data_shows_the_example_password_once() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Nachtest 2026-09-27, NT-05 bis NT-10 (Web-Client)
+# Web-Client: Lesewerte, Demo-Leiste, Einpassen, Wortlaut, Tastatur
 # ---------------------------------------------------------------------------
 
 
@@ -1982,7 +1979,7 @@ def _fn(src: str, header: str) -> str:
 
 
 def test_step_without_mask_shows_what_it_reads() -> None:
-    """NT-06: „Freigabe pruefen“ ohne Maske zeigte den Betrag nicht, den es freigab."""
+    """„Freigabe pruefen“ ohne Maske zeigt den Betrag, den es freigibt."""
 
     src = APP_JS.read_text(encoding="utf-8")
     body = _fn(src, "async function promptComplete(")
@@ -1993,7 +1990,7 @@ def test_step_without_mask_shows_what_it_reads() -> None:
 
 
 def test_demo_banner_uses_one_select_on_narrow_screens() -> None:
-    """NT-05: 13 Rollen-Knoepfe machten die Leiste auf dem Handy bildschirmhoch."""
+    """13 Rollen-Knoepfe duerfen die Leiste auf dem Handy nicht bildschirmhoch machen."""
 
     body = _fn(APP_JS.read_text(encoding="utf-8"), "function mountDemoBanner(")
     assert "window.innerWidth <= 720" in body
@@ -2001,7 +1998,7 @@ def test_demo_banner_uses_one_select_on_narrow_screens() -> None:
 
 
 def test_fit_uses_the_visible_part_of_the_canvas() -> None:
-    """NT-09: Einpassen zentrierte ueber eine teils unsichtbare Hoehe."""
+    """Einpassen zentriert ueber die sichtbare Hoehe, nicht ueber die ganze Canvas."""
 
     body = _fn(APP_JS.read_text(encoding="utf-8"), "function attachPanZoom(")
     assert "function visibleBand()" in body
@@ -2010,8 +2007,8 @@ def test_fit_uses_the_visible_part_of_the_canvas() -> None:
     assert fit.count("ty = band.top +") == 2
 
 
-def test_small_wording_fixes_of_the_nachtest() -> None:
-    """NT-10: technische Woerter und gestapelte Meldungen."""
+def test_no_technical_words_and_no_stacked_messages() -> None:
+    """Keine technischen Woerter und keine gestapelten Meldungen."""
 
     src = APP_JS.read_text(encoding="utf-8")
     assert src.count("conditionCaption(e.condition)") == 2
@@ -2026,8 +2023,8 @@ def test_small_wording_fixes_of_the_nachtest() -> None:
 
 
 def test_dialogs_are_keyboard_operable() -> None:
-    """NT-15: a dialog without a field kept the focus behind it; Tab never reached
-    „Abschliessen“, Escape did nothing, and Tab left the login mask."""
+    """A dialog takes the focus even without a field; Tab reaches „Abschliessen“
+    and stays inside, Escape closes, and Tab does not leave the login mask."""
 
     src = APP_JS.read_text(encoding="utf-8")
     body = _fn(src, "function openModal(")
@@ -2043,7 +2040,7 @@ def test_dialogs_are_keyboard_operable() -> None:
 
 
 def test_a_wrong_api_address_is_refused_and_explained() -> None:
-    """NT-17: „4“ in the API field broke every call with "Unexpected token '<'"."""
+    """A stray „4“ in the API field must not break every call with "Unexpected token '<'"."""
 
     src = APP_JS.read_text(encoding="utf-8")
     assert "if (!(await isProcWorksApi(candidate)))" in src

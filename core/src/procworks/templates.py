@@ -60,6 +60,20 @@ def _with_role(schema: ProcessSchema, role_id: str, role_name: str) -> ProcessSc
     return schema
 
 
+def _join_before_end(schema: ProcessSchema) -> str:
+    """The node right before END (e.g. the join closing the last block).
+
+    Used right after a block insert that ends the flow so far: the block's join
+    is then END's unique predecessor, and the next step goes in after it.
+
+    :param schema: the blueprint under construction (END has exactly one
+        incoming control edge, as in every block-structured schema)
+    :returns: the id of END's predecessor
+    """
+
+    return next(e.source for e in schema.incoming(schema.end_node().id))
+
+
 def _build_vacation_request() -> ProcessTemplate:
     """Urlaubsantrag: request -> supervisor review -> approve/reject (XOR).
 
@@ -175,8 +189,7 @@ def _build_onboarding() -> ProcessTemplate:
         s, ["IT-Ausstattung bereitstellen", "Arbeitsplatz einrichten"], vorbereiten
     )
     # The AND join is END's unique predecessor; insert the welcome talk after it.
-    and_join = next(e.source for e in s.incoming(s.end_node().id))
-    s = ops.serial_insert(s, "Einführungsgespräch", and_join)
+    s = ops.serial_insert(s, "Einführungsgespräch", _join_before_end(s))
 
     s = ops.assign_staff_rule(s, vorbereiten, _role_rule("personal"))
     s = ops.assign_staff_rule(s, _nid(s, "IT-Ausstattung bereitstellen"), _role_rule("it"))
@@ -194,12 +207,6 @@ def _build_onboarding() -> ProcessTemplate:
         category="Personal",
         origin=TemplateOrigin.BUILTIN,
     )
-
-
-def _join_before_end(schema: ProcessSchema) -> str:
-    """The node right before END (e.g. the join closing the last block)."""
-
-    return next(e.source for e in schema.incoming(schema.end_node().id))
 
 
 def _build_purchase_approval() -> ProcessTemplate:

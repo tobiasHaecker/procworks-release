@@ -4,8 +4,7 @@
 ``_possible_agents`` over-approximated ``EXCEPT(left, right)`` by ``left`` --
 "removing agents cannot add any". True, but an over-approximation can never
 show that a set is empty: ``EXCEPT(ROLE sb, ROLE sb)`` passed Z2, the schema was
-released, and the step stood in nobody's worklist at runtime (Validierung aus
-Außensicht 2026-09-25, VAL-02).
+released, and the step stood in nobody's worklist at runtime.
 
 The fix subtracts the right operand when it is statically exact (ROLE, ORG_UNIT,
 AGENT and combinations of them). A runtime leaf on the right (a performer

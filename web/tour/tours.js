@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 // ---------------------------------------------------------------------------
-// Inhalte der geführten Tour (docs/Tutorial-Konzept.md).
+// Inhalte der geführten Tour.
 //
 // Reine DATEN -- kein Verhalten. Die Engine (engine.js) kennt keinen einzigen
 // dieser Texte, und diese Datei ruft nichts auf. Wer eine Tour ändert oder eine
@@ -62,7 +62,7 @@ const TOURS = [
     // von "Antragsteller informieren" zu "Resturlaub prüfen" geändert -- siehe
     // die Notiz in tour_fixture_build.py (build_stages).
     // v3: Info-Schritt "patterns" ergänzt (Verzweigungen + Schleifen als
-    // vollständige Blöcke, Schleifen-Konzept S3) -- reine Erwähnung ohne
+    // vollständige Blöcke, Stufe S3) -- reine Erwähnung ohne
     // Simulation, die Konserve bleibt unverändert.
     version: 4,
     sandbox: true,

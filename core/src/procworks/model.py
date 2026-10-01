@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 """Meta-model (Pydantic) for the block-structured process schema.
 
-This mirrors Section 4 of the architecture concept: Node, ControlEdge and the
+It defines Node, ControlEdge and the
 versioned ProcessSchema with a lifecycle state, the data-flow layer
 (DataElement, DataAccess) used by the data-flow rules D1-D4, and the resource
 layer (OrgModel, StaffRule, ServiceBinding) used by the resource rules Z1-Z4.
@@ -62,7 +62,7 @@ class EdgeType(StrEnum):
     counts towards node degrees, block structure, data-flow guarantees or the
     critical path (conservative), and only the engine's wait logic and the K4
     rule know it. A LOOP type stays deliberately absent: the loop-back edge
-    is derived from the K6 pairing and never stored (Schleifen-Konzept §2).
+    is derived from the K6 pairing and never stored.
     """
 
     CONTROL = "CONTROL"
@@ -97,8 +97,8 @@ class DataType(StrEnum):
 
     INTEGER = "INTEGER"
     FLOAT = "FLOAT"
-    #: A monetary amount: a number with at most two decimal places
-    #: (Validierung 2026-09-25, VAL-16). Carried as a JSON number like FLOAT --
+    #: A monetary amount: a number with at most two decimal places.
+    #: Carried as a JSON number like FLOAT --
     #: integrations and storage stay unchanged -- but D3 rejects a third
     #: decimal instead of letting a rounding error through, and the client
     #: always shows two places ("1.234,50").
@@ -156,7 +156,7 @@ class ExternalBinding(BaseModel):
 
 
 class FilterOperator(StrEnum):
-    """Comparison operator of a structured SQL-select filter (§6, rule C5).
+    """Comparison operator of a structured SQL-select filter (rule C5).
 
     A closed whitelist so a filter never carries free-form SQL. Ordering
     operators only apply to ordered types (checked by C5); ``IN`` matches set
@@ -225,7 +225,7 @@ class OrderBy(BaseModel):
 
 
 class SqlSelectBinding(BaseModel):
-    """A structured, type- and cardinality-safe scalar SQL binding (§4).
+    """A structured, type- and cardinality-safe scalar SQL binding.
 
     A ``select``-bound EXTERNAL data element resolves to a single, typed scalar
     compiled from this specification (never free-form SQL). ``column`` is the one
@@ -263,7 +263,7 @@ def aggregate_result_type(aggregate: AggregateKind, column_type: DataType) -> Da
 
 
 class SqlWriteBinding(BaseModel):
-    """A structured, type-safe scalar SQL write-back binding (§7, Q4).
+    """A structured, type-safe scalar SQL write-back binding (Q4).
 
     Symmetric to :class:`SqlSelectBinding`: when the bound EXTERNAL element is
     written by an activity, the produced scalar is post-flushed as a single,
@@ -289,7 +289,7 @@ READ_MODES = frozenset({AccessMode.READ, AccessMode.READ_WRITE})
 WRITE_MODES = frozenset({AccessMode.WRITE, AccessMode.READ_WRITE})
 
 
-#: Decimal places of a DECIMAL amount (VAL-16).
+#: Decimal places of a DECIMAL amount.
 AMOUNT_SCALE = 2
 
 
@@ -345,9 +345,9 @@ class NodeState(StrEnum):
 
 
 class NodeDetailState(StrEnum):
-    """Runtime *detail* state overlaid on the base node marking (E2, §4).
+    """Runtime *detail* state overlaid on the base node marking (E2).
 
-    §4 lists SELECTED/SUSPENDED/FAILED as detail states *in addition to* the
+    SELECTED/SUSPENDED/FAILED are detail states *in addition to* the
     NS marking -- so they live as an overlay, never as new ``NodeState``
     members: underneath, a suspended or failed step is simply ``RUNNING``
     (nothing propagates), and every engine invariant stays literally true.
@@ -480,7 +480,7 @@ class FormField(BaseModel):
     options: list[str] = Field(default_factory=list)
     help_text: str | None = None
     group: str = ""
-    #: Optional input checks (Validierung 2026-09-25, VAL-22). ``min_value`` /
+    #: Optional input checks. ``min_value`` /
     #: ``max_value`` bound a NUMBER field, ``pattern`` (a regular expression the
     #: whole value must match) and ``max_length`` a TEXT/TEXTAREA field. U2
     #: checks at modelling time that they fit the field; the boundary enforces
@@ -874,8 +874,8 @@ class TimeConstraint(BaseModel):
     task should be picked up and finished. It is the natural steering value for
     the time-based worklist prioritisation (see ``worklist_priority``), because a
     task "rots" while nobody touches it. When it is not set, the prioritisation
-    falls back to ``max_duration_seconds`` as the reaction time (fallback rule S
-    of the prioritisation concept), so a single annotated duration is enough to
+    falls back to ``max_duration_seconds`` as the reaction time (fallback rule
+    S), so a single annotated duration is enough to
     drive the automatic ordering.
     """
 
@@ -885,18 +885,18 @@ class TimeConstraint(BaseModel):
     #: (``SUSPENDED`` overlay) stops this step's due clock -- the accumulated
     #: pause time is credited to the due instant, for the worklist bands AND
     #: the escalation sweep (one shared computation). Default ``False`` keeps
-    #: the deliberate anti-loophole stance of the Detailzustaende concept (§4):
+    #: the deliberate anti-loophole stance:
     #: without the modeller's explicit opt-in, suspending never defers a
     #: deadline or an escalation. Purely additive -- no validator rule needed
     #: (a bool is always well-formed, T1 stays untouched).
     pause_stops_clock: bool = False
 
 
-# --- escalation (T3/E9, Eskalations-Konzept) ------------------------------
+# --- escalation (T3/E9) -------------------------------------------------
 
 
 class EscalationKind(StrEnum):
-    """Direction of an escalation stage (ITIL, Architektur-Konzept §3.8).
+    """Direction of an escalation stage (ITIL).
 
     ``FUNCTIONAL`` (horizontal) *broadens the offer*: the stage's agent set is
     added to the task's eligible performers. ``HIERARCHICAL`` (vertical)
@@ -935,7 +935,7 @@ class EscalationPolicy(BaseModel):
     stages: list[EscalationStage] = Field(default_factory=list)
 
 
-# --- time-based worklist criticality (Zeitbasierte-Priorisierung-Konzept) --
+# --- time-based worklist criticality ------------------------------------
 
 
 class TimeCriticality(StrEnum):
@@ -1262,22 +1262,44 @@ def xor_condition_text(
     derived caption used by the editor and the BPMN ``conditionExpression``.
     """
 
-    branch = decision.branches[index]
-    disc = discriminator_name
-    if decision.kind is XorDecisionKind.THRESHOLD:
-        lower = decision.branches[index - 1].upper if index > 0 else None
-        upper = branch.upper
+    lower = decision.branches[index - 1].upper if index > 0 else None
+    return _partition_cell_text(
+        discriminator_name, decision.kind, decision.branches[index], lower
+    )
+
+
+def _partition_cell_text(
+    disc: str, kind: XorDecisionKind, cell: PartitionCell, lower: float | None
+) -> str:
+    """Formuliert das Prädikat *einer* Partitionszelle (nur Anzeige).
+
+    Die gemeinsame Formulierung hinter :func:`xor_condition_text` (K7) und
+    :func:`loop_condition_text` (K6), damit Verzweigungs- und Schleifentexte
+    nicht auseinanderlaufen.
+
+    :param disc: Anzeigename des Diskriminators.
+    :param kind: Art der Partition (THRESHOLD / BOOLEAN / ENUM).
+    :param cell: die Zelle (``XorBranch`` oder ``LoopCell``).
+    :param lower: nur für THRESHOLD -- die implizite Untergrenze, also die
+        ``upper`` der vorangehenden Zelle (``None`` für die erste Zelle).
+    :returns: z. B. ``"1000 <= betrag < 5000"``, ``"ok == true"``,
+        ``"status in [a, b]"`` oder ``"status: otherwise"``. Eine
+        THRESHOLD-Zelle ohne beide Grenzen ergibt nur den Namen.
+    """
+
+    if kind is XorDecisionKind.THRESHOLD:
+        upper = cell.upper
         if lower is None:
             return f"{disc} < {_fmt_bound(upper)}" if upper is not None else disc
         if upper is None:
             return f"{disc} >= {_fmt_bound(lower)}"
         return f"{_fmt_bound(lower)} <= {disc} < {_fmt_bound(upper)}"
-    if decision.kind is XorDecisionKind.BOOLEAN:
-        return f"{disc} == true" if branch.bool_value else f"{disc} == false"
+    if kind is XorDecisionKind.BOOLEAN:
+        return f"{disc} == true" if cell.bool_value else f"{disc} == false"
     # ENUM
-    if branch.is_else:
+    if cell.is_else:
         return f"{disc}: otherwise"
-    return f"{disc} in [{', '.join(branch.values)}]"
+    return f"{disc} in [{', '.join(cell.values)}]"
 
 
 class LoopCell(BaseModel):
@@ -1288,7 +1310,7 @@ class LoopCell(BaseModel):
     branch body the cell classifies the discriminator value into **repeat**
     (run the body again) or **exit** (leave the loop). There is deliberately no
     ``target``: the loop-back is never an edge -- it derives from the
-    LOOP_START/LOOP_END pairing (Schleifen-Konzept §2).
+    LOOP_START/LOOP_END pairing.
     """
 
     repeat: bool
@@ -1351,38 +1373,13 @@ def loop_condition_text(discriminator_name: str, decision: LoopDecision) -> str:
     if not decision.cells:
         return f"{disc} == {'true' if decision.repeat_value else 'false'}"
     parts: list[str] = []
-    if decision.kind is XorDecisionKind.THRESHOLD:
-        lower: float | None = None
-        for cell in decision.cells:
-            if cell.repeat:
-                if lower is None:
-                    parts.append(
-                        f"{disc} < {_fmt_bound(cell.upper)}"
-                        if cell.upper is not None
-                        else disc
-                    )
-                elif cell.upper is None:
-                    parts.append(f"{disc} >= {_fmt_bound(lower)}")
-                else:
-                    parts.append(
-                        f"{_fmt_bound(lower)} <= {disc} < {_fmt_bound(cell.upper)}"
-                    )
-            lower = cell.upper
-    elif decision.kind is XorDecisionKind.BOOLEAN:
-        for cell in decision.cells:
-            if cell.repeat:
-                parts.append(
-                    f"{disc} == {'true' if cell.bool_value else 'false'}"
-                )
-    else:  # ENUM
-        for cell in decision.cells:
-            if not cell.repeat:
-                continue
-            parts.append(
-                f"{disc}: otherwise"
-                if cell.is_else
-                else f"{disc} in [{', '.join(cell.values)}]"
-            )
+    # Die Untergrenze einer THRESHOLD-Zelle ist die ``upper`` der Vorgängerin --
+    # auch einer Exit-Zelle, deshalb wird sie über *alle* Zellen mitgeführt.
+    lower: float | None = None
+    for cell in decision.cells:
+        if cell.repeat:
+            parts.append(_partition_cell_text(disc, decision.kind, cell, lower))
+        lower = cell.upper
     return " or ".join(parts)
 
 
@@ -1460,8 +1457,8 @@ class ProcessSchema(BaseModel):
     #: entries default to ``MEDIUM/MEDIUM`` when a worklist is rendered.
     node_priorities: dict[str, WorkItemPriority] = Field(default_factory=dict)
     #: Up to two INSTANCE data elements whose values name an instance and its
-    #: tasks -- "Bestellung 4711 · Müller GmbH" instead of ``instance_14``
-    #: (Validierung 2026-09-25, VAL-17). Presentation only: no correctness rule
+    #: tasks -- "Bestellung 4711 · Müller GmbH" instead of ``instance_14``.
+    #: Presentation only: no correctness rule
     #: reads the values; U5 only checks that the elements exist.
     display_fields: list[str] = Field(default_factory=list)
     #: Optional modelled e-mail notifications per ACTIVITY node id (rule group
@@ -1473,7 +1470,7 @@ class ProcessSchema(BaseModel):
     #: the temporal rules T1/T2 stay silent for models without time data.
     time_constraints: dict[str, TimeConstraint] = Field(default_factory=dict)
     #: Optional modelled overdue reactions per interactive ACTIVITY node id
-    #: (T3/E9, Eskalations-Konzept). Empty by default so the T3 rules stay
+    #: (T3/E9). Empty by default so the T3 rules stay
     #: silent for models without escalation (fully additive).
     escalation_policies: dict[str, EscalationPolicy] = Field(default_factory=dict)
     #: Optional hard deadline of the whole process in seconds (roadmap E5).
@@ -1732,7 +1729,7 @@ class ProcessInstance(BaseModel):
     is_test: bool = False
     #: Wall-clock time this instance was created, used as the origin for the
     #: process-deadline slack of the time-based worklist prioritisation
-    #: (Zeitbasierte-Priorisierung-Konzept, Section 5.2). Additive and optional:
+    #: (see :mod:`procworks.worklist_priority`). Additive and optional:
     #: absent on instances created before the feature; the prioritisation then
     #: simply omits the process-slack factor.
     started_at: datetime | None = None

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Standard BPMN imports without the ProcWorks extension (Validierung 2026-09-25, VAL-10).
+"""Standard BPMN imports without the ProcWorks extension.
 
 The import ignored the standard ``conditionExpression`` (-> "XOR split has no
 branch decision"), refused implicit merges (a task with two incoming flows),
@@ -9,7 +9,7 @@ writes (and the ``${ … }`` form of other tools) into the partition, and lets
 the step before a decision write its discriminator when nothing does.
 
 The other half matters as much: the deliberately broken models the validation
-threw at the import (§9 of its report) must **still** be rejected -- the
+threw at the import must **still** be rejected -- the
 normalisation must never talk a defect into a valid model. ``validate()``
 stays the only judge.
 """

@@ -115,6 +115,16 @@ def _odata_filter(filters: list[QueryFilter], key_values: Mapping[str, object]) 
     return " and ".join(clauses)
 
 
+def _without_annotations(row: Mapping[str, object]) -> dict[str, object]:
+    """Drop OData control annotations (``@odata.etag`` ...) from a JSON object.
+
+    Keys starting with ``@`` describe the payload, they are not business
+    fields; neither a worker nor the column assistant should see them.
+    """
+
+    return {k: v for k, v in row.items() if not str(k).startswith("@")}
+
+
 def _json_to_data_type(value: object) -> DataType | None:
     """Infer a ProcWorks data type from a JSON value (for column introspection)."""
 
@@ -212,10 +222,16 @@ class ODataConnector:
     def _rows(self, url: str) -> list[dict[str, object]]:
         data = json.loads(self._request("GET", url))
         value = data.get("value", []) if isinstance(data, dict) else []
-        return [
-            {k: v for k, v in row.items() if not str(k).startswith("@")}
-            for row in value
-        ]
+        return [_without_annotations(row) for row in value]
+
+    def _record_url(self, entity: str, key: object) -> str:
+        """URL of one keyed record: ``<base>/<EntitySet>(<key literal>)``.
+
+        The entity name is whitelisted and the key travels as an escaped OData
+        literal, so neither can break out of the path.
+        """
+
+        return f"{self._base}/{_safe_identifier(entity)}({_odata_literal(key)})"
 
     # -- structured scalar read/write -------------------------------------
 
@@ -268,24 +284,21 @@ class ODataConnector:
             raise DataAccessError(
                 "OData scalar write needs an equality filter on the unique column"
             )
-        entity = _safe_identifier(binding.entity)
+        url = self._record_url(binding.entity, key_value)
         _safe_identifier(binding.column)
-        url = f"{self._base}/{entity}({_odata_literal(key_value)})"
         self._request("PATCH", url, body={binding.column: value})
         return 1
 
     # -- record SPI --------------------------------------------------------
 
     def read(self, entity: str, key: object) -> Record:
-        url = f"{self._base}/{_safe_identifier(entity)}({_odata_literal(key)})"
-        data = json.loads(self._request("GET", url))
+        data = json.loads(self._request("GET", self._record_url(entity, key)))
         if not isinstance(data, dict):
             raise DataAccessError(f"unexpected OData response for '{entity}'")
-        return {k: v for k, v in data.items() if not str(k).startswith("@")}
+        return _without_annotations(data)
 
     def write(self, entity: str, key: object, values: Record) -> None:
-        url = f"{self._base}/{_safe_identifier(entity)}({_odata_literal(key)})"
-        self._request("PATCH", url, body=dict(values))
+        self._request("PATCH", self._record_url(entity, key), body=dict(values))
 
     def query(self, entity: str, filters: Record) -> list[Record]:
         url = f"{self._base}/{_safe_identifier(entity)}"

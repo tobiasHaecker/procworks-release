@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Names and labels are trimmed and bounded (Validierung 2026-09-25, VAL-29).
+"""Names and labels are trimmed and bounded.
 
 Labels that were empty, only blanks or 5000 characters long were accepted.
 Every operation that sets a name trims it and rejects an empty or overlong one

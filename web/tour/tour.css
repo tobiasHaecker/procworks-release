@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BUSL-1.1 */
 
 /* ---------------------------------------------------------------------------
-   Geführte Tour -- Overlay, Spotlight und Popup (docs/Tutorial-Konzept.md).
+   Geführte Tour -- Overlay, Spotlight und Popup.
 
    Farben ausschliesslich ueber die CSS-Variablen aus styles.css, damit die
    Tour in beiden Farbschemata (dunkel/hell) funktioniert. Diese Datei fasst
@@ -236,8 +236,7 @@
   .tour-ring { animation: none; }
 }
 
-/* Waehrend einer Tour tritt die Demo-Leiste zurueck (Validierung 2026-09-25,
-   VAL-19): Sie reicht bis an den unteren Rand und schien durch die Aussparung
+/* Waehrend einer Tour tritt die Demo-Leiste zurueck: Sie reicht bis an den unteren Rand und schien durch die Aussparung
    von Ankern wie Statusleiste oder Abwesenheit. Ihr Platz bleibt reserviert
    (--demo-banner-h), damit die Anker nicht springen. */
 html[data-tour-active] .demo-banner {

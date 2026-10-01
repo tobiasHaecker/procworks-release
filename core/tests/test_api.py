@@ -685,7 +685,7 @@ def test_adhoc_insert_via_api_runs_through_variant() -> None:
     a_id = wl["ready_activities"][0]
     rule = client.get(f"/schemas/{sid}").json()["staff_rules"][a_id]
 
-    # Without a staff rule the new step would stand in nobody's worklist (VAL-03).
+    # Without a staff rule the new step would stand in nobody's worklist.
     unstaffed = client.post(
         f"/instances/{iid}/adhoc/insert",
         json={"after_node_id": a_id, "label": "Zusatz", "reason": "Test"},

@@ -4,7 +4,7 @@
 Stufe A (K/D/Z/…) is an *invariant*: it holds after every single operation, so a
 draft can never be structurally broken. Stufe B is a different kind of statement
 -- "this schema is not merely correct, it is also runnable" -- and a half-built
-draft is allowed to fail it (concept §1.1.1, §3.4).
+draft is allowed to fail it.
 
 The rule implemented today is **B2**: every interactive step carries a staff rule
 (BZR). Without one the step *is* activated at runtime, but
@@ -170,7 +170,7 @@ def test_a_correct_schema_can_be_unreleasable() -> None:
     """The whole point of the split: structurally perfect, not yet runnable.
 
     A draft may sit here indefinitely -- that is the "Angebotsmodell", not an
-    error state. Only the release is gated (staged; see the concept §3.4).
+    error state. Only the release is gated (staged).
     """
 
     schema = serial_insert(create_empty_schema("Halbfertig"), "Prüfen", "start")

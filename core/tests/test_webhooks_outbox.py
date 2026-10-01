@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Webhook subscriptions and the transactional outbox dispatcher (P4, §6.3).
+"""Webhook subscriptions and the transactional outbox dispatcher (P4).
 
 Covers four layers:
 
@@ -707,7 +707,7 @@ def test_transport_reads_only_a_bounded_part_of_the_response() -> None:
     assert _MAX_RESPONSE_BYTES <= 1024 * 1024
 
 
-# --- sprachneutrale Absagen + erklaerte Signatur (Nachtest 2026-09-22, Mangel 9)
+# --- sprachneutrale Absagen + erklaerte Signatur ----------------------------
 
 
 def test_refusals_carry_a_code_and_parameters_for_the_client() -> None:

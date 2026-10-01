@@ -5,7 +5,7 @@ The schema only ever carries connector *metadata* (``ConnectorDescriptor``:
 ``id``, ``name``, ``kind``). The actual connection details -- URL/DSN, account,
 and the secret -- live **server-side** in this registry, sourced from a small
 secret store. This keeps credentials out of the model and out of version
-control (concept §7.3).
+control.
 
 A :class:`ConnectionConfig` describes one connector technically; its ``url`` may
 embed ``${ENV_VAR}`` placeholders that are resolved from the process environment
@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from typing import Any
 
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine
@@ -42,17 +43,48 @@ _SECRET_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _CONNECTIONS_ENV = "PROCWORKS_CONNECTIONS"
 
 
+def _env_secret(name: str) -> str:
+    """Return the secret stored in environment variable ``name``.
+
+    The one lookup behind both secret forms of a connection: ``${VAR}``
+    references inside the URL (:func:`_resolve_secrets`) and the OData bearer
+    token named by ``token_env``. An empty value counts as set.
+
+    :raises DataAccessError: when the variable is not set at all.
+    """
+
+    secret = os.environ.get(name)
+    if secret is None:
+        raise DataAccessError(f"secret '{name}' is not set in the environment")
+    return secret
+
+
 def _resolve_secrets(value: str) -> str:
     """Replace ``${VAR}`` references in ``value`` with environment secrets."""
 
-    def repl(match: re.Match[str]) -> str:
-        name = match.group(1)
-        secret = os.environ.get(name)
-        if secret is None:
-            raise DataAccessError(f"secret '{name}' is not set in the environment")
-        return secret
+    return _SECRET_REF.sub(lambda match: _env_secret(match.group(1)), value)
 
-    return _SECRET_REF.sub(repl, value)
+
+def _capability(connector: Connector, connector_id: str, name: str, what: str) -> Any:
+    """Return the optional SPI method ``name`` of ``connector``, or raise.
+
+    ``select_scalar``, ``update_scalar`` and ``columns`` are not part of the
+    narrow :class:`~procworks.dal.Connector` protocol; a connector offers them
+    or not. (``entities`` is optional too, but a missing one yields an empty
+    list instead -- see :meth:`ConnectionRegistry.entities`.)
+
+    :param connector: the built connector.
+    :param connector_id: its id, named in the error message.
+    :param name: the method to look up.
+    :param what: what the method does, for the message ("scalar SQL selects").
+    :returns: the bound method.
+    :raises DataAccessError: when the connector does not offer it.
+    """
+
+    method = getattr(connector, name, None)
+    if not callable(method):
+        raise DataAccessError(f"connector '{connector_id}' does not support {what}")
+    return method
 
 
 class ConnectionConfig(BaseModel):
@@ -97,24 +129,24 @@ class _LazyConnector:
     def select_scalar(
         self, binding: SqlSelectBinding, key_values: Record
     ) -> object:
-        connector = self._registry.connector(self._connector_id)
-        method = getattr(connector, "select_scalar", None)
-        if not callable(method):
-            raise DataAccessError(
-                f"connector '{self._connector_id}' does not support scalar SQL selects"
-            )
+        method = _capability(
+            self._registry.connector(self._connector_id),
+            self._connector_id,
+            "select_scalar",
+            "scalar SQL selects",
+        )
         result: object = method(binding, key_values)
         return result
 
     def update_scalar(
         self, binding: SqlWriteBinding, value: object, key_values: Record
     ) -> int:
-        connector = self._registry.connector(self._connector_id)
-        method = getattr(connector, "update_scalar", None)
-        if not callable(method):
-            raise DataAccessError(
-                f"connector '{self._connector_id}' does not support scalar SQL writes"
-            )
+        method = _capability(
+            self._registry.connector(self._connector_id),
+            self._connector_id,
+            "update_scalar",
+            "scalar SQL writes",
+        )
         result: int = method(binding, value, key_values)
         return result
 
@@ -156,13 +188,7 @@ class ConnectionRegistry:
     @staticmethod
     def _build(config: ConnectionConfig) -> Connector:
         if config.kind in (ConnectorKind.DYNAMICS_365, ConnectorKind.SAP):
-            token: str | None = None
-            if config.token_env:
-                token = os.environ.get(config.token_env)
-                if token is None:
-                    raise DataAccessError(
-                        f"secret '{config.token_env}' is not set in the environment"
-                    )
+            token = _env_secret(config.token_env) if config.token_env else None
             return ODataConnector(_resolve_secrets(config.url), token=token)
         engine = create_engine(_resolve_secrets(config.url))
         return SqlAlchemyConnector(
@@ -205,12 +231,9 @@ class ConnectionRegistry:
     def columns(self, connector_id: str, entity: str) -> list[dict[str, object]]:
         """Reflect a connector entity's columns for the GUI mapping assistant."""
 
-        connector = self.connector(connector_id)
-        method = getattr(connector, "columns", None)
-        if not callable(method):
-            raise DataAccessError(
-                f"connector '{connector_id}' does not support column introspection"
-            )
+        method = _capability(
+            self.connector(connector_id), connector_id, "columns", "column introspection"
+        )
         result: list[dict[str, object]] = method(entity)
         return result
 

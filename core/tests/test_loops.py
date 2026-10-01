@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""K6: structured REPEAT-UNTIL loops (Schleifen-Konzept, stages S1-S3).
+"""K6: structured REPEAT-UNTIL loops (stages S1-S3).
 
 Pins the constructive loop guarantee: a loop can only exist properly paired
 (K6a), with a decidable exit condition (K6b) that is freshly written on every
@@ -83,7 +83,7 @@ def _loop_schema():
     schema = create_empty_schema("Schleife")
     schema = serial_insert(schema, "Erfassen", after_node_id="start")
     schema = add_data_element(schema, "na", DataType.BOOLEAN, element_id="na")
-    # Explicitly unbounded: the default is a brake of 10 since VAL-31.
+    # Explicitly unbounded: the default is a brake of 10.
     return insert_loop(
         schema, _nid(schema, "Erfassen"), "Pruefen", discriminator="na", max_iterations=None
     )
@@ -871,8 +871,8 @@ def test_s3_loop_cells_and_decision_endpoint_via_api() -> None:
 
 
 def test_a_new_loop_has_the_same_brake_as_the_web_dialog() -> None:
-    """VAL-31: per API ohne ``max_iterations`` lief eine Schleife unbegrenzt,
-    die Oberflaeche setzte 10. Jetzt gilt 10 fuer jeden Eingang; ``None``
+    """Per API ohne ``max_iterations`` laeuft eine Schleife nicht unbegrenzt:
+    10 gilt fuer jeden Eingang wie in der Oberflaeche; ``None``
     schaltet die Bremse weiter bewusst ab."""
 
     from procworks.operations import DEFAULT_MAX_ITERATIONS

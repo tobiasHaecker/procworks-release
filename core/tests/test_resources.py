@@ -368,8 +368,8 @@ def test_clear_staff_rule_rejected_on_released_schema():
 
 
 def test_performer_candidates_are_exactly_what_z3_accepts() -> None:
-    """VAL-25: Der Dialog bot Schritte des anderen XOR-Zweigs an; erst der
-    Klick brachte Z3. Die Kandidaten kommen jetzt aus derselben Analyse."""
+    """Der Dialog bietet keine Schritte des anderen XOR-Zweigs an, die erst der
+    Klick mit Z3 ablehnt: Die Kandidaten kommen aus derselben Analyse."""
     from fastapi.testclient import TestClient
 
     from procworks.api import app

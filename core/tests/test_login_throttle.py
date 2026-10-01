@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Password guessing is slowed down (Validierung 2026-09-25, VAL-06).
+"""Password guessing is slowed down.
 
-26 wrong passwords against the admin account in a row were answered at once
-with 401. ``LoginThrottle`` now locks a login -- and, with a higher allowance,
-a client address -- after a few failures, with a doubling lock time. The API
+Wrong passwords must not be answerable at full speed. ``LoginThrottle`` locks a login -- and, with
+a higher allowance, a client address -- after a few failures, with a doubling lock time. The API
 answers 429 with ``Retry-After`` *before* checking the password.
 """
 

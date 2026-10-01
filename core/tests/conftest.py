@@ -52,7 +52,7 @@ def _no_real_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _fresh_login_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test starts with an empty login throttle (VAL-06).
+    """Every test starts with an empty login throttle.
 
     The throttle is module state of the API and counts failures per login and
     per client address -- and every TestClient request comes from the same

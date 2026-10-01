@@ -247,8 +247,8 @@ curl -X POST https://host/v1/incidents/inc_9/resolve -H "Authorization: Bearer $
 ## 4. Outbound – Push (`HTTP_PUSH`)
 
 Statt dass ein Worker zieht, **pusht** ProcWorks das Eingabe-Datenpaket aktiv an ein
-serverseitig konfiguriertes Tool-Endpoint. Das ist die *asynchrone* Variante aus
-Konzept §6.3: Der Push trägt ein **Callback-Token**; das Tool quittiert und meldet das
+serverseitig konfiguriertes Tool-Endpoint. Das ist die *asynchrone* Variante:
+Der Push trägt ein **Callback-Token**; das Tool quittiert und meldet das
 Ergebnis später über den **regulären** Completion-Endpunkt zurück.
 
 ### 4.1 Push-Ziele konfigurieren (Betreiber)
@@ -450,7 +450,7 @@ bzw. die Swagger-UI unter `/docs`.
 - **At-least-once-Zustellung:** transaktionale Outbox + Backoff-Retry + Circuit-Breaker.
 - **Keine Secrets im Modell:** Connector-/Push-/Webhook-Secrets nur serverseitig (`${ENV}`/`secret_ref`).
 - **SSRF-Schutz:** Webhook-Ziele gegen Allowlist bzw. nur öffentliche Adressen, geprüft bei
-  jeder Zustellung, Verbindung an die geprüfte Adresse, keine Weiterleitungen (§5); Push-Ziele
+  jeder Zustellung, Verbindung an die geprüfte Adresse, keine Weiterleitungen (siehe Abschnitt 5 dieses Leitfadens); Push-Ziele
   nur vom Betreiber konfigurierbar.
 - **Kein Injection:** ausschließlich parametrisierte DAL-Zugriffe; whitelisted Bezeichner.
 - **Kern bleibt rein:** die Integrationsschicht treibt den Kern über bestehende Operationen;

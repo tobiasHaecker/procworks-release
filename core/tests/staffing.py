@@ -17,7 +17,7 @@ Like everything else in the codebase it goes through the public change
 operations: no fixture builds a schema behind the validator's back.
 
 Not a test module (no ``test_`` prefix), imported flat -- ``tests/`` is
-deliberately not a package (see CLAUDE.md).
+deliberately not a package.
 """
 
 from __future__ import annotations

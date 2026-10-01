@@ -51,7 +51,7 @@ const state = {
   authMode: "open",
   passwordLogin: false,
   // OIDC-Redirect-Login (JWT-Modus, Opt-in): Endpunkte/Client-Id aus
-  // /auth/config, oder null -> die SPA zeigt nur das Token-Feld (§12.4).
+  // /auth/config, oder null -> die SPA zeigt nur das Token-Feld.
   oidc: null,
   // Public-demo login conveniences, filled from /auth/config in demo mode only
   // (PROCWORKS_DEMO_MODE on the server). Empty/false in every real deployment.
@@ -102,8 +102,8 @@ const state = {
   // Aktiver Tab der Bindungs-Palette der klassischen Sicht ("data" | "res").
   // Nicht persistiert.
   paletteTab: "data",
-  // Modellieren-Sicht: aufgeklappte Abschnitte der Schritt-Karte (§4.4 des
-  // Konzepts "Modellieren im Kontrollfluss"). Persistiert, damit die eigene
+  // Modellieren-Sicht: aufgeklappte Abschnitte der Schritt-Karte.
+  // Persistiert, damit die eigene
   // Arbeitsweise erhalten bleibt -- wer Zeit/Priorität immer braucht, klappt sie
   // einmal auf. Ein defekter/fehlender Eintrag faellt auf CARD_DEFAULT_OPEN
   // zurueck (siehe readCardOpen).
@@ -257,7 +257,7 @@ const GATEWAYS = new Set([
 ]);
 const DATA_TYPES = ["INTEGER", "FLOAT", "DECIMAL", "STRING", "DATE", "BOOLEAN", "URI"];
 /**
- * Zahlentypen: Ganzzahl, Kommazahl und Betrag (DECIMAL, seit VAL-16). Eine
+ * Zahlentypen: Ganzzahl, Kommazahl und Betrag (DECIMAL). Eine
  * Stelle statt verstreuter ``=== "INTEGER" || === "FLOAT"``-Pruefungen, die
  * einen neuen Zahlentyp sonst stillschweigend wie Text behandelten.
  * @param {string} t Datentyp
@@ -267,7 +267,7 @@ function isNumericType(t) { return t === "INTEGER" || t === "FLOAT" || t === "DE
 
 /**
  * Anzeigewert eines Datenelements: Betraege immer mit zwei Nachkommastellen
- * und deutschem Trennzeichen („1.234,50“, VAL-16), Ja/Nein ausgeschrieben,
+ * und deutschem Trennzeichen („1.234,50“), Ja/Nein ausgeschrieben,
  * alles andere unveraendert. Nur Anzeige -- Eingabefelder erhalten den Rohwert.
  * @param {object|undefined} elem Datenelement
  * @param {*} v Wert
@@ -383,10 +383,10 @@ function toast(kind, title, lines) {
       : null,
     el("div", { class: "t-title" }, title), list);
   // Eine erfolgreiche Folgeaktion erledigt die offenen Fehler: Sie standen
-  // sonst neben der Erfolgsmeldung, als waere noch etwas falsch (VAL-13).
+  // sonst neben der Erfolgsmeldung, als waere noch etwas falsch.
   if (kind === "ok") clearToasts("err");
   // Dieselbe Meldung ein zweites Mal ersetzt die erste, statt sich darunter zu
-  // stapeln (NT-10: zweimal „Abschliessen“ = zweimal derselbe Pflichtfeld-Hinweis).
+  // stapeln (zweimal „Abschliessen“ = zweimal derselbe Pflichtfeld-Hinweis).
   [...root.querySelectorAll(".toast." + kind)]
     .filter((o) => o.textContent.replace(/^\u00D7/, "") === t.textContent.replace(/^\u00D7/, ""))
     .forEach((o) => o.remove());
@@ -394,20 +394,20 @@ function toast(kind, title, lines) {
   if (sticky) {
     const open = [...root.querySelectorAll(".toast.err")];
     open.slice(0, Math.max(0, open.length - 3)).forEach((o) => o.remove());
-    // Fehler bleiben lesbar stehen, aber nicht ewig (VAL-13).
+    // Fehler bleiben lesbar stehen, aber nicht ewig.
     setTimeout(() => t.remove(), TOAST_ERROR_MS);
   } else {
     setTimeout(() => t.remove(), 3500);
   }
 }
 
-/** Wie lange eine Fehlermeldung ohne Zutun stehen bleibt (VAL-13). */
+/** Wie lange eine Fehlermeldung ohne Zutun stehen bleibt. */
 const TOAST_ERROR_MS = 20000;
 
 /**
  * Schliesst offene Meldungen -- alle oder nur einer Art (``"err"``).
  * Aufgerufen nach einer erfolgreichen Aktion (nur Fehler) und beim Wechsel des
- * Logins (alle): Maras Z3-Fehler stand sonst bei Erika und Tom noch da (VAL-13).
+ * Logins (alle): Maras Z3-Fehler stand sonst bei Erika und Tom noch da.
  * @param {string} [kind] nur Meldungen dieser Art schliessen
  */
 function clearToasts(kind) {
@@ -563,7 +563,7 @@ const FINDING_TEXTS = {
   }),
   // --- Ziel-Pruefung der Webhooks (Regel I6, SSRF) -----------------------
   // Der Kern bleibt sprachneutral; formuliert wird hier, wie bei jedem Befund.
-  // Laufzeit (NT-07): Die Engine lehnt eine Aktion ab (409). Bis 1.28.0 kam
+  // Laufzeit: Die Engine lehnt eine Aktion ab (409). Bis 1.28.0 kam
   // nur der englische Text, etwa „activity 'act_1' is already claimed by
   // 'a-tom' (W1)“. ``step`` ist der Schrittname, ``agent`` eine Agenten-ID.
   "EX.not-allowed": () => ({ text: "Das ist im aktuellen Zustand des Vorgangs nicht möglich." }),
@@ -606,7 +606,7 @@ const FINDING_TEXTS = {
   "EX.not-running": () => ({ text: "Der Vorgang läuft nicht mehr." }),
   "EX.unknown-step": () => ({ text: "Diesen Schritt gibt es im Vorgang nicht." }),
   "EX.not-activity": (p) => ({ text: `${stepOf(p)} ist kein Aufgaben-Schritt.` }),
-  // BPMN-Import (NT-07): vorher roh „unsupported BPMN element 'inclusiveGateway'“.
+  // BPMN-Import: vorher roh „unsupported BPMN element 'inclusiveGateway'“.
   "BPMN.invalid": () => ({ text: "Die BPMN-Datei lässt sich nicht übernehmen." }),
   "BPMN.no-process": () => ({ text: "Die Datei enthält keinen Prozess (<process>)." }),
   "BPMN.bad-extension": () => ({
@@ -748,7 +748,7 @@ const FINDING_TEXTS = {
     text: "Diese Instanz wurde einzeln angepasst (Ad-hoc-Änderung) und wird deshalb nicht automatisch migriert.",
     hint: "Sie läuft sicher auf ihrer Version weiter.",
   }),
-  // --- Seit VAL-07 (Validierung 2026-09-25): jeder Befund des Kerns traegt einen
+  // --- Jeder Befund des Kerns traegt einen
   // Code. IDs in den Parametern loest ``nm()`` gegen das gezeigte Modell auf,
   // ``p.step`` ergaenzt ``findingText`` aus ``node_id``.
   "K2.degree": (p) => ({
@@ -988,7 +988,7 @@ const FINDING_TEXTS = {
  * @returns {string}
  */
 /**
- * Anzeigename fuer eine ID aus Befund-Parametern (VAL-07).
+ * Anzeigename fuer eine ID aus Befund-Parametern.
  *
  * Viele Befunde des Kerns nennen IDs (Datenelement, Rolle, Person, Schritt),
  * weil der Kern an der Stelle nur die ID kennt. Aufgeloest wird gegen das
@@ -1016,7 +1016,7 @@ function nm(id) {
 }
 
 /**
- * Fachliche Namen der Datentypen fuer **jede** Anzeige (VAL-07, VAL-16).
+ * Fachliche Namen der Datentypen fuer **jede** Anzeige.
  * INTEGER/FLOAT/STRING/BOOLEAN/URI standen roh in Dialogen und Tabellen; die
  * API-Werte bleiben unveraendert (``value`` der Auswahllisten), nur die
  * Beschriftung ist deutsch.
@@ -1027,8 +1027,8 @@ const DATA_TYPE_LABELS = {
 function typeName(t) { return DATA_TYPE_LABELS[t] || t || "?"; }
 
 /**
- * Titel eines Vorgangs aus seinen benennenden Werten (``display_fields``,
- * VAL-17): „4711 · Müller GmbH“ statt ``instance_14``. Leere Werte fallen weg;
+ * Titel eines Vorgangs aus seinen benennenden Werten (``display_fields``):
+ * „4711 · Müller GmbH“ statt ``instance_14``. Leere Werte fallen weg;
  * ohne Werte ist der Titel leer und die Aufrufer zeigen die ID.
  * @param {{name: string, value: *}[]|undefined} values ``context`` einer Aufgabe
  *   bzw. ein Eintrag aus ``GET /instance-titles``
@@ -1043,7 +1043,7 @@ function contextTitle(values) {
 
 /**
  * Anzeigename eines Vorgangs in seiner Detailansicht: benennende Werte plus ID
- * (VAL-17), ohne Werte nur die ID.
+ *, ohne Werte nur die ID.
  * @param {object} inst Vorgang
  * @param {object} schema Schema, gegen das er laeuft
  * @returns {string}
@@ -1065,7 +1065,7 @@ function schemaName(id) { return (state.schemaNames && state.schemaNames[id]) ||
  * @param {string} [fallback] Ersatz, wenn der Befund keinen Schritt nennt
  */
 /**
- * Deutscher Name eines BPMN-Elements, das der Import ablehnt (NT-07).
+ * Deutscher Name eines BPMN-Elements, das der Import ablehnt.
  * @param {string} element lokaler Elementname, z. B. "inclusiveGateway"
  * @returns {string} Name mit dem BPMN-Begriff in Klammern
  */
@@ -1096,7 +1096,7 @@ function degreeText(expected) {
 function findingText(f, opts) {
   const entry = f && f.code && FINDING_TEXTS[f.code];
   if (entry) {
-    // ``step`` ergaenzen, wo der Kern nur ``node_id`` mitgibt (VAL-07).
+    // ``step`` ergaenzen, wo der Kern nur ``node_id`` mitgibt.
     const params = Object.assign({}, f.params || {});
     if (!params.step && f.node_id) params.step = nm(f.node_id);
     const t = entry(params);
@@ -1120,7 +1120,7 @@ function describeError(err) {
   // err.detail can be: string, {message}, {findings:[{rule,message,node_id,code,params}]}
   const d = err && err.detail;
   if (!d) return { title: err.message || "Fehler", lines: [] };
-  // 403 der Rollenpruefung kommt als nacktes „forbidden“ (VAL-07).
+  // 403 der Rollenpruefung kommt als nacktes „forbidden“.
   if (err.status === 403 && d === "forbidden") {
     return { title: "Daf\u00FCr fehlt dir die Berechtigung.", lines: ["Wende dich an deine Administration, wenn du diese Aktion brauchst."] };
   }
@@ -1134,10 +1134,27 @@ function describeError(err) {
   }
   // Ein Boundary-Befund mit Code (z. B. die SSRF-Pruefung der Webhooks) wird im
   // selben Katalog formuliert wie ein Regelbefund -- sonst stuende hier wieder
-  // ein englischer Satz (Nachtest 2026-09-22, Mangel 9).
+  // ein englischer Satz.
   if (d.code) return { title: findingText(d, { withHint: true }), lines: [] };
   if (d.message) return { title: d.message, lines: [] };
   return { title: "Fehler", lines: [] };
+}
+
+/**
+ * Zeigt einen gescheiterten API-Aufruf als Fehlermeldung an.
+ *
+ * Buendelt das Muster ``describeError`` + ``toast("err", …)``, das fast jede
+ * Aktion in ihrem ``catch`` braucht. Formuliert wird ausschliesslich in
+ * ``describeError`` (Regelbefunde ueber ``findingText``, 403 als Satz); diese
+ * Funktion reicht Titel und Zeilen nur unveraendert an ``toast`` weiter.
+ *
+ * @param {*} err Der gefangene Fehler (typisch ``{status, detail}`` aus
+ *   ``request``, aber auch ein gewoehnlicher ``Error``).
+ * @returns {void}
+ */
+function toastError(err) {
+  const d = describeError(err);
+  toast("err", d.title, d.lines);
 }
 
 // --------------------------------------------------------------------------
@@ -1150,8 +1167,8 @@ function describeError(err) {
  * Genau deshalb sitzt hier der Sperrpunkt der gefuehrten Tour: Solange eine
  * Sandkasten-Tour laeuft, beantwortet ``Tour.intercept`` jeden schreibenden
  * Aufruf aus einer Aufzeichnung, und es findet KEIN fetch statt. Dadurch
- * entstehen durch Tutorial-Eingaben keine dauerhaften Daten
- * (docs/Tutorial-Konzept.md, §4). Ausserhalb der Tour ist der Aufruf ein No-op.
+ * entstehen durch Tutorial-Eingaben keine dauerhaften Daten.
+ * Ausserhalb der Tour ist der Aufruf ein No-op.
  *
  * @param {string} method HTTP-Methode.
  * @param {string} path Pfad ab der API-Basis.
@@ -1181,11 +1198,11 @@ async function request(method, path, body) {
     data = text ? JSON.parse(text) : null;
   } catch (_e) {
     // Keine JSON-Antwort: Hinter der Adresse steht kein ProcWorks-Kern, meist
-    // die Weboberflaeche selbst (NT-17: sonst „Unexpected token '<' …“).
+    // die Weboberflaeche selbst (sonst stuende hier „Unexpected token '<' …“).
     throw { detail: `Unter ${state.apiBase} antwortet kein ProcWorks-Server. Die API-Adresse unten in der Seitenleiste pr\u00FCfen (\u00FCblich: ${defaultApiBase()}).` };
   }
   if (!resp.ok) {
-    // Demo: Sitzung verloren (VAL-20) -- einmal still neu anmelden, statt den
+    // Demo: Sitzung verloren -- einmal still neu anmelden, statt den
     // Besucher auf einer nackten Anmeldung abzusetzen. Nicht fuer den Login
     // selbst, sonst ruft er sich endlos auf.
     if (resp.status === 401 && state.demo && state.token && path !== "/auth/login") {
@@ -1197,7 +1214,7 @@ async function request(method, path, body) {
 }
 
 /**
- * Antwortet unter ``base`` ein ProcWorks-Kern? (NT-17)
+ * Antwortet unter ``base`` ein ProcWorks-Kern?
  * @param {string} base API-Basisadresse, z. B. "http://localhost/api"
  * @returns {Promise<boolean>} true bei ``GET /health`` mit JSON ``{status: "ok"}``
  */
@@ -1213,7 +1230,7 @@ async function isProcWorksApi(base) {
 let demoRecovering = false;
 
 /**
- * Stellt eine verlorene Demo-Sitzung wieder her (VAL-20).
+ * Stellt eine verlorene Demo-Sitzung wieder her.
  *
  * Die Demo-Instanz haelt Sitzungen und Daten im Speicher. Startet die Maschine
  * nach einer Leerlaufpause neu, ist beides weg -- der Besucher landete nach
@@ -1279,7 +1296,7 @@ function showVersion(version) {
 
 function openModal(title, bodyNode, onConfirm, confirmLabel) {
   const root = byId("modal-root");
-  // Wer den Dialog oeffnete, bekommt den Fokus danach zurueck (NT-15). Kommt
+  // Wer den Dialog oeffnete, bekommt den Fokus danach zurueck. Kommt
   // der Aufruf aus einem schon offenen Dialog (Dialog ersetzt Dialog), zaehlt
   // dessen Ausloeser, nicht der verschwindende Knopf darin.
   const opener = root.contains(document.activeElement)
@@ -1315,10 +1332,10 @@ function openModal(title, bodyNode, onConfirm, confirmLabel) {
   // und Links (Enter loest deren eigene Aktion aus), Auswahllisten, jede
   // Zusatztaste und laufende IME-Eingaben.
   modal.addEventListener("keydown", (e) => {
-    // Escape schliesst wie „Abbrechen“ (NT-15). Der globale Escape-Handler
+    // Escape schliesst wie „Abbrechen“. Der globale Escape-Handler
     // ueberlaesst die Taste bewusst dem offenen Dialog.
     if (e.key === "Escape" && !e.isComposing) { e.preventDefault(); close(); return; }
-    // Tab bleibt im Dialog und laeuft im Kreis (NT-15). ``inert`` sperrt nur die
+    // Tab bleibt im Dialog und laeuft im Kreis. ``inert`` sperrt nur die
     // App; Tour-Angebot, Meldungen und Demo-Leiste liegen daneben und haetten
     // den Fokus sonst aus dem Dialog gezogen.
     if (e.key === "Tab") {
@@ -1339,7 +1356,7 @@ function openModal(title, bodyNode, onConfirm, confirmLabel) {
     confirmBtn.click();
   });
   root.appendChild(modal);
-  // Fokus in den Dialog: ins erste Feld, sonst auf „Bestaetigen“ (NT-15). Ohne
+  // Fokus in den Dialog: ins erste Feld, sonst auf „Bestaetigen“. Ohne
   // Feld blieb er auf dem Knopf hinter dem Dialog; Tab lief dann nur durch die
   // Seite und erreichte „Abschliessen“ nie. Die Seite dahinter ist waehrend
   // des Dialogs ``inert`` (siehe watchInert), Tab bleibt also im Dialog.
@@ -1979,12 +1996,12 @@ function renderGraph(schema, opts) {
       style: opts.onSelectNode ? "cursor:pointer" : "",
       onClick: opts.onSelectNode ? () => opts.onSelectNode(id) : null });
     g.appendChild(svg("rect", { x: p.x, y: p.y, width: p.w, height: p.h, rx: 10 }));
-    // Gekuerzte Bezeichnung: die volle steht als Tooltip am Knoten (VAL-30).
+    // Gekuerzte Bezeichnung: die volle steht als Tooltip am Knoten.
     const caption = nodeCaption(node);
     if (caption.length > 18) g.appendChild(svg("title", null, document.createTextNode(caption)));
     g.appendChild(svg("text", { class: "glabel", x: p.x + p.w / 2, y: p.y + p.h / 2 - 2, "text-anchor": "middle" },
       document.createTextNode(truncate(caption, 18))));
-    // E2-Status-Overlay (Detailzustaende-Konzept §7 Stufe C): ein angehaltener
+    // E2-Status-Overlay (Stufe C): ein angehaltener
     // oder gescheiterter Schritt ist direkt in der Prozesslandkarte sichtbar,
     // nicht erst in der Aufgabenliste -- Statustext + Randfarbe am Knoten.
     const detail = opts.instance && opts.instance.node_details
@@ -2049,7 +2066,7 @@ function renderGraph(schema, opts) {
  * erst nach dem Einhaengen. Eine Sicht, die ihren Graphen loesgeloest baut und
  * erst danach anhaengt (Soll/Ist-Karte im Monitoring), stand deshalb beim
  * ersten Oeffnen leer da: das Modell lag ausserhalb des Ausschnitts, und man
- * musste selbst "Einpassen" druecken (Nachtest 2026-09-22, Mangel 13).
+ * musste selbst "Einpassen" druecken.
  *
  * Wartet hoechstens ein halbe Sekunde (30 Bilder) -- danach ist die Flaeche
  * entweder da oder die Sicht wurde laengst wieder verlassen; ein ewiger
@@ -2106,8 +2123,7 @@ function renderNodeBadges(root, schema, node, p, opts) {
   });
 }
 
-// Geometrie des Schnellrings am gewaehlten Knoten (Konzept "Modellieren im
-// Kontrollfluss", §4.3). Der Ring liegt UEBER dem Knoten, weil unter ihm bereits
+// Geometrie des Schnellrings am gewaehlten Knoten. Der Ring liegt UEBER dem Knoten, weil unter ihm bereits
 // der Badge-Stapel haengt (siehe renderNodeBadges).
 const RING_R = 11, RING_GAP = 7, RING_LIFT = 24;
 
@@ -2356,21 +2372,21 @@ function attachPanZoom(wrap, svgEl) {
   const FIT_READABLE = 0.6;
   /**
    * Mindestmassstab der Uebersicht (zweiter Klick). Frueher bis MIN (0,2) --
-   * ein Modell mit 16 Knoten war dann nicht mehr lesbar (VAL-23). Was bei
+   * ein Modell mit 16 Knoten war dann nicht mehr lesbar. Was bei
    * diesem Massstab nicht passt, bleibt seitlich verschiebbar; die Randpfeile
    * zeigen, dass dort noch etwas liegt.
    */
   const FIT_OVERVIEW_MIN = 0.35;
 
   // Randpfeile: „hier geht es weiter“. Ohne sie wirkte das lesbare Einpassen
-  // wie ein abgeschnittenes Modell (VAL-23).
+  // wie ein abgeschnittenes Modell.
   const moreLeft = el("div", { class: "canvas-more canvas-more-left", "aria-hidden": "true" }, "\u25C0");
   const moreRight = el("div", { class: "canvas-more canvas-more-right", "aria-hidden": "true" }, "\u25B6 weiter rechts");
   wrap.appendChild(moreLeft);
   wrap.appendChild(moreRight);
 
   /**
-   * Der tatsaechlich sichtbare Streifen der Canvas (NT-09).
+   * Der tatsaechlich sichtbare Streifen der Canvas.
    *
    * Die Canvas ist ``clamp(420px, 66vh, 900px)`` hoch; auf Laptop-Hoehe (etwa
    * 1054 x 676) ragt sie unter den Fensterrand. Einpassen zentrierte deshalb
@@ -2403,7 +2419,7 @@ function attachPanZoom(wrap, svgEl) {
    * Senkrechte Mitte des Start-Knotens in Modellkoordinaten, falls vorhanden.
    * Die lesbare Einpassen-Stufe legt die Hauptlinie ab Start in die Mitte des
    * sichtbaren Streifens: Bei einem hohen Modell (Zweige ober- und unterhalb)
-   * zeigte die obere Ausrichtung sonst zuerst leere Flaeche (NT-09).
+   * zeigte die obere Ausrichtung sonst zuerst leere Flaeche.
    * @returns {number|null}
    */
   function startCenterY() {
@@ -2423,7 +2439,7 @@ function attachPanZoom(wrap, svgEl) {
       moreLeft.style.display = left < -4 ? "" : "none";
       moreRight.style.display = right > vw - reserveRight + 4 ? "" : "none";
       moreRight.style.right = `${10 + reserveRight}px`;  // nicht unter der Schritt-Karte
-      // Pfeile am unteren Rand des *sichtbaren* Streifens, nicht der Canvas (NT-09).
+      // Pfeile am unteren Rand des *sichtbaren* Streifens, nicht der Canvas.
       const band = visibleBand();
       const lift = Math.max(0, wrap.clientHeight - (band.top + band.h));
       moreLeft.style.bottom = moreRight.style.bottom = `${8 + lift}px`;
@@ -2644,7 +2660,7 @@ function attachPanZoom(wrap, svgEl) {
 }
 
 /**
- * Anzeigetext einer Kantenbedingung (NT-10).
+ * Anzeigetext einer Kantenbedingung.
  *
  * Der Kern leitet die Bedingung als technischen Text ab („Entscheidung:
  * otherwise“, „Freigabe == true“); der BPMN-Import liest genau diesen Text
@@ -2691,7 +2707,7 @@ async function loadSchemas() {
 }
 
 /**
- * Laedt die Namen von Prozessen nach, die seit dem Anmelden entstanden sind (NT-10).
+ * Laedt die Namen von Prozessen nach, die seit dem Anmelden entstanden sind.
  *
  * ``loadSchemas`` holt Namen nur beim Laden der Liste; ein Prozess, den jemand
  * anderes spaeter freigab, stand in „Meine Aufgaben“ und im Monitoring bis zum
@@ -2733,6 +2749,38 @@ async function refreshSchema() {
   localStorage.setItem("schemaId", state.schemaId);
 }
 
+/**
+ * Fuehrt EINE Modell-Operation am Kern aus und zeigt ihr Ergebnis an.
+ *
+ * Das gemeinsame Geruest fast aller Bindungs-, Knoten- und Organisations-
+ * aenderungen: Aufruf absetzen, bei Erfolg das Schema neu laden
+ * (``refreshSchema``), neu zeichnen und eine Erfolgsmeldung zeigen; bei einer
+ * Ablehnung (422/409/403) die Meldung des Kerns ueber ``toastError``. Ob die
+ * Aenderung zulaessig ist, entscheidet allein der Kern (Validate-before-Commit)
+ * -- der Client prueft hier nichts.
+ *
+ * Der Rueckgabewert passt direkt auf den Bestaetigen-Rueckruf von
+ * ``openModal``: ``false`` laesst den Dialog nach einer Ablehnung offen, damit
+ * die Eingabe korrigiert werden kann; ``true`` schliesst ihn.
+ *
+ * @param {function(): Promise<*>} call Setzt den API-Aufruf ab. Als Funktion
+ *   uebergeben, damit ein Fehler erst hier im ``try`` entsteht.
+ * @param {string} okTitle Titel der Erfolgsmeldung.
+ * @param {string[]} [okLines] Optionale Detailzeilen der Erfolgsmeldung.
+ * @returns {Promise<boolean>} ``true`` nach Erfolg, ``false`` nach einem
+ *   Fehler (auch wenn erst das Neuladen des Schemas scheitert).
+ */
+async function commitSchemaChange(call, okTitle, okLines) {
+  try {
+    await call();
+    await refreshSchema(); render(); toast("ok", okTitle, okLines);
+    return true;
+  } catch (err) {
+    toastError(err);
+    return false;
+  }
+}
+
 async function selectSchema(id) {
   state.schemaId = id;
   state.selectedNode = null;
@@ -2756,7 +2804,7 @@ async function openCreatedSchema(id) {
 }
 
 /**
- * Leerzustand der Modellieren-Sicht (beide Oberflaechen, VAL-33): Umlaute statt
+ * Leerzustand der Modellieren-Sicht (beide Oberflaechen): Umlaute statt
  * „ausgewaehlt“ und gleich die naechsten Schritte als Knoepfe. „Beispieldaten
  * laden“ nur fuer Admins und nur, wenn das System noch **leer** ist -- das
  * Laden loescht vorher alles (``confirmReset`` fragt zusaetzlich nach).
@@ -2822,7 +2870,7 @@ function renderSchemaPicker() {
   }
   picker.appendChild(select);
   // Anlegen, Vorlage und Import nur fuer Modellierer/Admin -- ein Bearbeiter
-  // bekam nach dem Klick nur „forbidden“ (VAL-21). Der Server bleibt
+  // bekam nach dem Klick nur „forbidden“. Der Server bleibt
   // maßgeblich; das hier blendet nur aus, was ohnehin abgelehnt wuerde.
   if (!hasRole("modeler", "admin")) return;
   picker.appendChild(el("button", { class: "btn small", onClick: newSchema }, "+ Neu"));
@@ -2841,7 +2889,7 @@ async function newSchema() {
       await loadSchemas();
       await openCreatedSchema(schema.id);
       toast("ok", "Schema angelegt", [schema.name]);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Anlegen");
 }
 
@@ -2879,7 +2927,7 @@ async function importBpmn() {
       await loadSchemas();
       await openCreatedSchema(schema.id);
       toast("ok", "BPMN importiert", [schema.name]);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Importieren");
 }
 
@@ -2894,7 +2942,7 @@ async function newFromTemplate() {
   let templates;
   try {
     templates = await api.get("/templates");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return; }
+  } catch (err) { toastError(err); return; }
   if (!templates.length) {
     toast("info", "Keine Vorlagen", ["Es sind noch keine Vorlagen vorhanden."]);
     return;
@@ -2933,7 +2981,7 @@ async function newFromTemplate() {
       await loadSchemas();
       await openCreatedSchema(schema.id);
       toast("ok", "Aus Vorlage erstellt", [schema.name]);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Erstellen");
 }
 
@@ -2957,7 +3005,7 @@ async function saveAsTemplate() {
         category: catInput.value.trim(), description: descInput.value.trim(),
       });
       toast("ok", "Als Vorlage gespeichert", [tpl.name]);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Speichern");
 }
 
@@ -2969,8 +3017,7 @@ async function saveAsTemplate() {
  * Modellieren-Sicht: waehlt zwischen den beiden gleichwertigen Oberflaechen.
  *
  * * ``card``    -- Kontrollfluss als Arbeitsflaeche, alles zum gewaehlten
- *                  Schritt in einer Karte daneben (Standard, siehe
- *                  docs/Modellieren-im-Kontrollfluss-Konzept.md).
+ *                  Schritt in einer Karte daneben (Standard).
  * * ``classic`` -- die urspruengliche Zwei-Spalten-Sicht mit Knoten-Inspektor
  *                  und Bindungs-Palette rechts.
  *
@@ -3048,7 +3095,7 @@ function modelHeader(schema, draft) {
         : null,
       migrationHeaderButton(schema, draft),
       draft
-        // Gruen nur, wenn freigabereif (VAL-24) -- sonst sah der Knopf nach
+        // Gruen nur, wenn freigabereif -- sonst sah der Knopf nach
         // "fertig" aus, obwohl Schritte ohne Bearbeiter die Freigabe verhindern.
         ? el("button", {
             class: "btn small" + (isReleasable(schema) ? " green" : ""),
@@ -3215,7 +3262,7 @@ function modelStatusBar(schema, draft) {
       ? "Einen Schritt anklicken: die Karte daneben trägt alles, was an ihm getan werden kann. „+“ an einer Kante oder am Schritt fügt einen weiteren ein. Unzulässiges weist der Kern ab."
       : "Schema ist freigegeben und damit unveränderlich. Einen Schritt anklicken zeigt seine Bindungen und – gestrichelt – woher seine gelesenen Daten stammen. Zum Bearbeiten eine neue Revision anlegen.");
   bar.appendChild(el("span", { class: "model-status-txt" }, text));
-  // Die Tastaturwege (§5.2) findet ohne Hinweis niemand; deshalb stehen sie
+  // Die Tastaturwege findet ohne Hinweis niemand; deshalb stehen sie
   // hier, wo sie beim Modellieren im Blick sind (mobil ausgeblendet).
   bar.appendChild(el("span", { class: "model-status-key",
     title: "Pfeiltasten bewegen die Auswahl im Kontrollfluss (← → entlang des Ablaufs, ↑ ↓ zwischen Zweigen), Enter springt in die Karte, Esc hebt die Auswahl auf" },
@@ -3501,7 +3548,7 @@ function resourcePaletteTab(schema, draft, target) {
 // gewaehlten Schritt gehoert und mit ihm verschwindet. Sie traegt -- wie die
 // klassische Sicht -- keine Korrektheitslogik: jeder Knopf ruft dieselbe
 // Funktion und damit denselben Endpunkt wie zuvor, der Kern validiert vor dem
-// Commit. Konzept: docs/Modellieren-im-Kontrollfluss-Konzept.md
+// Commit.
 // --------------------------------------------------------------------------
 
 // Abschnitte, die ohne eigene Wahl aufgeklappt sind: das, was der Kern fuer die
@@ -3584,7 +3631,7 @@ const ARROW_DIRS = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", Arro
 
 /**
  * Nachbarknoten in einer Himmelsrichtung bestimmen -- die Grundlage der
- * Tastaturnavigation im Kontrollfluss (Konzept §5.2, Stufe U4).
+ * Tastaturnavigation im Kontrollfluss (Stufe U4).
  *
  * Rein rechnend und layout-agnostisch: gearbeitet wird auf den Kastenmitten,
  * die das Layout liefert, nicht auf der Kantenliste. Dadurch funktioniert die
@@ -3649,9 +3696,9 @@ function graphNeighbor(layout, fromId, dir) {
 }
 
 /**
- * Auswahl im Kontrollfluss per Tastatur bewegen (Konzept §5.2, Stufe U4).
+ * Auswahl im Kontrollfluss per Tastatur bewegen (Stufe U4).
  *
- * Gemeinsame Operation **beider** Modellier-Oberflaechen (siehe CLAUDE.md): sie
+ * Gemeinsame Operation **beider** Modellier-Oberflaechen (beide gleichwertig): sie
  * setzt nur ``state.selectedNode``; die jeweilige Sicht zeichnet sich neu und
  * rueckt den Knoten ueber ``centerCanvasOnNode`` wieder ins Bild -- inklusive
  * des Kartenrands, damit die Schritt-Karte den frisch gewaehlten Knoten nicht
@@ -3673,7 +3720,7 @@ function moveSelection(dir) {
 }
 
 /**
- * Fokus aus dem Kontrollfluss in die Schritt-Karte holen (Enter, §5.2).
+ * Fokus aus dem Kontrollfluss in die Schritt-Karte holen (Enter).
  *
  * Bevorzugt das Bezeichnungsfeld (der haeufigste naechste Handgriff), sonst das
  * erste Bedienelement der Karte. Ohne Karte -- klassische Sicht, keine Auswahl
@@ -4227,7 +4274,7 @@ function pickList(items, onPick, initial) {
  * vorherige Schreibquelle wird mit HTTP 422 abgewiesen, das Modell bleibt
  * unveraendert und der Befund erscheint als Meldung.
  *
- * Vorgaben (VAL-26, VAL-27): Die Richtung steht auf „Schreiben“, solange kein
+ * Vorgaben: Die Richtung steht auf „Schreiben“, solange kein
  * Schritt davor das gewaehlte Element setzt -- „Lesen“ fuehrte dort sicher zu
  * D1. Ueber „Neues Datenelement anlegen“ kommt man mit dem neuen Element
  * vorgewaehlt hierher zurueck (``preselect``).
@@ -4287,7 +4334,7 @@ function bindDataDialog(nodeId, preselect) {
         });
         await refreshSchema(); render();
         toast("ok", "Datenbindung gesetzt", [`${elem ? elem.name : id} (${modeSel.value})`]);
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      } catch (err) { toastError(err); return false; }
     }, "Binden");
 }
 
@@ -4354,10 +4401,9 @@ function bindStaffDialog(nodeId) {
  * Setzt eine Bearbeiterregel auf einen Schritt und optional auf weitere.
  *
  * Die **eine** Stelle, an der eine Zuordnung geschrieben wird -- beide Dialoge
- * (Schritt-Karte und Ressourcensicht) rufen sie auf. Bis zum Nachtest
- * 2026-09-22 (Mangel 10) konnte nur der Karten-Dialog mehrere Schritte auf
- * einmal, und wer die Zuordnung in der Ressourcensicht suchte, fand die
- * Möglichkeit dort nicht.
+ * (Schritt-Karte und Ressourcensicht) rufen sie auf. Beide koennen mehrere
+ * Schritte auf einmal zuordnen -- wer die Zuordnung in der Ressourcensicht
+ * sucht, findet dort dieselbe Moeglichkeit.
  *
  * Jede Zuordnung bleibt eine **eigene** Kern-Operation mit eigener Prüfung --
  * keine Sammel-Abkürzung. Scheitert eine, bleiben die anderen bestehen, und die
@@ -4372,7 +4418,7 @@ function bindStaffDialog(nodeId) {
 async function applyStaffRuleTo(nodeId, extra, rule) {
   try {
     await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId, rule });
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+  } catch (err) { toastError(err); return false; }
   const failed = [];
   for (const other of extra) {
     try { await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: other, rule }); }
@@ -4441,12 +4487,9 @@ function dropDataElementOnNode(nodeId, payload) {
       el("label", { class: "field" }, "Richtung", modeSel),
       el("label", { class: "row", style: "gap:8px;align-items:center" }, mandBox, "Pflichtbindung")),
     async () => {
-      try {
-        await api.post(`/schemas/${state.schemaId}/data-access`, {
-          node_id: nodeId, element_id: payload.element_id, mode: modeSel.value, mandatory: mandBox.checked,
-        });
-        await refreshSchema(); render(); toast("ok", "Datenbindung gesetzt", [`${payload.name} (${modeSel.value})`]);
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/data-access`, {
+        node_id: nodeId, element_id: payload.element_id, mode: modeSel.value, mandatory: mandBox.checked,
+      }), "Datenbindung gesetzt", [`${payload.name} (${modeSel.value})`]);
     }, "Binden");
 }
 
@@ -4469,10 +4512,7 @@ function dropResourceOnNode(nodeId, payload) {
     async () => {
       const rule = { kind: payload.rkind, ref: payload.ref };
       if (payload.rkind === "ORG_UNIT") rule.recursive = recBox.checked;
-      try {
-        await api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId, rule });
-        await refreshSchema(); render(); toast("ok", "Bearbeiter zugeordnet", [describeRule(rule)]);
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId, rule }), "Bearbeiter zugeordnet", [describeRule(rule)]);
     }, "Zuordnen");
 }
 
@@ -4481,20 +4521,14 @@ function dropResourceOnNode(nodeId, payload) {
 // Schreiber hinter einem Pflichtlesen (D1) – weist der Kern mit 422 ab und die
 // Bindung bleibt bestehen.
 async function removeDataAccess(nodeId, elementId, mode, name) {
-  try {
-    await api.del(`/schemas/${state.schemaId}/data-access/${nodeId}/${elementId}?mode=${encodeURIComponent(mode)}`);
-    await refreshSchema(); render(); toast("ok", "Datenbindung gelöst", [`${name} (${mode})`]);
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await commitSchemaChange(() => api.del(`/schemas/${state.schemaId}/data-access/${nodeId}/${elementId}?mode=${encodeURIComponent(mode)}`), "Datenbindung gelöst", [`${name} (${mode})`]);
 }
 
 // Entfernt die Bearbeiterzuordnung (BZR) eines Schritts (Inspektor „Entfernen").
 // Läuft über den Kern (DELETE /staff-rule); ein Schritt ohne Bearbeiter ist im
 // Entwurf zulässig (B2 greift erst bei der Freigabe).
 async function removeStaffRule(nodeId) {
-  try {
-    await api.del(`/schemas/${state.schemaId}/staff-rule/${nodeId}`);
-    await refreshSchema(); render(); toast("ok", "Bearbeiterzuordnung entfernt");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await commitSchemaChange(() => api.del(`/schemas/${state.schemaId}/staff-rule/${nodeId}`), "Bearbeiterzuordnung entfernt");
 }
 
 // --------------------------------------------------------------------------
@@ -4703,19 +4737,13 @@ function editMailBinding(nodeId, current) {
         mode: modeSel.value, include_deputies: depBox.checked,
         subject: subject.value, body: bodyArea.value,
       };
-      try {
-        await api.post(`/schemas/${state.schemaId}/mail-binding`, { node_id: nodeId, binding });
-        await refreshSchema(); render(); toast("ok", "Mailversand gesetzt");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/mail-binding`, { node_id: nodeId, binding }), "Mailversand gesetzt");
     }, "Speichern");
 }
 
 // Entfernt den Mailversand an einem Schritt (POST … mail-binding mit binding:null).
 async function removeMailBinding(nodeId) {
-  try {
-    await api.post(`/schemas/${state.schemaId}/mail-binding`, { node_id: nodeId, binding: null });
-    await refreshSchema(); render(); toast("ok", "Mailversand entfernt");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/mail-binding`, { node_id: nodeId, binding: null }), "Mailversand entfernt");
 }
 
 // Dienst zuweisen/aendern. Optional an ein Activity-Repository-Template gebunden
@@ -4763,10 +4791,7 @@ function assignServiceFor(nodeId) {
       req.template_id = tmplSel.value;
       req.parameter_mapping = mapHost._read ? mapHost._read() : {};
     }
-    try {
-      await api.post(`/schemas/${state.schemaId}/service`, req);
-      await refreshSchema(); render(); toast("ok", "Dienst zugewiesen", [req.name]);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/service`, req), "Dienst zugewiesen", [req.name]);
   }, "Übernehmen");
 }
 
@@ -4794,15 +4819,12 @@ function templateMappingForm(template, schema, current) {
 }
 
 async function removeService(nodeId) {
-  try {
-    await api.del(`/schemas/${state.schemaId}/service/${nodeId}`);
-    await refreshSchema(); render(); toast("ok", "Dienst entfernt");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await commitSchemaChange(() => api.del(`/schemas/${state.schemaId}/service/${nodeId}`), "Dienst entfernt");
 }
 
 function setTimeConstraintFor(nodeId, current) {
   // ``current`` ist die getragene Constraint (oder null). Zwei getrennte
-  // Soll-Zeiten (Konzept "Zeitbasierte-Priorisierung", 3.1): die Bearbeitungs-
+  // Soll-Zeiten: die Bearbeitungs-
   // dauer ab Start (T2/kritischer Pfad) und die optionale Reaktionszeit ab
   // Aktivierung, die die zeitbasierte Arbeitslisten-Priorisierung steuert.
   const tc = current || {};
@@ -4830,22 +4852,16 @@ function setTimeConstraintFor(nodeId, current) {
       const sec = dur.read();
       if (sec == null) { toast("err", "Bitte eine Dauer > 0 angeben"); return false; }
       const leadSec = lead.read();  // null = nicht gesetzt (Fallback-Regel S)
-      try {
-        await api.post(`/schemas/${state.schemaId}/time-constraint`, {
-          node_id: nodeId,
-          constraint: { max_duration_seconds: sec, target_lead_seconds: leadSec,
-            pause_stops_clock: pauseBox.checked },
-        });
-        await refreshSchema(); render(); toast("ok", "Frist gesetzt");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/time-constraint`, {
+        node_id: nodeId,
+        constraint: { max_duration_seconds: sec, target_lead_seconds: leadSec,
+          pause_stops_clock: pauseBox.checked },
+      }), "Frist gesetzt");
     }, "Speichern");
 }
 
 async function removeTimeConstraint(nodeId) {
-  try {
-    await api.post(`/schemas/${state.schemaId}/time-constraint`, { node_id: nodeId, constraint: null });
-    await refreshSchema(); render(); toast("ok", "Frist entfernt");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/time-constraint`, { node_id: nodeId, constraint: null }), "Frist entfernt");
 }
 
 // --- Synchronisation (K4) --------------------------------------------------
@@ -4901,18 +4917,12 @@ function addSyncEdgeFor(nodeId) {
     async () => {
       const src = dir.value === "waits" ? target.value : nodeId;
       const dst = dir.value === "waits" ? nodeId : target.value;
-      try {
-        await api.post(`/schemas/${state.schemaId}/sync-edge`, { source_id: src, target_id: dst });
-        await refreshSchema(); render(); toast("ok", "Sync-Kante gesetzt");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/sync-edge`, { source_id: src, target_id: dst }), "Sync-Kante gesetzt");
     }, "Hinzufügen");
 }
 
 async function removeSyncEdgeFor(sourceId, targetId) {
-  try {
-    await api.post(`/schemas/${state.schemaId}/sync-edge/remove`, { source_id: sourceId, target_id: targetId });
-    await refreshSchema(); render(); toast("ok", "Sync-Kante gelöst");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/sync-edge/remove`, { source_id: sourceId, target_id: targetId }), "Sync-Kante gelöst");
 }
 
 // Querschritt zwischen Knotenmengen (ADEPT insertBetweenNodeSets): neuer
@@ -4939,11 +4949,8 @@ function insertBetweenDialog() {
       if (!label.value.trim() || !sources.length || !targets.length) {
         toast("err", "Bezeichnung, Quellen und Ziele angeben"); return false;
       }
-      try {
-        await api.post(`/schemas/${state.schemaId}/insert-between`,
-          { label: label.value.trim(), source_ids: sources, target_ids: targets });
-        await refreshSchema(); render(); toast("ok", "Querschritt eingefügt");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/insert-between`,
+        { label: label.value.trim(), source_ids: sources, target_ids: targets }), "Querschritt eingefügt");
     }, "Einfügen");
 }
 
@@ -5014,18 +5021,12 @@ function setEscalationFor(nodeId, current) {
         kind: r.querySelector(".esc-kind").value,
         rule: { kind: "ROLE", ref: r.querySelector(".esc-role").value },
       }));
-      try {
-        await api.post(`/schemas/${state.schemaId}/escalation-policy`, { node_id: nodeId, policy: { stages } });
-        await refreshSchema(); render(); toast("ok", "Eskalation gespeichert");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/escalation-policy`, { node_id: nodeId, policy: { stages } }), "Eskalation gespeichert");
     }, "Speichern");
 }
 
 async function removeEscalation(nodeId) {
-  try {
-    await api.post(`/schemas/${state.schemaId}/escalation-policy`, { node_id: nodeId, policy: null });
-    await refreshSchema(); render(); toast("ok", "Eskalation entfernt");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/escalation-policy`, { node_id: nodeId, policy: null }), "Eskalation entfernt");
 }
 
 function setPriorityFor(nodeId, current) {
@@ -5042,25 +5043,16 @@ function setPriorityFor(nodeId, current) {
         el("label", { class: "field" }, "Auswirkung", impact),
         el("label", { class: "field" }, "Dringlichkeit", urgency))),
     async () => {
-      try {
-        await api.post(`/schemas/${state.schemaId}/priority`, { node_id: nodeId, priority: { impact: impact.value, urgency: urgency.value } });
-        await refreshSchema(); render(); toast("ok", "Priorität gesetzt");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/priority`, { node_id: nodeId, priority: { impact: impact.value, urgency: urgency.value } }), "Priorität gesetzt");
     }, "Speichern");
 }
 
 async function removePriority(nodeId) {
-  try {
-    await api.post(`/schemas/${state.schemaId}/priority`, { node_id: nodeId, priority: null });
-    await refreshSchema(); render(); toast("ok", "Priorität entfernt");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/priority`, { node_id: nodeId, priority: null }), "Priorität entfernt");
 }
 
 async function setValueClass(nodeId, value) {
-  try {
-    await api.post(`/schemas/${state.schemaId}/value-class`, { node_id: nodeId, value_class: value });
-    await refreshSchema(); render(); toast("ok", value ? "Wertklasse gesetzt" : "Wertklasse entfernt");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/value-class`, { node_id: nodeId, value_class: value }), value ? "Wertklasse gesetzt" : "Wertklasse entfernt");
 }
 
 // Prozessweiter Termin (T2): der Kern prueft, dass der kritische Pfad
@@ -5074,10 +5066,7 @@ function setProcessDeadline() {
       dur.node),
     async () => {
       const sec = dur.read();
-      try {
-        await api.post(`/schemas/${state.schemaId}/deadline`, { deadline_seconds: sec });
-        await refreshSchema(); render(); toast("ok", sec != null ? "Termin gesetzt" : "Termin entfernt");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/deadline`, { deadline_seconds: sec }), sec != null ? "Termin gesetzt" : "Termin entfernt");
     }, "Speichern");
 }
 
@@ -5282,7 +5271,7 @@ async function renameNode(nodeId, label) {
     await refreshSchema();
     render();
     toast("ok", "Aktivit\u00E4t umbenannt", [name]);
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 }
 
 function deleteNode(nodeId) {
@@ -5300,7 +5289,7 @@ function deleteNode(nodeId) {
       await refreshSchema();
       render();
       toast("ok", "Element entfernt");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Entfernen");
 }
 
@@ -5348,7 +5337,7 @@ function moveNodeDialog(nodeId) {
         await refreshSchema();
         render();
         toast("ok", "Schritt verschoben", [nodeCaption(node)]);
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      } catch (err) { toastError(err); return false; }
     }, "Verschieben");
 }
 
@@ -5399,7 +5388,7 @@ function removeEmptyBranch(splitId) {
         await refreshSchema();
         render();
         toast("ok", "Leerer Zweig entfernt");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      } catch (err) { toastError(err); return false; }
     }, "Entfernen");
 }
 
@@ -5413,7 +5402,7 @@ async function deleteForm(nodeId) {
         await refreshSchema();
         render();
         toast("ok", "Eingabemaske entfernt");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      } catch (err) { toastError(err); return false; }
     }, "Entfernen");
 }
 
@@ -5440,7 +5429,7 @@ async function toggleLibraryFlag(flag) {
     await refreshSchema();
     render();
     toast("ok", flag ? "Als Submodell markiert" : "Submodell-Markierung entfernt");
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 }
 
 // Baut das Zuordnungsformular fuer die Datenuebergabe: je Datenelement des
@@ -5486,7 +5475,7 @@ function subprocessMappingForm(target, parentSchema) {
 async function openSubprocessBinding(node, mode) {
   let library;
   try { library = await api.get("/subprocess-library"); }
-  catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return; }
+  catch (err) { toastError(err); return; }
   if (!library.length) {
     toast("info", "Keine freigegebenen Submodelle in der Bibliothek. Markiere zuerst ein freigegebenes Schema als Submodell.");
     return;
@@ -5530,7 +5519,7 @@ async function openSubprocessBinding(node, mode) {
         await refreshSchema();
         render();
         toast("ok", isConvert ? "Aktivit\u00E4t in Subprozess umgewandelt" : "Zuordnung aktualisiert");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      } catch (err) { toastError(err); return false; }
     }, isConvert ? "Umwandeln" : "\u00DCbernehmen");
 }
 
@@ -5541,7 +5530,7 @@ async function openSubprocessBinding(node, mode) {
  *
  * Frueher stand an zwei Stellen ``val === "true" || val === "1"``: „vielleicht"
  * im Ja/Nein-Feld wurde still zu ``false`` gespeichert, und der Vorgang lief
- * weiter (Validierung 2026-09, VAL-04). Ebenso machte ``parseInt`` aus „12,5"
+ * weiter. Ebenso machte ``parseInt`` aus „12,5"
  * still 12 und aus „abc" ``NaN``. Hier wird deshalb nie geraten.
  *
  * @param {string} dtype Datentyp des Elements (INTEGER, FLOAT, BOOLEAN, ...)
@@ -5589,7 +5578,7 @@ function fallbackWidget(elem) {
 // sonst den typisierten Wert (``coerceTypedInput``) -- oder, wenn die Eingabe
 // nicht eindeutig passt, den rohen Text, den der Kern mit D3 ablehnt.
 // Zahlenfelder tragen ``step="any"``: ohne das markiert der Browser 499,99 als
-// ungueltig, obwohl der Wert gespeichert wird (VAL-22).
+// ungueltig, obwohl der Wert gespeichert wird.
 function maskControl(elem, widget, options, current) {
   const dtype = elem ? elem.data_type : "STRING";
   const coerce = (raw) => coerceTypedInput(dtype, raw);
@@ -5627,7 +5616,7 @@ function maskControl(elem, widget, options, current) {
 }
 
 /**
- * Pruefregeln eines Maskenfelds, soweit sie zum Bedienelement passen (VAL-22):
+ * Pruefregeln eines Maskenfelds, soweit sie zum Bedienelement passen:
  * Unter-/Obergrenze fuer Zahlenfelder, Muster und Hoechstlaenge fuer Text.
  * Nur fuer Eingabefelder -- ein Anzeigefeld prueft nichts.
  * @param {object} f Feld des Designers
@@ -5647,7 +5636,7 @@ function fieldRulesFor(f) {
 }
 
 /**
- * Eingaben fuer die Pruefregeln eines Felds im Designer (VAL-22). Welche
+ * Eingaben fuer die Pruefregeln eines Felds im Designer. Welche
  * erscheinen, haengt am Bedienelement; ob sie zusammenpassen (Grenzen in der
  * richtigen Reihenfolge, gueltiges Muster), prueft der Kern (U2).
  * @param {object} f Feld des Designers (wird direkt beschrieben)
@@ -5703,7 +5692,7 @@ function fieldRuleProblem(f, val) {
 /**
  * Markiert ein Feld der Aufgabenmaske als fehlerhaft (oder hebt die Markierung
  * auf). Pflicht- und Regelfehler standen bisher nur in einer Meldung, nicht am
- * Feld (VAL-22).
+ * Feld.
  * @param {HTMLElement|undefined} wrap das ``label.field`` des Felds
  * @param {string|null} message Hinweis oder null zum Aufheben
  */
@@ -5741,7 +5730,7 @@ function openFormDesigner(nodeId) {
         element_id: f.element_id, widget: f.widget, label: f.label,
         mode: f.mode, required: f.required, options: (f.options || []).slice(),
         help_text: f.help_text || null, group: f.group || "",
-        // Pruefregeln (VAL-22) mitfuehren -- sonst loeschte Oeffnen + Speichern sie.
+        // Pruefregeln mitfuehren -- sonst loeschte Oeffnen + Speichern sie.
         min_value: f.min_value ?? null, max_value: f.max_value ?? null,
         pattern: f.pattern || null, max_length: f.max_length ?? null,
       }))
@@ -5872,7 +5861,7 @@ function openFormDesigner(nodeId) {
       await refreshSchema();
       render();
       toast("ok", "Eingabemaske gespeichert");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Speichern");
 }
 
@@ -5932,8 +5921,8 @@ function openInsertModal(afterNodeId) {
   // --- XOR partition builder (K7): a typed discriminator drives the branches.
   const partitionable = Object.values(state.schema.data_elements).filter(
     (d) => d.source === "INSTANCE" && ["INTEGER", "FLOAT", "DECIMAL", "BOOLEAN", "STRING"].includes(d.data_type));
-  // VAL-15: Das Merkmal musste vorher woanders angelegt UND an einem Schritt
-  // davor geschrieben werden; der Dialog schickte den Nutzer weg. Jetzt: Wahl
+  // Das Merkmal muss nicht vorher woanders angelegt UND an einem Schritt
+  // davor geschrieben werden, sonst schickte der Dialog den Nutzer weg. Die Wahl
   // „Neues Merkmal …“ legt es hier an, und der Schritt vor der Einfuegestelle
   // bekommt die Schreibbindung gleich mit (``writerStep``). Ob das alles
   // zusammen korrekt ist (D1, D2, K7), entscheidet weiterhin der Kern.
@@ -6168,7 +6157,7 @@ function openInsertModal(afterNodeId) {
         if (kind === "THRESHOLD") {
           // Ein Zahlenfeld liefert fuer „abc“ einen leeren Wert -- das galt
           // bisher still als „ohne Obergrenze“ und endete in einer
-          // irrefuehrenden Meldung (VAL-28). ``badInput`` verraet die Eingabe.
+          // irrefuehrenden Meldung. ``badInput`` verraet die Eingabe.
           const bad = [...condRows.querySelectorAll(".threshold-row")].filter((r) =>
             r.querySelector(".cond-upper").validity && r.querySelector(".cond-upper").validity.badInput);
           bad.forEach((r) => markField(r, "keine Zahl"));
@@ -6211,14 +6200,14 @@ function openInsertModal(afterNodeId) {
       await refreshSchema();
       render();
       toast("ok", "Schritt eingef\u00FCgt");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Einf\u00FCgen");
   syncInsertEnabled();
 }
 
 /**
  * Fuegt eine Entscheidung ein und legt ihr Merkmal bei Bedarf gleich mit an
- * (VAL-15).
+ *.
  *
  * Reihenfolge: (1) neues Datenelement anlegen, (2) Schreibbindung am Schritt
  * davor, (3) ``conditional-insert``. Jeder Schritt ist eine eigene
@@ -6296,7 +6285,7 @@ async function releaseSchema() {
   if (missing.length) {
     const names = missing.map((f) => nodeLabelOf(f.node_id)).filter(Boolean);
     // Die Meldung ist bereits eine Aufzaehlung (<ul>) -- kein eigenes „•“
-    // davor, sonst standen zwei Zeichen vor jedem Namen (VAL-24).
+    // davor, sonst standen zwei Zeichen vor jedem Namen.
     toast("err", "Freigabe noch nicht möglich", [
       `${missing.length} Schritt(e) brauchen noch eine Bearbeiterzuordnung:`,
       ...names,
@@ -6304,7 +6293,7 @@ async function releaseSchema() {
     ]);
     return;
   }
-  // Freigeben ist nicht umkehrbar (R0): erst nachfragen (VAL-24).
+  // Freigeben ist nicht umkehrbar (R0): erst nachfragen.
   openModal("Schema freigeben?", el("div", { class: "form-grid" },
     el("p", null, `„${state.schema.name}“ wird freigegeben. Danach lassen sich Vorgänge starten, das Schema selbst ist aber unveränderlich.`),
     el("p", { class: "muted" }, "Änderungen gehen dann nur noch über eine neue Revision; laufende Vorgänge lassen sich auf sie migrieren.")),
@@ -6314,7 +6303,7 @@ async function releaseSchema() {
       await refreshSchema();
       render();
       toast("ok", "Schema freigegeben", ["Jetzt instanziierbar."]);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Freigeben");
 }
 
@@ -6342,7 +6331,7 @@ async function newRevision() {
     await loadSchemas();
     await selectSchema(rev.id);
     toast("ok", "Revision erstellt", [`${rev.name} (v${rev.version})`]);
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 }
 
 // --------------------------------------------------------------------------
@@ -6430,7 +6419,7 @@ async function openMigrationAssistant(targetId, onlyIds) {
       api.get(`/schemas/${targetId}/migration-report`),
       api.get(`/schemas/${targetId}`),
     ]);
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return; }
+  } catch (err) { toastError(err); return; }
   const cands = onlyIds ? report.candidates.filter((c) => onlyIds.includes(c.instance_id)) : report.candidates;
   if (!cands.length) {
     toast("info", "Nichts zu migrieren", ["Es laufen keine Instanzen früherer Versionen."]);
@@ -6486,7 +6475,7 @@ async function openMigrationAssistant(targetId, onlyIds) {
       const res = await api.post(`/schemas/${targetId}/migrate-instances`,
         { instance_ids: cands.map((c) => c.instance_id), data_mapping: readMapping(), execute: false });
       res.results.forEach((r) => { showStatus(r.instance_id, r.findings); checks[r.instance_id].checked = !r.findings.length; });
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+    } catch (err) { toastError(err); }
   } }, "Mit diesen Startwerten erneut prüfen");
 
   const body = el("div", null,
@@ -6524,7 +6513,7 @@ async function openMigrationAssistant(targetId, onlyIds) {
       if (state.schemaId) await refreshSchema();
       render();
       return kept.length ? false : undefined;   // bei Rest offen lassen, damit die Gruende lesbar bleiben
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Ausgewählte migrieren");
 }
 
@@ -6534,7 +6523,7 @@ async function exportBpmn() {
     const blob = new Blob([xml], { type: "application/xml" });
     const a = el("a", { href: URL.createObjectURL(blob), download: `${state.schema.name}.bpmn` });
     document.body.appendChild(a); a.click(); a.remove();
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 }
 
 // --------------------------------------------------------------------------
@@ -6543,7 +6532,7 @@ async function exportBpmn() {
 
 /**
  * Nimmt ein Datenelement in die benennenden Werte des Vorgangs auf oder
- * entfernt es (VAL-17). Geschrieben wird ueber den Kern
+ * entfernt es. Geschrieben wird ueber den Kern
  * (``POST /schemas/{id}/display-fields``), der U5 prueft -- beim dritten
  * Element kommt dessen Meldung.
  * @param {string} elementId Datenelement
@@ -6556,7 +6545,7 @@ async function toggleDisplayField(elementId) {
   try {
     await api.post(`/schemas/${state.schemaId}/display-fields`, { element_ids: next });
     await refreshSchema(); render();
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 }
 
 function viewData() {
@@ -6573,7 +6562,7 @@ function viewData() {
     ? table(elemHeaders, elemRows.map((d) => {
         const cells = [d.name, typeName(d.data_type), d.source];
         if (draft) {
-          // Benennt den Vorgang in Listen (VAL-17); hoechstens zwei, nur
+          // Benennt den Vorgang in Listen; hoechstens zwei, nur
           // Vorgangsdaten -- das prueft der Kern (U5).
           const shown = (schema.display_fields || []).includes(d.id);
           const nameBtn = d.source === "INSTANCE"
@@ -6657,9 +6646,9 @@ function addDataElement(onCreated) {
       await refreshSchema(); render(); toast("ok", "Datenelement angelegt");
       // Erst NACH dem Schliessen dieses Dialogs fortsetzen: ``openModal``
       // leert nach dem Bestaetigen seinen Container -- ein hier sofort
-      // geoeffneter Folgedialog verschwand mit (VAL-27).
+      // geoeffneter Folgedialog verschwand mit.
       if (typeof onCreated === "function") setTimeout(() => onCreated(created), 0);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Anlegen");
 }
 
@@ -6680,10 +6669,7 @@ function addDataAccess(fixedNodeId) {
       : el("label", { class: "field" }, "Schritt", nodeSel),
     el("label", { class: "field" }, "Element", elemSel),
     el("label", { class: "field" }, "Modus", modeSel)), async () => {
-    try {
-      await api.post(`/schemas/${state.schemaId}/data-access`, { node_id: nodeId || nodeSel.value, element_id: elemSel.value, mode: modeSel.value });
-      await refreshSchema(); render(); toast("ok", "Datenbindung gesetzt");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/data-access`, { node_id: nodeId || nodeSel.value, element_id: elemSel.value, mode: modeSel.value }), "Datenbindung gesetzt");
   }, "Binden");
 }
 
@@ -6694,10 +6680,7 @@ function editDataElement(elem) {
     el("label", { class: "field" }, "Name", name),
     el("label", { class: "field" }, "Typ", type)), async () => {
     if (!name.value.trim()) return false;
-    try {
-      await api.patch(`/schemas/${state.schemaId}/data-elements/${elem.id}`, { name: name.value.trim(), data_type: type.value });
-      await refreshSchema(); render(); toast("ok", "Datenelement aktualisiert");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.patch(`/schemas/${state.schemaId}/data-elements/${elem.id}`, { name: name.value.trim(), data_type: type.value }), "Datenelement aktualisiert");
   }, "Speichern");
 }
 
@@ -6705,10 +6688,7 @@ function resetDataElementSource(elem) {
   openModal("Quelle zur\u00FCcksetzen",
     el("p", null, `Externe Bindung von \u201E${elem.name}\u201C entfernen und wieder als Instanz-Datenelement f\u00FChren?`),
     async () => {
-      try {
-        await api.post(`/schemas/${state.schemaId}/data-elements/${elem.id}/reset-source`, {});
-        await refreshSchema(); render(); toast("ok", "Quelle zur\u00FCckgesetzt");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/data-elements/${elem.id}/reset-source`, {}), "Quelle zur\u00FCckgesetzt");
     }, "Zur\u00FCcksetzen");
 }
 
@@ -6716,10 +6696,7 @@ function deleteDataElement(elem) {
   openModal("Datenelement l\u00F6schen",
     el("p", null, `Datenelement \u201E${elem.name}\u201C und alle zugeh\u00F6rigen Lese-/Schreibbindungen und Maskenfelder l\u00F6schen?`),
     async () => {
-      try {
-        await api.del(`/schemas/${state.schemaId}/data-elements/${elem.id}`);
-        await refreshSchema(); render(); toast("ok", "Datenelement gel\u00F6scht");
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.del(`/schemas/${state.schemaId}/data-elements/${elem.id}`), "Datenelement gel\u00F6scht");
     }, "L\u00F6schen");
 }
 
@@ -6870,8 +6847,7 @@ async function buyAgentPack() {
       toast("err", "Kauf nicht verfügbar", [res.message]);
     }
   } catch (err) {
-    const d = describeError(err);
-    toast("err", d.title, d.lines);
+    toastError(err);
   }
 }
 
@@ -6942,8 +6918,7 @@ async function manageSharedOrg() {
         ? "Beim L\u00F6sen wird die aktuelle Organisation als lokale Kopie ins Modell \u00FCbernommen."
         : "Zum L\u00F6sen der Verkn\u00FCpfung muss das Schema im Entwurf sein."));
     openModal("Geteilte Organisation", body, draft ? async () => {
-      try { await api.del(`/schemas/${state.schemaId}/org-model`); await refreshSchema(); render(); toast("ok", "Verkn\u00FCpfung gel\u00F6st"); }
-      catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return commitSchemaChange(() => api.del(`/schemas/${state.schemaId}/org-model`), "Verkn\u00FCpfung gel\u00F6st");
     } : null, draft ? "Verkn\u00FCpfung l\u00F6sen" : "Schliessen");
     return;
   }
@@ -6967,7 +6942,7 @@ async function manageSharedOrg() {
       }
       await api.post(`/schemas/${state.schemaId}/org-model`, { org_model_id: orgId });
       await refreshSchema(); render(); toast("ok", "Mit geteilter Organisation verkn\u00FCpft");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Verkn\u00FCpfen");
 }
 
@@ -7126,7 +7101,7 @@ function describeRule(rule, schema) {
     return n && n.label ? n.label : id;
   };
   if (rule.kind === "ROLE") return `Rolle: ${named(org.roles, rule.ref)}`;
-  // „Abteilung“ wie in den Dialogen, nicht „OrgEinheit“ (VAL-37).
+  // „Abteilung“ wie in den Dialogen, nicht „OrgEinheit“.
   if (rule.kind === "ORG_UNIT") return `Abteilung: ${named(org.org_units, rule.ref)}${rule.recursive ? " (inkl. Unterbereiche)" : ""}`;
   // Beim Agenten lohnt der Rueckfall auf agentNameOf: kennt ihn die
   // Organisation dieses Schemas nicht, findet ihn oft das modelluebergreifende
@@ -7136,7 +7111,7 @@ function describeRule(rule, schema) {
   }
   if (rule.kind === "NODE_PERFORMING_AGENT") return `Bearbeiter von \u201e${stepName(rule.ref)}\u201c`;
   if (rule.kind === "NODE_PERFORMING_AGENT_SUPERVISOR") return `Vorgesetzte:r des Bearbeiters von \u201e${stepName(rule.ref)}\u201c`;
-  // Verknuepfungen im Wortlaut des Dialogs (VAL-18) statt „AND(…, …)“.
+  // Verknuepfungen im Wortlaut des Dialogs statt „AND(…, …)“.
   if (rule.operands) {
     const parts = rule.operands.map((o) => (o.operands ? `(${describeRule(o, s)})` : describeRule(o, s)));
     const word = { AND: " und ", OR: " oder ", EXCEPT: " au\u00DFer " }[rule.kind];
@@ -7192,8 +7167,7 @@ function addRole() {
   const name = el("input", { type: "text", placeholder: "z. B. Sachbearbeiter" });
   openModal("Rolle", el("label", { class: "field" }, "Name", name), async () => {
     if (!name.value.trim()) return false;
-    try { await api.post(orgApi(`/roles`), { name: name.value.trim() }); await refreshSchema(); render(); toast("ok", "Rolle angelegt"); }
-    catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(orgApi(`/roles`), { name: name.value.trim() }), "Rolle angelegt");
   }, "Anlegen");
 }
 
@@ -7228,10 +7202,7 @@ function editRoleMailbox(role) {
     el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
       "Sammeladresse für „an das Gruppenpostfach“-Benachrichtigungen. Leer lassen entfernt sie."),
     el("label", { class: "field" }, "E-Mail", mailbox)), async () => {
-    try {
-      await api.put(orgApi(`/roles/${role.id}/mailbox`), { mailbox: mailbox.value.trim() || null });
-      await refreshSchema(); render(); toast("ok", "Gruppenpostfach gespeichert");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.put(orgApi(`/roles/${role.id}/mailbox`), { mailbox: mailbox.value.trim() || null }), "Gruppenpostfach gespeichert");
   }, "Speichern");
 }
 
@@ -7249,10 +7220,7 @@ function editUnitMailbox(unit) {
     el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" },
       "Sammeladresse der Abteilung für „an das Gruppenpostfach“-Benachrichtigungen. Leer lassen entfernt sie."),
     el("label", { class: "field" }, "E-Mail", mailbox)), async () => {
-    try {
-      await api.put(url, { mailbox: mailbox.value.trim() || null });
-      await refreshSchema(); render(); toast("ok", "Abteilungspostfach gespeichert");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.put(url, { mailbox: mailbox.value.trim() || null }), "Abteilungspostfach gespeichert");
   }, "Speichern");
 }
 
@@ -7289,7 +7257,7 @@ function addAgent() {
         buyAgentPack();
         return false;
       }
-      const d = describeError(err); toast("err", d.title, d.lines); return false;
+      toastError(err); return false;
     }
   }, "Anlegen");
 }
@@ -7309,8 +7277,7 @@ function addChildOrgUnit(parentId) {
     const payload = { name: name.value.trim() };
     if (parentId) payload.parent_id = parentId;
     if (mgrSel.value) payload.manager_id = mgrSel.value;
-    try { await api.post(orgApi(`/org-units`), payload); await refreshSchema(); render(); toast("ok", "Abteilung angelegt"); }
-    catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(orgApi(`/org-units`), payload), "Abteilung angelegt");
   }, "Anlegen");
 }
 
@@ -7329,8 +7296,7 @@ function moveOrgUnit(unit) {
     ...Object.values(org.org_units).filter((u) => !blocked.has(u.id)).map((u) => el("option", { value: u.id }, u.name)));
   if (unit.parent_id) sel.value = unit.parent_id;
   openModal(`Umh\u00E4ngen: ${unit.name}`, el("label", { class: "field" }, "\u00DCbergeordnete Abteilung", sel), async () => {
-    try { await api.post(orgApi(`/org-units/${unit.id}/parent`), { parent_id: sel.value || null }); await refreshSchema(); render(); toast("ok", "Abteilung umgeh\u00E4ngt"); }
-    catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(orgApi(`/org-units/${unit.id}/parent`), { parent_id: sel.value || null }), "Abteilung umgeh\u00E4ngt");
   }, "Speichern");
 }
 
@@ -7340,8 +7306,7 @@ function editManager(unit) {
     ...Object.values(org.agents || {}).map((a) => el("option", { value: a.id }, a.name)));
   if (unit.manager_id) sel.value = unit.manager_id;
   openModal(`Vorgesetzter: ${unit.name}`, el("label", { class: "field" }, "Vorgesetzter", sel), async () => {
-    try { await api.post(orgApi(`/org-units/${unit.id}/manager`), { manager_id: sel.value || null }); await refreshSchema(); render(); toast("ok", "Vorgesetzter gesetzt"); }
-    catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(orgApi(`/org-units/${unit.id}/manager`), { manager_id: sel.value || null }), "Vorgesetzter gesetzt");
   }, "Speichern");
 }
 
@@ -7370,8 +7335,7 @@ function editAgent(agent) {
     // das Entfernen ab (N3), solange ein mail-gebundener Schritt sie braucht.
     const payload = { name: name.value.trim(), role_ids: roleIds,
       org_unit_id: unitSel.value || null, email: email.value.trim() || null };
-    try { await api.patch(orgApi(`/agents/${agent.id}`), payload); await refreshSchema(); render(); toast("ok", "Agent gespeichert"); }
-    catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.patch(orgApi(`/agents/${agent.id}`), payload), "Agent gespeichert");
   }, "Speichern");
 }
 
@@ -7381,8 +7345,7 @@ function editDeputy(agent) {
     ...Object.values(org.agents || {}).filter((a) => a.id !== agent.id).map((a) => el("option", { value: a.id }, a.name)));
   if (agent.deputy_id) sel.value = agent.deputy_id;
   openModal(`Vertreter: ${agent.name}`, el("label", { class: "field" }, "Vertreter", sel), async () => {
-    try { await api.post(orgApi(`/agents/${agent.id}/deputy`), { deputy_id: sel.value || null }); await refreshSchema(); render(); toast("ok", "Vertreter gesetzt"); }
-    catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(orgApi(`/agents/${agent.id}/deputy`), { deputy_id: sel.value || null }), "Vertreter gesetzt");
   }, "Speichern");
 }
 
@@ -7421,7 +7384,7 @@ function provisionLogin(agent) {
       const res = await api.post("/users", payload);
       showLoginCredentials(res);
       toast("ok", "Login angelegt", [`Login: ${res.login}`]);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Anlegen");
 }
 
@@ -7444,7 +7407,7 @@ function showLoginCredentials(res) {
  * Ein Teil einer Bearbeiterregel: Art (Rolle, Abteilung, Person, Bearbeiter
  * bzw. Vorgesetzte:r eines frueheren Schritts) und Bezug.
  *
- * Eigene Funktion, damit ``addStaffRule`` zwei davon verknuepfen kann (VAL-18).
+ * Eigene Funktion, damit ``addStaffRule`` zwei davon verknuepfen kann.
  * Die node-bezogenen Arten bieten die uebrigen Aufgaben-Schritte an; ob der
  * Rueckbezug gueltig ist (Z3), entscheidet der Kern.
  *
@@ -7469,7 +7432,7 @@ function staffTermPicker(schema, currentNode) {
     clear(refSel);
     if (NODE_KINDS.includes(kindSel.value)) {
       // Nur Schritte, die garantiert vorher laufen -- dieselbe Analyse wie Z3
-      // im Kern (VAL-25). Frueher standen auch Schritte des anderen XOR-Zweigs
+      // im Kern. Frueher standen auch Schritte des anderen XOR-Zweigs
       // zur Wahl, und erst der Klick brachte die Ablehnung.
       const ticket = ++pending;
       const target = currentNode();
@@ -7512,7 +7475,7 @@ function staffTermPicker(schema, currentNode) {
   };
 }
 
-/** Verknuepfungen im Regeldialog (VAL-18) -- Wert = StaffRuleKind oder "". */
+/** Verknuepfungen im Regeldialog -- Wert = StaffRuleKind oder "". */
 const STAFF_COMBINATORS = [
   { value: "", label: "keine – nur diese Angabe" },
   { value: "AND", label: "UND – muss auch Folgendes erfüllen" },
@@ -7524,7 +7487,7 @@ const STAFF_COMBINATORS = [
  * Der erweiterte Bearbeiter-Dialog: eine Angabe oder zwei verknuepfte.
  *
  * Kombinationen (UND/ODER/AUSSER) gab es bis 2026-09 nur ueber die API, obwohl
- * die Modellierer-Anleitung sie im gefuehrten Dialog versprach (VAL-18). Die
+ * die Modellierer-Anleitung sie im gefuehrten Dialog versprach. Die
  * Regel entsteht hier als ``{kind: AND|OR|EXCEPT, operands: [a, b]}``; ob sie
  * jemanden findet (Z2) oder einen gueltigen Rueckbezug hat (Z3), prueft der
  * Kern und meldet es verstaendlich. Beide Oberflaechen erreichen den Dialog
@@ -7546,7 +7509,7 @@ function addStaffRule(fixedNodeId) {
   const syncComb = () => { secondHost.style.display = combSel.value ? "" : "none"; };
   combSel.addEventListener("change", syncComb); syncComb();
   // Mehrfachzuordnung wie im Dialog der Schritt-Karte -- dieselbe Auswahl,
-  // derselbe Schreibweg (Nachtest 2026-09-22, Mangel 10). Wechselt hier der
+  // derselbe Schreibweg. Wechselt hier der
   // Schritt, wird die Liste neu gebaut: der gewaehlte Schritt darf nicht
   // zusaetzlich in ihr stehen.
   let others = otherStepsBox(schema, target());
@@ -7613,7 +7576,7 @@ async function startInstance() {
     await loadInstance(inst.id);
     render();
     toast("ok", inst.is_test ? "Test-Instanz gestartet" : "Instanz gestartet", [inst.id]);
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 }
 
 async function loadInstance(id) {
@@ -7826,7 +7789,7 @@ function adhocSuggestedRule(schema, anchorId) {
 }
 
 /**
- * Eingabefeld „Anlass" fuer eine Ad-hoc-Aenderung (NT-02).
+ * Eingabefeld „Anlass" fuer eine Ad-hoc-Aenderung.
  *
  * Eine Ad-hoc-Aenderung legt fest, wie *dieser eine* laufende Vorgang
  * weitergeht; der Kern verlangt deshalb fuer echte Vorgaenge einen Anlass und
@@ -7855,7 +7818,7 @@ function adhocReasonField(inst) {
 
 // Ad-hoc: neuen seriellen Schritt hinter einem Anker einfuegen.
 //
-// Der Schritt braucht eine Bearbeiterregel (B2 im Ad-hoc-Pfad, VAL-03): ohne
+// Der Schritt braucht eine Bearbeiterregel (B2 im Ad-hoc-Pfad): ohne
 // sie stand er zur Laufzeit in keiner Arbeitsliste, und der Vorgang kam nur per
 // Aufsichtseingriff weiter. Vorbelegt ist die Regel des Schritts davor
 // (``adhocSuggestedRule``); daneben Rollen, Abteilungen und Personen des
@@ -7912,7 +7875,7 @@ function openAdhocInsert(schema, inst, anchors) {
       await api.post(`/instances/${inst.id}/adhoc/insert`, payload);
       toast("ok", "Schritt eingef\u00FCgt", [describeRule(rule, schema)]);
       await reloadInstance(inst.id);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Einf\u00FCgen");
 }
 
@@ -7942,7 +7905,7 @@ function openAdhocRename(schema, inst, targets) {
         why ? { node_id: targetSel.value, label, reason: why } : { node_id: targetSel.value, label });
       toast("ok", "Schritt umbenannt");
       await reloadInstance(inst.id);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Umbenennen");
 }
 
@@ -7964,16 +7927,16 @@ function openAdhocDelete(schema, inst, targets) {
         why ? { node_id: targetSel.value, reason: why } : { node_id: targetSel.value });
       toast("ok", "Schritt entfernt");
       await reloadInstance(inst.id);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Entfernen");
 }
 
 /**
  * Warnzeichen fuer einen bereiten Schritt, dessen Bearbeiterregel niemanden
- * findet (Nachtest 2026-09-22, Mangel 2).
+ * findet.
  *
- * Bis dahin sah dieser Fall aus wie ein Schritt ganz ohne Bearbeiterregel: kein
- * „zustaendig"-Eintrag, ein gruenes „Abschliessen" -- und der Schritt tauchte in
+ * Ohne es saehe dieser Fall aus wie ein Schritt ganz ohne Bearbeiterregel: kein
+ * „zustaendig"-Eintrag, ein gruenes „Abschliessen" -- und der Schritt taucht in
  * keiner persoenlichen Arbeitsliste auf, ohne dass irgendwo stand, warum. Der
  * haeufigste Grund ist eine relative Regel (Vier-Augen), deren Bezugsschritt per
  * Aufsichtseingriff ohne Bearbeiter erledigt wurde; der Hinweistext nennt genau
@@ -8017,7 +7980,7 @@ function responsibleSummary(agentIds) {
  *
  * Der Client entscheidet nichts endgueltig -- er waehlt nur die passende Form.
  *
- * Sonderfall **Regel ohne Zustaendige** (Nachtest 2026-09-22, Mangel 2): Traegt
+ * Sonderfall **Regel ohne Zustaendige**: Traegt
  * der Schritt eine Bearbeiterregel, loest sie aber gerade niemanden auf -- etwa
  * eine Vier-Augen-Regel, deren Vorschritt per Aufsichtseingriff ohne Bearbeiter
  * erledigt wurde --, dann stand hier bisher das gruene "Abschliessen", als waere
@@ -8064,14 +8027,14 @@ async function completeActivity(nodeId, node) {
 // Angeboten werden alle INSTANCE-Datenelemente des Schemas (EXTERNAL-Elemente
 // werden zur Laufzeit ueber Connectoren aufgeloest und daher nicht abgefragt).
 //
-// Wer was aendern darf, entscheidet allein der Kern (VAL-01): ein Bearbeiter
+// Wer was aendern darf, entscheidet allein der Kern: ein Bearbeiter
 // nur die Werte seines eigenen offenen Schritts (sonst 403 mit Erklaerung),
 // Modellierer/Admin alles Uebrige als Aufsichtseingriff mit Begruendung. Der
 // Client kennt die Regel nicht; er reagiert auf die 422 „Aufsichtseingriff…"
 // mit der Frage nach der Begruendung und sendet erneut. Die Felder kommen aus
 // derselben Widget-Factory wie die Aufgabenmaske (``maskControl`` +
 // ``fallbackWidget``) -- frueher wandelte der Dialog Ja/Nein-Freitext selbst
-// und still in ``false`` (VAL-04).
+// und still in ``false``.
 function openInstanceDataForm(schema, inst) {
   const elems = Object.values(schema.data_elements || {}).filter((e) => e.source !== "EXTERNAL");
   if (!elems.length) { toast("info", "Keine Instanz-Datenelemente definiert."); return; }
@@ -8093,7 +8056,7 @@ function openInstanceDataForm(schema, inst) {
       render();
     } catch (err) {
       if (isSupervisionRequired(err)) { askDataCorrectionReason((text) => submit(values, text)); return false; }
-      const d = describeError(err); toast("err", d.title, d.lines); return false;
+      toastError(err); return false;
     }
   };
   openModal("Instanzdaten eingeben", body, async () => {
@@ -8109,7 +8072,7 @@ function openInstanceDataForm(schema, inst) {
 }
 
 /**
- * Fragt die Begruendung einer Datenkorrektur ab (Aufsichtseingriff, VAL-01):
+ * Fragt die Begruendung einer Datenkorrektur ab (Aufsichtseingriff):
  * Die Werte gehoeren zu keinem Schritt, den der Login gerade bearbeitet. Die
  * Begruendung steht danach im Audit-Verlauf neben altem und neuem Wert.
  * @param {(reason: string) => Promise<unknown>} onConfirm sendet erneut mit Begruendung
@@ -8154,8 +8117,8 @@ function isSupervisionRequired(err) {
  * Er warnt ausserdem **vorher**, wenn spaetere Schritte ihre Bearbeiter relativ
  * zu diesem hier bestimmen (Vier-Augen-Prinzip): Ein Aufsichtseingriff
  * hinterlaesst keinen Ausfuehrer, an dem eine solche Regel ansetzen koennte --
- * der Folgeschritt landet dann in keiner Arbeitsliste. Das war im Nachtest
- * 2026-09-22 (Mangel 2) erst hinterher zu bemerken.
+ * der Folgeschritt landet dann in keiner Arbeitsliste. Die Warnung kommt
+ * deshalb vorher, nicht erst, wenn es zu spaet ist.
  *
  * @param {string} label Bezeichnung des Schritts
  * @param {(reason: string) => Promise<unknown>} onConfirm sendet den Abschluss mit Begruendung
@@ -8231,7 +8194,7 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       const elem = schema.data_elements[f.element_id];
       const writable = f.mode === "WRITE" || f.mode === "READ_WRITE";
       const { control, read } = maskControl(elem, f.widget, f.options, values[f.element_id]);
-      // Pruefregeln auch als HTML-Attribute (Tastatur, Browserhinweis), VAL-22.
+      // Pruefregeln auch als HTML-Attribute (Tastatur, Browserhinweis).
       if (f.min_value != null) control.setAttribute("min", String(f.min_value));
       if (f.max_value != null) control.setAttribute("max", String(f.max_value));
       if (f.max_length != null) control.setAttribute("maxlength", String(f.max_length));
@@ -8243,7 +8206,7 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       return { group: f.group, node: wrap };
     }), form.columns || 1));
   } else {
-    // Was der Schritt nur liest, steht als Nur-Lese-Zeile darueber (NT-06): Wer
+    // Was der Schritt nur liest, steht als Nur-Lese-Zeile darueber: Wer
     // „Freigabe pruefen“ ohne Maske erledigte, sah den Betrag nicht, den er
     // freigab. Lesen-und-Schreiben erscheint unten als vorbelegtes Feld.
     const readOnly = readOnlyValues(schema, nodeId, values);
@@ -8269,7 +8232,7 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
     for (const [eid, { read, label: fieldLabel, required, field, wrap }] of Object.entries(inputs)) {
       const val = read();
       if (val === undefined) {
-        // Pflichtfehler am Feld zeigen, nicht nur in der Meldung (VAL-22).
+        // Pflichtfehler am Feld zeigen, nicht nur in der Meldung.
         markField(wrap, required ? "Pflichtfeld" : null);
         if (required) missing.push(fieldLabel);
         continue;
@@ -8279,7 +8242,7 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       if (problem) { invalid.push(`${fieldLabel}: ${problem}`); continue; }
       // Kein Umwandeln hier: ``read()`` hat schon typisiert, was eindeutig ist
       // (``coerceTypedInput``); der Rest geht roh an den Kern und kommt als
-      // D3-Meldung zurueck (VAL-04).
+      // D3-Meldung zurueck.
       data[eid] = val;
     }
     if (missing.length) {
@@ -8306,7 +8269,7 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       if (onDone) await onDone();
     } catch (err) {
       if (isSupervisionRequired(err)) { askSupervisionReason(label, (reason) => submitCompletion(data, reason), schema, nodeId); return false; }
-      const d = describeError(err); toast("err", d.title, d.lines); return false;
+      toastError(err); return false;
     }
   };
   if (form || body.childNodes.length) openModal(`Abschlie\u00DFen: ${label}`, body, doComplete, "Abschlie\u00DFen");
@@ -8314,7 +8277,7 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
 }
 
 /**
- * Nur-Lese-Anzeige der Werte, die ein Schritt ohne Maske liest (NT-06).
+ * Nur-Lese-Anzeige der Werte, die ein Schritt ohne Maske liest.
  *
  * Ein Schritt mit gestalteter Maske zeigt Lesefelder selbst (deaktiviert); ohne
  * Maske gab es bisher nur die Schreibfelder -- eine Freigabe geschah blind.
@@ -8428,7 +8391,7 @@ async function conformancePanel(instances, pmap) {
 
 /**
  * Filterstufen der Instanzliste im Monitoring (Wert = InstanceState, "all"
- * oder "UNSTAFFED" = laufend, aber ein offener Schritt hat niemanden, VAL-09).
+ * oder "UNSTAFFED" = laufend, aber ein offener Schritt hat niemanden).
  */
 const INSTANCE_FILTERS = [
   { key: "all", label: "Alle" },
@@ -8451,7 +8414,7 @@ async function viewMonitor() {
     const ids = await api.get("/instances");
     instances = await Promise.all(ids.map((id) => api.get(`/instances/${id}`)));
     await ensureSchemaNames(instances.map((i) => i.schema_id));
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 
   const running = instances.filter((i) => i.state === "RUNNING").length;
   const done = instances.filter((i) => i.state === "COMPLETED").length;
@@ -8462,17 +8425,17 @@ async function viewMonitor() {
   try { report = await api.get("/monitoring/kpis"); } catch (e) { /* ignore */ }
   try { pmap = await api.get("/monitoring/process-map"); } catch (e) { /* ignore */ }
 
-  // VAL-09: offene Schritte, die niemand bearbeiten darf -- der Vorgang steht
+  // Offene Schritte, die niemand bearbeiten darf -- der Vorgang steht
   // still, zeigte aber „ueberfaellig 0, eskaliert 0“. Die Rechnung liegt im Kern
   // (GET /monitoring/unstaffed); hier nur Kachel, Liste und Filter.
   let unstaffed = [];
   try { unstaffed = await api.get("/monitoring/unstaffed"); } catch (e) { /* best-effort */ }
-  // Benennende Werte je Vorgang (VAL-17); fehlen sie, bleibt die ID.
+  // Benennende Werte je Vorgang; fehlen sie, bleibt die ID.
   let titles = {};
   try { titles = await api.get("/instance-titles"); } catch (e) { /* best-effort */ }
   const unstaffedIds = new Set(unstaffed.map((u) => u.instance_id));
 
-  // Z4 (Priorisierungs-Konzept \u00A77): \u00DCberf\u00E4llig-Zusammenfassung \u00FCber alle
+  // Z4: \u00DCberf\u00E4llig-Zusammenfassung \u00FCber alle
   // laufenden Vorg\u00E4nge \u2013 best-effort aus den vorhandenen Task-Endpunkten.
   // Dieselbe Sammlung tr\u00E4gt die Eskalations-Sicht (T3/E9 Stufe C): welche
   // Aufgaben haben bereits Stufen gefeuert.
@@ -8497,7 +8460,7 @@ async function viewMonitor() {
     kpi("\u00D8 Durchlaufzeit", report ? fmtDuration(report.avg_cycle_seconds) : "\u2013"));
   content.appendChild(kpis);
 
-  // Eskalations-Sicht (Eskalations-Konzept \u00A78 Stufe C): jede Aufgabe mit
+  // Eskalations-Sicht (Stufe C): jede Aufgabe mit
   // gefeuerten Stufen, klickbar zur Instanz. Nur sichtbar, wenn es etwas zu
   // zeigen gibt \u2013 ein Betrieb ohne Eskalationen bekommt kein leeres Panel.
   if (escalatedTasks.length) {
@@ -8517,7 +8480,7 @@ async function viewMonitor() {
           el("tbody", null, ...escRows)))));
   }
 
-  // „Niemand zustaendig“ (VAL-09): nur sichtbar, wenn es etwas zu zeigen gibt.
+  // „Niemand zustaendig“: nur sichtbar, wenn es etwas zu zeigen gibt.
   if (unstaffed.length) {
     const rowsU = unstaffed.map((u) => el("tr",
       { class: "clickable", onClick: () => openInstanceFromMonitor(u.instance_id) },
@@ -8574,7 +8537,7 @@ async function viewMonitor() {
   // der Liste der aktiven Instanzen, damit der Bezug sofort sichtbar ist.
   // Die ausgewaehlte Instanz frisch laden: ``state.instance`` stammt sonst aus
   // einer frueheren Sicht und zeigte beim Oeffnen ihren Startzustand, bis man
-  // die Zeile anklickte (VAL-14). Die Revisions-Abfrage rendert bei neuem
+  // die Zeile anklickte. Die Revisions-Abfrage rendert bei neuem
   // Fortschritt ohnehin neu -- damit bleibt das Detail aktuell. Ist sie nicht
   // mehr lesbar (geloescht, fremd), faellt die Auswahl weg.
   if (state.instanceId) {
@@ -8614,7 +8577,7 @@ async function viewMonitor() {
   // „von / nach / Haeufigkeit“ ohne Bezug zum Modell.
   content.appendChild(await conformancePanel(instances, pmap));
 
-  // Inzidente externer Aufgaben (Integrations-Konzept 11.5). Sichtbar fuer alle
+  // Inzidente externer Aufgaben. Sichtbar fuer alle
   // Monitoring-Leser; "Erneut versuchen" (Aufloesen + Wiedereinreihen) ist nur
   // fuer Bearbeiter/Administratoren freigeschaltet (tasks:complete).
   let incidents = [];
@@ -8769,8 +8732,8 @@ function renderBackupsBody(status, body) {
 
   // Wiederherstellung ist bewusst KEINE GUI-Funktion: ein Restore verwirft die
   // laufende Datenbank und laeuft mit erhoehten Rechten am Dump-Volume, auf das
-  // die API laut Backup-Konzept (Sicherheitsregel: kein Web-/API-Zugriff auf das
-  // Backup-Verzeichnis) bewusst keinen Zugriff hat. Er erfolgt daher als
+  // die API nach der Sicherheitsregel "kein Web-/API-Zugriff auf das
+  // Backup-Verzeichnis" bewusst keinen Zugriff hat. Er erfolgt daher als
   // gefuehrter Ops-Ablauf (restore.sh). Hier nur ein Hinweis mit Verweis.
   const restoreNote = el("p", { class: "muted", style: "margin-top:14px;" },
     "ℹ️ Eine Wiederherstellung erfolgt aus Sicherheitsgründen nicht über die " +
@@ -8791,8 +8754,7 @@ async function triggerBackupNow(body) {
       ["Der Sicherungsdienst f\u00FChrt sie in K\u00FCrze aus. \u201EAktualisieren\u201C zeigt sie danach an."]);
     setTimeout(() => loadBackupsPanel(body), 5000);
   } catch (err) {
-    const d = describeError(err);
-    toast("err", d.title, d.lines);
+    toastError(err);
   }
 }
 
@@ -8823,7 +8785,7 @@ async function loadMailOutboxPanel(body) {
 
 // Baut den Inhalt des E-Mail-Ausgang-Panels aus dem Statusobjekt. Zeigt bewusst
 // nur Metadaten (Empfaengeranzahl, Zustand, Betreff) -- keine Adressliste, keinen
-// Text (Datensparsamkeit, DSGVO-freundlich, Konzept §8).
+// Text (Datensparsamkeit, DSGVO-freundlich).
 function renderMailOutboxBody(status, body) {
   const frag = document.createDocumentFragment();
 
@@ -8869,7 +8831,7 @@ async function dispatchMailOutbox(body) {
     clear(body);
     body.appendChild(renderMailOutboxBody(status, body));
     toast("ok", "Versand angestoßen", [`Zugestellt: ${status.sent} · gescheitert: ${status.dead}`]);
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 }
 
 async function openInstanceFromMonitor(id) {
@@ -8881,7 +8843,7 @@ async function openInstanceFromMonitor(id) {
       renderSchemaPicker();
     }
     render();
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 }
 
 // Administrator-Wartung: System zur\u00FCcksetzen bzw. einen Beispieldatensatz
@@ -8931,7 +8893,7 @@ function confirmReset(kind) {
  * Fuehrt die Wartung aus (POST /admin/reset) und laedt die Oberflaeche neu.
  * @param {string} kind "demo", "o2c" oder "wipe" (siehe RESET_KINDS)
  * @returns {Promise<string|null>} das Passwort neu angelegter Beispiel-
- *   Anmeldungen (NT-04) -- der Aufrufer zeigt es an -- sonst ``null``
+ *   Anmeldungen -- der Aufrufer zeigt es an -- sonst ``null``
  */
 async function runReset(kind) {
   const spec = RESET_KINDS[kind] || RESET_KINDS.wipe;
@@ -8950,12 +8912,12 @@ async function runReset(kind) {
     state.schemaId = null;
     await boot();
     return res.example_password || null;
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return null; }
+  } catch (err) { toastError(err); return null; }
 }
 
 /**
  * Zeigt das Passwort der gerade angelegten Beispiel-Anmeldungen -- genau
- * einmal, in einem Dialog statt einer verschwindenden Meldung (NT-04).
+ * einmal, in einem Dialog statt einer verschwindenden Meldung.
  *
  * Bis 1.27.2 trugen diese Anmeldungen das auf der Website veroeffentlichte
  * Demo-Passwort; auf einer Kundeninstallation war damit u. a. eine
@@ -8975,7 +8937,7 @@ function showExamplePassword(password) {
     async () => true, "Verstanden");
 }
 
-/** Deutsche Namen der Vorgangszustaende (NT-10: bisher RUNNING/COMPLETED roh). */
+/** Deutsche Namen der Vorgangszustaende (statt RUNNING/COMPLETED roh). */
 const INSTANCE_STATE_LABELS = { RUNNING: "l\u00E4uft", COMPLETED: "abgeschlossen" };
 
 function statePillFor(s) {
@@ -8989,7 +8951,7 @@ async function resolveIncident(inc) {
     await api.post(`/v1/incidents/${inc.id}/resolve`);
     render();
     toast("ok", "Inzident aufgel\u00F6st", ["Aufgabe erneut eingereiht."]);
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  } catch (err) { toastError(err); }
 }
 
 // Audit-/Monitoring-Hilfen (Schritt 15)
@@ -9033,7 +8995,7 @@ function auditActorLabel(ev) {
 function auditDetailText(ev) {
   let base = ev.label || ev.node_id || "\u2013";
   const detail = ev.detail || {};
-  // Datenaenderung (VAL-01): Element mit altem und neuem Wert. Beide reisen als
+  // Datenaenderung: Element mit altem und neuem Wert. Beide reisen als
   // JSON im Detail; ``null`` heisst „war noch nicht gesetzt".
   if (ev.event_type === "INSTANCE_DATA_SET" && "new" in detail) {
     const show = (raw) => {
@@ -9046,7 +9008,7 @@ function auditDetailText(ev) {
     };
     base = `${base}: ${show(detail.old)} \u2192 ${show(detail.new)}`;
   }
-  // Ad-hoc (NT-02): ``label`` ist der Schritt davor bzw. der alte Name, das
+  // Ad-hoc: ``label`` ist der Schritt davor bzw. der alte Name, das
   // Detail traegt den neuen Schritt bzw. den neuen Namen.
   if (ev.event_type === "ADHOC_INSERTED" && detail.label) {
     base = `\u201E${detail.label}\u201C nach ${base}`;
@@ -9067,9 +9029,8 @@ function fmtTimestamp(iso) {
 function fmtDuration(sec) {
   if (sec == null) return "\u2013";
   // „0.0 s" sah aus wie eine kaputte Kachel, war aber die ehrliche Auskunft
-  // ueber Vorgaenge, die in derselben Sekunde entstanden und endeten
-  // (Nachtest 2026-09-22, Mangel 8). Die Demo-Daten haben inzwischen einen
-  // Zeitverlauf; bleibt der Wert dennoch unter einer Sekunde, sagt die Kachel
+  // ueber Vorgaenge, die in derselben Sekunde entstanden und endeten.
+  // Die Demo-Daten haben einen Zeitverlauf; bleibt der Wert dennoch unter einer Sekunde, sagt die Kachel
   // das jetzt, statt eine Null zu zeigen.
   if (sec < 1) return "< 1 s";
   if (sec < 60) return sec.toFixed(1) + " s";
@@ -9151,7 +9112,7 @@ async function viewTasks() {
   // Prozess: sie reicht ueber alle Prozesse (/me/tasks, /agents/{id}/tasks).
   // Vorher brach sie genau daran -- war oben ein Prozess ohne eigene Agenten
   // gewaehlt, sah eine Sachbearbeiterin statt ihrer Aufgaben einen Hinweis fuer
-  // Modellierer (Nachtest 2026-09-22, Mangel 3). Das Personenverzeichnis kommt
+  // Modellierer. Das Personenverzeichnis kommt
   // deshalb modelluebergreifend aus /directory/agents.
   await loadAgentDirectory();
   const agents = Object.values(state.agentDirectory).map((a) => ({ id: a.agent_id, name: a.name }));
@@ -9204,12 +9165,12 @@ async function viewTasks() {
     tasks = await api.get(bound ? "/me/tasks" : `/agents/${agentId}/tasks`);
     await ensureSchemaNames(tasks.map((t) => t.schema_id));
   }
-  catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  catch (err) { toastError(err); }
 
   // Announce tasks that arrived while this list was open (self-dismissing).
   announceNewTasks(agentId, tasks);
 
-  // Z4 (Priorisierungs-Konzept \u00A77): clientseitiger Kritikalit\u00E4ts-Filter.
+  // Z4: clientseitiger Kritikalit\u00E4ts-Filter.
   // Rein additiv \u00FCber die vorhandenen API-Felder; Wahl wird gemerkt.
   const taskFilter = localStorage.getItem("taskFilter") || "all";
   const visible = taskFilter === "critical"
@@ -9285,7 +9246,7 @@ async function viewTasks() {
             : null);
       }
       // Zwei gleiche Aufgaben verschiedener Vorgaenge waren nicht zu
-      // unterscheiden -- darunter jetzt die benennenden Werte (VAL-17).
+      // unterscheiden -- darunter jetzt die benennenden Werte.
       const title = contextTitle(t.context);
       const taskCell = title
         ? el("div", null, t.label || t.node_id, el("div", { class: "task-context" }, title))
@@ -9349,12 +9310,12 @@ async function absencePanel(agentId) {
       });
       toast("ok", "Abwesenheit eingetragen");
       render();
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+    } catch (err) { toastError(err); }
   }
 
   let absences = [];
   try { absences = await api.get(`/agents/${agentId}/absences`); }
-  catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  catch (err) { toastError(err); }
 
   const now = new Date();
   const fmt = (iso) => (iso || "").slice(0, 10);
@@ -9367,7 +9328,7 @@ async function absencePanel(agentId) {
       const status = active ? el("span", { class: "pill pill-amber" }, "aktiv") : el("span", { class: "pill pill-gray" }, "geplant");
       const del = el("button", { class: "btn small danger", onClick: async () => {
         try { await api.del(`/agents/${agentId}/absences/${a.id}`); toast("ok", "Abwesenheit entfernt"); render(); }
-        catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+        catch (err) { toastError(err); }
       } }, "Entfernen");
       return [`${fmt(a.start_at)} \u2013 ${fmt(a.end_at)}`, a.note || "\u2013", status, del];
     });
@@ -9424,43 +9385,62 @@ function supervisionTaskActions(t) {
       : null);
 }
 
+/**
+ * Setzt eine Arbeitslisten-Aktion (E1/E2) fuer einen offenen Schritt ab.
+ *
+ * Das gemeinsame Geruest von Uebernehmen, Zuruecklegen, Anhalten,
+ * Weiterarbeiten, Problem melden und Wiederanlauf: ``POST
+ * /instances/{id}{action}`` mit ``node_id`` und ``agent_id``, danach
+ * Erfolgsmeldung und Neuzeichnen. Ob die Aktion erlaubt ist (Exklusivitaet W1,
+ * Berechtigung W2, Detailzustands-Automat), entscheidet allein der Kern; eine Ablehnung
+ * (409/403) erscheint nur als Meldung.
+ *
+ * @param {object} task Offene Aufgabe mit ``instance_id`` und ``node_id``.
+ * @param {string} agentId Handelnde Person (``agent_id`` der Anfrage).
+ * @param {string} action Pfadendung samt Schraegstrich, z. B. ``"/claim"``.
+ * @param {string} okTitle Titel der Erfolgsmeldung.
+ * @param {string[]} [okLines] Optionale Detailzeilen der Erfolgsmeldung.
+ * @param {object} [extra] Weitere Felder des Anfragekoerpers (etwa ``reason``).
+ * @returns {Promise<boolean>} ``true`` nach Erfolg, ``false`` nach einem
+ *   Fehler -- passend fuer den Bestaetigen-Rueckruf von ``openModal``.
+ */
+async function postTaskAction(task, agentId, action, okTitle, okLines, extra) {
+  try {
+    await api.post(`/instances/${task.instance_id}${action}`,
+      { node_id: task.node_id, agent_id: agentId, ...extra });
+    toast("ok", okTitle, okLines);
+    render();
+    return true;
+  } catch (err) {
+    toastError(err);
+    return false;
+  }
+}
+
 // E1 (Zustandsmaschine): Aufgabe übernehmen bzw. zurücklegen. Geteilte
 // Funktionen für jede Aufrufstelle (Aufgabenliste heute, künftige Sichten) –
 // der Kern erzwingt Exklusivität (W1) und Berechtigung (W2) und antwortet bei
 // Konflikten mit 409, das hier nur angezeigt wird (keine Client-Logik).
 async function claimTask(task, agentId) {
-  try {
-    await api.post(`/instances/${task.instance_id}/claim`, { node_id: task.node_id, agent_id: agentId });
-    toast("ok", "Aufgabe übernommen", ["Sie verschwindet aus den Listen der anderen, bis sie erledigt oder zurückgelegt ist."]);
-    render();
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await postTaskAction(task, agentId, "/claim", "Aufgabe übernommen",
+    ["Sie verschwindet aus den Listen der anderen, bis sie erledigt oder zurückgelegt ist."]);
 }
 
 async function returnTask(task, agentId) {
-  try {
-    await api.post(`/instances/${task.instance_id}/return`, { node_id: task.node_id, agent_id: agentId });
-    toast("ok", "Aufgabe zurückgelegt", ["Alle Berechtigten sehen sie wieder in ihrer Liste."]);
-    render();
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await postTaskAction(task, agentId, "/return", "Aufgabe zurückgelegt",
+    ["Alle Berechtigten sehen sie wieder in ihrer Liste."]);
 }
 
 // --- Detailzustände (E2): Anhalten / Weiterarbeiten / Problem / Wiederanlauf.
 // Geteilte Funktionen; die Regeln (nur Inhaber, gescheitert wartet auf
-// Wiederanlauf, §4-Automat) erzwingt der Kern mit 409 – hier nur Anzeige.
+// Wiederanlauf, Detailzustands-Automat) erzwingt der Kern mit 409 – hier nur Anzeige.
 async function suspendTask(task, agentId) {
-  try {
-    await api.post(`/instances/${task.instance_id}/suspend`, { node_id: task.node_id, agent_id: agentId });
-    toast("ok", "Aufgabe angehalten", ["Die Frist läuft weiter – Anhalten ist Transparenz, kein Fristen-Stopp."]);
-    render();
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await postTaskAction(task, agentId, "/suspend", "Aufgabe angehalten",
+    ["Die Frist läuft weiter – Anhalten ist Transparenz, kein Fristen-Stopp."]);
 }
 
 async function resumeTask(task, agentId) {
-  try {
-    await api.post(`/instances/${task.instance_id}/resume`, { node_id: task.node_id, agent_id: agentId });
-    toast("ok", "Weiter geht's");
-    render();
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await postTaskAction(task, agentId, "/resume", "Weiter geht's");
 }
 
 function failTask(task, agentId) {
@@ -9472,21 +9452,14 @@ function failTask(task, agentId) {
       el("label", { class: "field" }, "Begründung", reason)),
     async () => {
       if (!reason.value.trim()) { toast("err", "Bitte eine Begründung angeben"); return false; }
-      try {
-        await api.post(`/instances/${task.instance_id}/fail`,
-          { node_id: task.node_id, agent_id: agentId, reason: reason.value.trim() });
-        toast("ok", "Problem gemeldet");
-        render();
-      } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+      return postTaskAction(task, agentId, "/fail", "Problem gemeldet", undefined,
+        { reason: reason.value.trim() });
     }, "Melden");
 }
 
 async function resetTask(task, agentId) {
-  try {
-    await api.post(`/instances/${task.instance_id}/reset`, { node_id: task.node_id, agent_id: agentId });
-    toast("ok", "Wiederanlauf", ["Die Aufgabe wird wieder allen Berechtigten angeboten – mit frischer Frist."]);
-    render();
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  await postTaskAction(task, agentId, "/reset", "Wiederanlauf",
+    ["Die Aufgabe wird wieder allen Berechtigten angeboten – mit frischer Frist."]);
 }
 
 async function completeTask(task, agentId) {
@@ -9497,7 +9470,7 @@ async function completeTask(task, agentId) {
   try {
     inst = await api.get(`/instances/${task.instance_id}`);
     schema = inst.ad_hoc_schema || await api.get(`/schemas/${task.schema_id}`);
-  } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return; }
+  } catch (err) { toastError(err); return; }
   await promptComplete(schema, task.instance_id, task.node_id, task.label || task.node_id, agentId,
     async () => { render(); }, inst.data_values);
 }
@@ -9590,15 +9563,15 @@ function simulationPanel(schema) {
     const data = {};
     Object.entries(inputs).forEach(([id, { input, type }]) => {
       const v = (input.value || "").trim();
-      if (v === "") return;  // leer = nicht gesetzt (bewusst, s. Konzept §3)
+      if (v === "") return;  // leer = nicht gesetzt (bewusst)
       if (type === "BOOLEAN") data[id] = v === "true";
-      else data[id] = coerceTypedInput(type, v);  // Zahlen inkl. Betrag (VAL-16)
+      else data[id] = coerceTypedInput(type, v);  // Zahlen inkl. Betrag
     });
     clear(result);
     try {
       const sim = await api.post(`/schemas/${state.schemaId}/simulate`, { data });
       result.appendChild(renderSimulationResult(schema, sim));
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+    } catch (err) { toastError(err); }
   }
   return el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "Simulation"),
@@ -9630,7 +9603,7 @@ function renderSimulationResult(schema, sim) {
   // Sicht, gespeist aus der synthetischen Instanz des Simulationsergebnisses
   // (node_states + loop_iterations reichen renderGraph als „Instanz“).
   const graphWrap = renderGraph(schema, { instance: sim });
-  // Abspiel-Animation (Konzept §6 Stufe B): die Abschlussreihenfolge
+  // Abspiel-Animation (Stufe B): die Abschlussreihenfolge
   // ``executed`` Schritt für Schritt über dem Markierungsbild nachspielen.
   if ((sim.executed || []).length) {
     box.appendChild(simulationPlaybackControls(graphWrap, schema, sim.executed));
@@ -9647,7 +9620,7 @@ function renderSimulationResult(schema, sim) {
   return box;
 }
 
-// Abspiel-Animation der Simulation (Konzept §6 Stufe B): spielt die
+// Abspiel-Animation der Simulation (Stufe B): spielt die
 // Abschlussreihenfolge ``executed`` über dem fertigen Markierungsbild nach –
 // rein visuell im Client (CSS-Klassen auf den ``data-node-id``-Gruppen des
 // SVG), kein weiterer Kern-Aufruf, keine erfundenen Zwischen-Markierungen:
@@ -9757,7 +9730,7 @@ async function startTestInstance() {
       render();
       toast("ok", "Pr\u00FCfinstanz gestartet", [inst.id]);
       return true;
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Starten");
 }
 
@@ -9984,9 +9957,9 @@ function priorityShort(p) { return PRIORITY_LABELS[p] || "bereit"; }
 // --- Zeitbasierte, automatische Arbeitslisten-Priorisierung ----------------
 // Rein darstellend: der Server liefert je Aufgabe (OpenTask) das abgeleitete
 // Kritikalitätsband und die Restzeit; hier werden sie nur zu Text/Badge. Keine
-// Korrektheitslogik im Client (siehe Konzept "Zeitbasierte-Priorisierung").
+// Korrektheitslogik im Client.
 
-//: Anwenderverständliche Beschriftung je Kritikalitätsband (Konzept 5.1).
+//: Anwenderverständliche Beschriftung je Kritikalitätsband.
 const CRITICALITY_LABELS = {
   ON_TRACK: "im Plan", WARNING: "wird knapp", AT_RISK: "gefährdet", OVERDUE: "überfällig", NONE: "",
 };
@@ -10022,8 +9995,8 @@ function dueLabel(t) {
 }
 
 // Die "Fällig"-Zelle: relative Restzeit plus farbiges Band-Badge und – bei
-// vorhandener Soll-Zeit – der ρ-Verbrauchsbalken (Z4 des Priorisierungs-
-// Konzepts): wie viel der Soll-Zeit ist verbraucht, Farbe = Band. Rein
+// vorhandener Soll-Zeit – der ρ-Verbrauchsbalken (Z4):
+// wie viel der Soll-Zeit ist verbraucht, Farbe = Band. Rein
 // abgeleitet aus den API-Feldern, kein eigener Zustand.
 function dueCell(t) {
   const badge = criticalityBadge(t);
@@ -10040,7 +10013,7 @@ function dueCell(t) {
 }
 
 // --------------------------------------------------------------------------
-// View: Integration (Integrations-Konzept Abschnitt 11 / Roadmap P5)
+// View: Integration (Roadmap P5)
 // --------------------------------------------------------------------------
 //
 // Wie der ganze Client traegt diese Sicht KEINE Korrektheitslogik: sie ruft
@@ -10067,7 +10040,7 @@ async function viewIntegration() {
 async function connectorRegistryPanel() {
   let connectors = [];
   try { connectors = await api.get("/v1/connectors"); }
-  catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  catch (err) { toastError(err); }
   const rows = connectors.map((c) => {
     const st = state.connectorStatus[c.connector_id] || "unknown";
     const pill = el("span", { class: "pill " + (st === "ok" ? "pill-green" : st === "err" ? "pill-red" : "pill-gray") },
@@ -10095,7 +10068,7 @@ async function testConnector(id) {
     toast(res.ok ? "ok" : "err", res.ok ? "Verbindung ok" : "Verbindung fehlgeschlagen", [id]);
   } catch (err) {
     state.connectorStatus[id] = "err";
-    const d = describeError(err); toast("err", d.title, d.lines);
+    toastError(err);
   }
   render();
 }
@@ -10128,8 +10101,8 @@ async function fillEntitySuggestions(datalistEl, connectorId) {
  * Gibt die zu ergaenzende <datalist> zurueck (sie muss im Dialog haengen, damit
  * der Browser sie findet). Wechselt die Connector-Auswahl, wird der Katalog neu
  * geladen. Bietet der Connector genau eine Tabelle an, wird sie in ein noch
- * leeres Feld eingetragen -- das war der haeufigste Fall im Abnahmetest, in dem
- * der Name geraten werden musste.
+ * leeres Feld eingetragen -- der haeufigste Fall, und niemand muss den Namen
+ * raten.
  *
  * @param {HTMLInputElement} entityInput das Freitextfeld der Entitaet
  * @param {string} listId eindeutige Id der Datalist (pro Dialog eine)
@@ -10153,8 +10126,8 @@ function wireEntitySuggestions(entityInput, listId, getConnectorId, connSelect) 
  *
  * Das Ergebnis bleibt bewusst im selben Dialog. Vorher oeffnete der Rueckruf
  * ein zweites Fenster im selben Modal-Container, das ``openModal`` unmittelbar
- * danach wieder leerte (der Rueckruf gab nicht ``false`` zurueck) -- der
- * Abnahmetest sah deshalb nie einen Datensatz, obwohl der Server sie lieferte.
+ * danach wieder leerte (der Rueckruf gab nicht ``false`` zurueck) -- man sah
+ * deshalb nie einen Datensatz, obwohl der Server sie lieferte.
  * Mit ``return false`` bleibt der Dialog stehen, und man kann eine andere
  * Tabelle lesen, ohne ihn neu zu oeffnen.
  *
@@ -10175,7 +10148,7 @@ function sampleReadConnector(id) {
       const rows = await api.post(`/v1/connectors/${id}/sample-read`,
         { entity: entity.value.trim(), limit: Number(limit.value) || 1 });
       renderSampleRecords(out, entity.value.trim(), rows);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+    } catch (err) { toastError(err); }
     return false;  // Ergebnis steht im Dialog -- er darf sich nicht schliessen
   }, "Lesen");
 }
@@ -10273,11 +10246,8 @@ function registerSchemaConnector() {
     el("label", { class: "field" }, "Typ", kind),
     el("label", { class: "field" }, "ID (optional)", cid)), async () => {
     if (!name.value.trim()) return false;
-    try {
-      await api.post(`/schemas/${state.schemaId}/connectors`,
-        { name: name.value.trim(), kind: kind.value, connector_id: cid.value.trim() || null });
-      await refreshSchema(); render(); toast("ok", "Connector registriert");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/connectors`,
+      { name: name.value.trim(), kind: kind.value, connector_id: cid.value.trim() || null }), "Connector registriert");
   }, "Registrieren");
 }
 
@@ -10297,11 +10267,8 @@ function bindExternalElement(element) {
       : el("span", { class: "muted" }, "Erst ein Instanz-Datenelement anlegen.")));
   openModal(`Extern anbinden \u2013 ${element.name}`, body, async () => {
     if (!entity.value.trim() || !conn.value || !keyElems.length) return false;
-    try {
-      await api.post(`/schemas/${state.schemaId}/data-elements/${element.id}/external`,
-        { connector_id: conn.value, entity: entity.value.trim(), key_element_id: key.value });
-      await refreshSchema(); render(); toast("ok", "Datenelement extern angebunden");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/data-elements/${element.id}/external`,
+      { connector_id: conn.value, entity: entity.value.trim(), key_element_id: key.value }), "Datenelement extern angebunden");
   }, "Anbinden");
 }
 
@@ -10454,10 +10421,7 @@ function bindSqlSelect(element) {
   openModal(`SQL-Select \u2013 ${element.name}`, body, async () => {
     const s = spec();
     if (!s.connector_id || !s.entity || !s.column) { toast("info", "Connector, Entit\u00E4t und Ergebnis-Spalte angeben"); return false; }
-    try {
-      await api.post(`/schemas/${state.schemaId}/data-elements/${element.id}/sql-select`, s);
-      await refreshSchema(); render(); toast("ok", "Datenelement per SQL-Select angebunden");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/data-elements/${element.id}/sql-select`, s), "Datenelement per SQL-Select angebunden");
   }, "Anbinden");
   renderFilters(); refresh();
 }
@@ -10569,10 +10533,7 @@ function bindSqlWrite(element) {
   openModal(`SQL-Write \u2013 ${element.name}`, body, async () => {
     const s = spec();
     if (!s.connector_id || !s.entity || !s.column) { toast("info", "Connector, Entit\u00E4t und Ziel-Spalte angeben"); return false; }
-    try {
-      await api.post(`/schemas/${state.schemaId}/data-elements/${element.id}/sql-write`, s);
-      await refreshSchema(); render(); toast("ok", "Datenelement per SQL-Write angebunden");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/data-elements/${element.id}/sql-write`, s), "Datenelement per SQL-Write angebunden");
   }, "Anbinden");
   renderFilters(); refresh();
 }
@@ -10647,10 +10608,7 @@ function editAutomation(node, sb) {
       req.retry_backoff_ms = Number(backoff.value);
       req.request_timeout_ms = Number(timeout.value);
     }
-    try {
-      await api.post(`/schemas/${state.schemaId}/automation`, req);
-      await refreshSchema(); render(); toast("ok", "Automatik gesetzt");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/automation`, req), "Automatik gesetzt");
   }, "\u00DCbernehmen");
 }
 
@@ -10659,7 +10617,7 @@ function editAutomation(node, sb) {
 async function webhookPanel() {
   let subs = [];
   try { subs = await api.get("/v1/webhooks"); }
-  catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+  catch (err) { toastError(err); }
   const rows = subs.map((s) => {
     const events = (s.events || []).join(", ");
     const test = el("button", { class: "btn small", onClick: () => testWebhook(s.id) }, "Testzustellung");
@@ -10685,7 +10643,7 @@ async function webhookPanel() {
 
 function addWebhook() {
   // Auflösbares Beispiel: „hooks.example.com" existiert nicht, der eigene
-  // Vorschlag scheiterte deshalb an der Zielprüfung (Nachtest, Mangel 9).
+  // Vorschlag scheiterte deshalb an der Zielprüfung.
   const url = el("input", { type: "url", placeholder: "https://example.com/procworks" });
   const secret = el("input", { type: "text", placeholder: "z. B. WEBHOOK_SECRET (optional)" });
   const checks = WEBHOOK_EVENT_TYPES.map((ev) => {
@@ -10700,7 +10658,7 @@ function addWebhook() {
       const p = await api.post("/v1/webhooks/preview",
         { url: url.value.trim(), event: chosen[0] || "task.completed", secret_ref: secret.value.trim() });
       renderWebhookPreview(result, p);
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); }
+    } catch (err) { toastError(err); }
   } }, "Probelauf (sendet nichts)");
   const body = el("div", { class: "form-grid" },
     el("label", { class: "field" }, "Ziel-URL", url),
@@ -10714,7 +10672,7 @@ function addWebhook() {
     try {
       await api.post("/v1/webhooks", { url: url.value.trim(), events, secret_ref: secret.value.trim() });
       render(); toast("ok", "Webhook angelegt");
-    } catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    } catch (err) { toastError(err); return false; }
   }, "Anlegen");
 }
 
@@ -10754,13 +10712,13 @@ async function testWebhook(id) {
     const d = await api.post(`/v1/webhooks/${id}/test`);
     const detail = d.status_code != null ? "HTTP " + d.status_code : (d.error || "");
     toast(d.ok ? "ok" : "err", d.ok ? "Testzustellung erfolgreich" : "Testzustellung fehlgeschlagen", detail ? [detail] : []);
-  } catch (err) { const e = describeError(err); toast("err", e.title, e.lines); }
+  } catch (err) { toastError(err); }
 }
 
 async function showDeliveries(id) {
   let deliveries = [];
   try { deliveries = await api.get(`/v1/webhooks/${id}/deliveries`); }
-  catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return; }
+  catch (err) { toastError(err); return; }
   const rows = deliveries.map((d) => [
     fmtTimestamp(new Date(d.at * 1000).toISOString()),
     d.event_type, String(d.attempt),
@@ -10775,7 +10733,7 @@ async function showDeliveries(id) {
 function deleteWebhook(sub) {
   openModal("Webhook l\u00F6schen", el("p", { class: "muted" }, `Abonnement f\u00FCr ${sub.url} entfernen?`), async () => {
     try { await api.del(`/v1/webhooks/${sub.id}`); render(); toast("ok", "Webhook gel\u00F6scht"); }
-    catch (err) { const d = describeError(err); toast("err", d.title, d.lines); return false; }
+    catch (err) { toastError(err); return false; }
   }, "L\u00F6schen");
 }
 
@@ -10819,7 +10777,7 @@ function table(headers, rows, rowClassFn) {
 // --------------------------------------------------------------------------
 
 // Public documentation targets. The source repository is private, so links must
-// not point at it: concept docs are published on the website (procworks.de),
+// not point at it: the modeller guide is published on the website (procworks.de),
 // customer guides live in the public release repo (procworks-release). docUrl()
 // resolves a doc filename to the right public URL for the help view.
 const SITE_DOCS = "https://procworks.de/docs/";
@@ -10827,8 +10785,8 @@ const RELEASE_DOCS = "https://github.com/tobiasHaecker/procworks-release/blob/ma
 const DISCLAIMER_URL = "https://github.com/tobiasHaecker/procworks-release/blob/main/DISCLAIMER.md";
 const DOC_URLS = {
   "Modellierer-Anleitung.md": SITE_DOCS + "modellierer-anleitung.html",
-  // Architektur-Konzept ist bewusst nicht öffentlich (interne IP) und daher
-  // hier nicht verlinkt.
+  // Verlinkt werden nur Dokumente, die öffentlich bereitstehen (Website oder
+  // Kunden-Repo).
   "README.md": SITE_DOCS,
   "Mitarbeiter-Anleitung.md": RELEASE_DOCS + "Mitarbeiter-Anleitung.md",
   "Windows-Server-Setup.md": RELEASE_DOCS + "Windows-Server-Setup.md",
@@ -10861,7 +10819,7 @@ const HELP_QUICKSTART = [
 
 // Glossary of the correctness rule codes that surface in the findings list and
 // error toasts. Grouped by family so a user can look up exactly what e.g. "D1"
-// or "B2" means. Kept in sync with validator.py and Architektur-Konzept §3.
+// or "B2" means. Kept in sync with validator.py.
 const HELP_RULES = [
   ["Struktur & Kontrollfluss (K)", [
     ["K1", "Blockstruktur: jeder Split hat genau einen passenden Join desselben Typs."],
@@ -11067,7 +11025,7 @@ function setActiveNav() {
   [...byId("nav").children].forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
 }
 
-// --- Auth / Login (Auth-Konzept Variante C) -------------------------------
+// --- Auth / Login ----------------------------------------------------------
 
 // German labels for the coarse RBAC roles (technical ids stay English).
 const ROLE_LABELS = { admin: "Administrator", modeler: "Modellierer", operator: "Bearbeiter", viewer: "Leser" };
@@ -11102,7 +11060,7 @@ async function loadPrincipal() {
   const before = state.principal && state.principal.subject;
   try {
     state.principal = await api.get("/auth/me");
-    // Anderer Login: Meldungen der vorigen Person gehoeren nicht hierher (VAL-13).
+    // Anderer Login: Meldungen der vorigen Person gehoeren nicht hierher.
     if (before !== undefined && before !== (state.principal && state.principal.subject)) clearToasts();
   } catch (err) {
     state.principal = null;
@@ -11148,7 +11106,7 @@ async function loadAuthConfig() {
   if (tokenField) tokenField.style.display = state.passwordLogin ? "none" : "";
 }
 
-// --- OIDC-Redirect-Login (Auth-Konzept §12.4, Opt-in) ----------------------
+// --- OIDC-Redirect-Login (Opt-in) ------------------------------------------
 // Authorization Code + PKCE, komplett im Client: der Kern rendert weiterhin
 // keinen IdP-spezifischen Fluss, er reicht nur die konfigurierten Endpunkte
 // über /auth/config durch. Ohne Konfiguration bleibt das Token-Feld der
@@ -11291,7 +11249,7 @@ function showLoginOverlay() {
         await boot();
       }
     } catch (err) {
-      // 429: zu viele Fehlversuche (Drosselung im Kern, VAL-06) -- der Kern
+      // 429: zu viele Fehlversuche (Drosselung im Kern) -- der Kern
       // nennt die Wartezeit, der Text wird unveraendert gezeigt.
       errBox.textContent = err && err.status === 401
         ? "Login oder Passwort ist falsch."
@@ -11372,7 +11330,7 @@ async function logout() {
   }
   state.token = "";
   state.principal = null;
-  clearToasts();  // nichts von dieser Sitzung bleibt fuer die naechste stehen (VAL-13)
+  clearToasts();  // nichts von dieser Sitzung bleibt fuer die naechste stehen
   localStorage.removeItem("authToken");
   if (state.passwordLogin) showLoginOverlay();
   else await boot();
@@ -11384,7 +11342,7 @@ async function logout() {
 // for a session token (via the normal /auth/login path -- no auth bypass).
 // Returns true on success. Used for the silent auto-login and role switching.
 // Demo users skip the forced first-change, so no password-change step follows.
-/** sessionStorage: zuletzt benutzte Demo-Person (fuer die Wiederanmeldung, VAL-20). */
+/** sessionStorage: zuletzt benutzte Demo-Person (fuer die Wiederanmeldung). */
 const DEMO_LAST_LOGIN_KEY = "demoLastLogin";
 
 async function demoLoginAs(login) {
@@ -11407,7 +11365,7 @@ async function switchDemoRole(login) {
   if (ok) {
     // Wer die Leiste geschlossen hatte, sieht sie nach dem Wechsel nur
     // eingeklappt wieder -- als Hinweis auf die neue Rolle, nicht als volle
-    // Leiste, die sich jedes Mal neu aufdraengt (VAL-19).
+    // Leiste, die sich jedes Mal neu aufdraengt.
     if (sessionStorage.getItem("demoBannerDismissed") === "1") {
       storageSet(localStorage, DEMO_BANNER_COLLAPSED_KEY, "1");
     }
@@ -11599,7 +11557,7 @@ function mountDemoBanner() {
 
   const others = state.demoLogins.filter((u) => u.login !== meLogin);
   const caption = (u) => `${ROLE_LABELS[u.role] || u.role}: ${u.name}`;
-  // Auf dem Handy eine Auswahlliste statt eines Knopfs je Rolle (NT-05): Die
+  // Auf dem Handy eine Auswahlliste statt eines Knopfs je Rolle: Die
   // 13 Knoepfe brachen auf 390 px in viele Zeilen um, die Leiste wurde so hoch,
   // dass die App (sie macht der Leiste Platz, --demo-banner-h) kaum noch Raum
   // hatte -- und die Tour ihre Blase oben ueber den Menueknopf legen musste.
@@ -11752,7 +11710,7 @@ function render() {
   setActiveNav();
   renderTourBadge();
   Promise.resolve(meta.fn())
-    .catch((err) => { const d = describeError(err); toast("err", d.title, d.lines); })
+    .catch((err) => { toastError(err); })
     // Die Sichten bauen ihr DOM bei jedem Rendern komplett neu auf -- der Anker
     // der laufenden Tour existiert danach nicht mehr und muss neu gesucht
     // werden. Gekapselt, damit ein Fehler in der Tour nie die Sicht mitreisst.
@@ -11859,7 +11817,7 @@ function startLiveUpdates() {
 }
 
 /**
- * Haelt die App hinter einem Dialog oder der Anmeldemaske ``inert`` (NT-15).
+ * Haelt die App hinter einem Dialog oder der Anmeldemaske ``inert``.
  *
  * ``inert`` nimmt die Seite aus der Tab-Reihenfolge und fuer Klicks aus dem
  * Spiel. Ohne das sprang Tab aus der Anmeldemaske in die verdeckte App und
@@ -11934,7 +11892,7 @@ function wireNav() {
       closeMobileNav();
     }
   });
-  // Tastaturnavigation im Kontrollfluss (Konzept §5.2, Stufe U4): Pfeiltasten
+  // Tastaturnavigation im Kontrollfluss (Stufe U4): Pfeiltasten
   // bewegen die Auswahl entlang des Spine bzw. zwischen den Zweigen, Enter holt
   // den Fokus in die Schritt-Karte. Gilt in beiden Modellier-Oberflaechen --
   // beide fuehren dieselbe Auswahl (state.selectedNode) und ruecken den
@@ -11965,7 +11923,7 @@ function wireNav() {
   apiInput.value = state.apiBase;
   apiInput.addEventListener("change", async () => {
     // Nur eine Adresse uebernehmen, hinter der wirklich ein ProcWorks-Kern
-    // antwortet (NT-17): Eine verirrte Eingabe („4“) legte sonst still jeden
+    // antwortet: Eine verirrte Eingabe („4“) legte sonst still jeden
     // Aufruf lahm und blieb im Browser gespeichert.
     const candidate = apiInput.value.trim() || defaultApiBase();
     if (!(await isProcWorksApi(candidate))) {
@@ -12032,7 +11990,7 @@ async function boot() {
     if (state.passwordLogin && !state.principal) {
       // Demo mit abgelaufener Sitzung: Der 401 von /auth/me hat die
       // Wiederanmeldung schon angestossen (request); sie ruft boot() erneut.
-      // Keine Anmeldemaske dazwischen (VAL-20).
+      // Keine Anmeldemaske dazwischen.
       if (demoRecovering) return;
       showLoginOverlay();
       return;
@@ -12055,15 +12013,14 @@ async function boot() {
     // Erstkontakt: die zur Rolle passende gefuehrte Tour anbieten, sofern sie
     // noch nicht erledigt oder dreimal verschoben wurde. In der oeffentlichen
     // Demo greift derselbe Pfad, weil sich der Besucher dort automatisch
-    // anmeldet (docs/Tutorial-Konzept.md, §7).
+    // anmeldet.
     if (typeof Tour !== "undefined") Tour.maybeOffer();
     // Nur in der oeffentlichen Demo wirksam: Umfrage auch beim Verlassen des
     // Tabs anbieten, nicht erst am "Demo beenden"-Knopf.
     installExitIntentSurvey();
   } catch (err) {
     setConnected(false);
-    const d = describeError(err);
-    toast("err", d.title, d.lines);
+    toastError(err);
   }
   render();
 }

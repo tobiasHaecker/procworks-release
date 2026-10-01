@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Structured scalar SQL-select tests: compiler + rules C4-C6 (concept Q0).
+"""Structured scalar SQL-select tests: compiler + rules C4-C6 (stage Q0).
 
 All tests here are **DB-free**: the compiler turns a :class:`SqlSelectBinding`
 into deterministic, parameterized SQL text without a connection, and the

@@ -322,10 +322,10 @@ def test_import_uses_overridden_id_and_name() -> None:
 
 # --- lanes, diagram interchange and the staffing round-trip ---------------
 #
-# Der Nachtest 2026-09-22 (Mangel 4) fand drei Luecken auf einmal: der Export
-# trug keine Diagramm-Koordinaten (Fremdwerkzeuge zeigten eine leere Flaeche),
-# keine Lanes (nicht ablesbar, wer was tut) und der Rundlauf verlor die
-# Bearbeiterregeln ("3 Schritt(e) ohne Bearbeiter").
+# Drei Zusagen gehoeren zusammen: der Export traegt Diagramm-Koordinaten
+# (sonst zeigen Fremdwerkzeuge eine leere Flaeche), Lanes (ablesbar, wer was
+# tut), und der Rundlauf behaelt die Bearbeiterregeln (sonst
+# "3 Schritt(e) ohne Bearbeiter").
 
 
 def _staffed() -> object:

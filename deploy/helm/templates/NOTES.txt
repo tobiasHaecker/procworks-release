@@ -30,6 +30,7 @@ Backups run daily ({{ .Values.backup.schedule }}) into PVC "{{ include "procwork
   - Trigger one now:   kubectl create job --from=cronjob/{{ include "procworks.backup.fullname" . }} backup-now
   - List dumps:        kubectl exec deploy/... is not applicable; inspect the PVC or a debug pod on it.
 To restore, scale the API to 0, run the restore Job, then scale it back up (it
-re-applies migrations on start). See the `backup.restore.*` values and
-docs/Backup-und-Restore-Konzept.md §6.4.
+re-applies migrations on start). See the `backup.restore.*` values and section 9
+(Kubernetes) of docs/Betriebs-Backup-Leitfaden.md in
+https://github.com/tobiasHaecker/procworks-release.
 {{- end }}

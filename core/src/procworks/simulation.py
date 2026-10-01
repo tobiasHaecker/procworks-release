@@ -4,8 +4,8 @@
 A **pure** module like ``metrics.py``: :func:`simulate` drives a throw-away
 in-memory instance through the *pure* engine -- no context, no store, no
 audit, no mail, no external tasks, no clock stamps -- so the token walk uses
-exactly the operational semantics while being strictly side-effect free
-(Simulations-Konzept §2). The result is a synthetic marking view the web
+exactly the operational semantics while being strictly side-effect free.
+The result is a synthetic marking view the web
 client renders with the same graph as every runtime view, plus the chosen
 XOR branches, the expected duration over the executed path and advisory
 findings (German, like the model hints -- user-facing aid, never a verdict).
@@ -28,7 +28,7 @@ from procworks.model import (
 
 #: Default round cap for loops: with static seeded values a REPEAT-UNTIL
 #: either exits at once or repeats forever, so the simulation cuts off
-#: honestly after this many total iterations (Simulations-Konzept §3).
+#: honestly after this many total iterations.
 MAX_LOOP_ITERATIONS = 25
 
 
@@ -71,7 +71,6 @@ def simulate(
     decision value aborts with a clear finding -- which *is* the insight.
     """
 
-    label_of = _labeller(schema)
     try:
         instance = exe.instantiate(
             schema,
@@ -106,7 +105,9 @@ def simulate(
         try:
             instance = exe.complete_activity(instance, schema, node_id)
         except exe.ExecutionError as err:
-            findings.append(f"Abbruch bei „{label_of(node_id)}“: {_engine_reason(err)}")
+            findings.append(
+                f"Abbruch bei „{_label_of(schema, node_id)}“: {_engine_reason(err)}"
+            )
             break
         executed.append(node_id)
         if sum(instance.loop_iterations.values()) > loop_cap:
@@ -130,12 +131,16 @@ def simulate(
     )
 
 
-def _labeller(schema: ProcessSchema):  # type: ignore[no-untyped-def]
-    def label_of(node_id: str) -> str:
-        node = schema.nodes.get(node_id)
-        return (node.label or node_id) if node is not None else node_id
+def _label_of(schema: ProcessSchema, node_id: str) -> str:
+    """Display name of a step in a simulation finding.
 
-    return label_of
+    The node's label, or its id when the node has no label or is unknown.
+    Deliberately not ``validator.node_name``: that one describes unlabelled
+    gateways by type, while a simulation only ever names activities here.
+    """
+
+    node = schema.nodes.get(node_id)
+    return (node.label or node_id) if node is not None else node_id
 
 
 def _expected_duration(
@@ -184,11 +189,13 @@ def _expected_duration(
 
     indegree = {nid: 0 for nid in completed}
     succ: dict[str, list[str]] = {nid: [] for nid in completed}
+    pred: dict[str, list[str]] = {nid: [] for nid in completed}
     for edge in schema.edges:
         if edge.type is not EdgeType.CONTROL:
             continue  # SYNC (K4) is ordering-only (consistent with T2)
         if edge.source in completed and edge.target in completed:
             succ[edge.source].append(edge.target)
+            pred[edge.target].append(edge.source)
             indegree[edge.target] += 1
 
     longest: dict[str, float] = {}
@@ -196,11 +203,7 @@ def _expected_duration(
     while queue:
         current = queue.pop()
         best = max(
-            (
-                longest[p]
-                for p, targets in succ.items()
-                if current in targets and p in longest
-            ),
+            (longest[p] for p in pred[current] if p in longest),
             default=0.0,
         )
         longest[current] = best + duration(current)
@@ -212,7 +215,7 @@ def _expected_duration(
 
 
 def _engine_reason(err: exe.ExecutionError) -> str:
-    """German reason for an engine refusal inside a simulation (NT-07).
+    """German reason for an engine refusal inside a simulation.
 
     Simulation findings are plain sentences (no codes), so the few refusals a
     what-if run realistically hits are worded here; anything else falls back

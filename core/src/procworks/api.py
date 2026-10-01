@@ -209,22 +209,22 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     When ``PROCWORKS_LOAD_DEMO`` is truthy, the built-in demo cosmos is loaded
     once into the (still empty) module singletons, so a throw-away cloud demo
-    container comes up *ready* -- no manual ``POST /admin/reset`` needed (see
-    docs/Demo-Hosting-Konzept.md, D0a). ``PROCWORKS_LOAD_O2C`` does the same for
+    container comes up *ready* -- no manual ``POST /admin/reset`` needed (D0a).
+    ``PROCWORKS_LOAD_O2C`` does the same for
     the large Order-to-Cash data set; both are independent and may be combined.
     This is a pure boundary convenience and touches no correctness rule; the
     seeds go through the same ``load_demo``/``load_o2c`` path as the admin reset.
 
     Before anything else it lifts the id sequences past the persisted ids
-    (:func:`_reserve_stored_ids`, NT-01) -- that part is not optional and runs
-    on every start, with or without a seed switch.
+    (:func:`_reserve_stored_ids`, so a new id never replaces a stored one) -- that part is not
+    optional and runs on every start, with or without a seed switch.
 
     Idempotent by design: it only seeds when no schema exists yet, so a
     re-entrant lifespan (test client, ``--reload``) or an already-populated
     store is left untouched. Off by default -- without the env var nothing runs.
     """
     # Zuerst die ID-Zaehler hinter den gespeicherten Bestand setzen -- sonst
-    # ersetzt der erste neue Vorgang nach einem Neustart ``instance_1`` (NT-01).
+    # ersetzt der erste neue Vorgang nach einem Neustart ``instance_1``.
     _reserve_stored_ids()
     # Die Leer-Pruefung faellt *einmal*, vor dem ersten Seed: sonst saehe der
     # zweite Schalter den vom ersten gefuellten Store und liefe nie an.
@@ -237,7 +237,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if load_o2c:
         _seed_o2c(password)
     if (load_demo or load_o2c) and not _demo_mode() and _password_login_active():
-        # Wie das Start-Passwort des Admins: einmal ins Log, sonst nirgends (NT-04).
+        # Wie das Start-Passwort des Admins: einmal ins Log, sonst nirgends.
         logging.getLogger("procworks.api").warning(
             "Example accounts created (password=%r). Change or delete them "
             "before real use.",
@@ -302,7 +302,7 @@ _org_resolver = make_org_resolver(_org_store)
 _context = exe.ExecutionContext(_resolver, _instances)
 _audit = create_audit_log()
 
-# Kein neu vergebener Schluessel darf einen gespeicherten ersetzen (NT-01): Die
+# Kein neu vergebener Schluessel darf einen gespeicherten ersetzen: Die
 # Stores speichern per Upsert, eine doppelte ID ueberschriebe also still einen
 # Vorgang, ein Schema, eine Vorlage oder ein Organisationsmodell. Die Waechter
 # fragen vor jeder Vergabe den Store; ``_reserve_stored_ids`` hebt die Zaehler
@@ -314,7 +314,7 @@ ids.ORG_IDS.guard("org", lambda key: _org_store.get(key) is not None)
 
 
 def _reserve_stored_ids() -> int:
-    """Lift all id sequences past the ids already persisted (NT-01).
+    """Lift all id sequences past the ids already persisted.
 
     Called once at start-up (:func:`_lifespan`). Without it a restarted API
     process counted from 1 again; with the guards alone it would still work,
@@ -343,15 +343,14 @@ _license_store = create_license_store()
 
 
 def _example_password() -> str:
-    """Password for the logins a data set seeds (NT-04).
+    """Password for the logins a data set seeds.
 
     Only the public throw-away demo (:func:`_demo_mode`) uses the published
     ``demo-procworks`` -- the website prints it, and ``/auth/config`` offers
-    it. Everywhere else a fresh random password: before the Nachtest
-    2026-09-27, "Beispieldaten laden" on a customer installation created 13
-    logins -- a modeller among them -- with that public password and no forced
-    change. The caller reports the random one exactly once (reset response,
-    or the server log for the boot seed).
+    it. Everywhere else a fresh random password: "Beispieldaten laden" on a
+    customer installation creates 13 logins -- a modeller among them -- and a
+    publicly known password must never open them. The caller reports the random one exactly once
+    (reset response, or the server log for the boot seed).
     """
 
     if _demo_mode():
@@ -394,7 +393,7 @@ def _seed_o2c(password: str) -> None:
     Shared by ``POST /admin/reset {load_o2c:true}`` and the boot seed
     (``PROCWORKS_LOAD_O2C``), exactly like :func:`_seed_demo`. The two data sets
     are independent -- own org model, own schema ids, own logins -- so they may
-    be loaded separately or together. See docs/Order-to-Cash-Demoprozess-Konzept.md.
+    be loaded separately or together.
     """
     backend = _auth_backend if isinstance(_auth_backend, PasswordAuthBackend) else None
     demo_o2c.load_o2c(
@@ -412,7 +411,7 @@ def _write_time_anchor(ts: float, trusted: bool) -> str:
     """Embed a licensing time-ratchet checkpoint into the hash-chained log.
 
     Returns the new head hash so the anchor can record the chain position that
-    witnessed it (tamper evidence, licensing concept §5A.4).
+    witnessed it (tamper evidence).
     """
 
     event = _audit.append(
@@ -500,7 +499,7 @@ def _required_agent_ids(schema: ProcessSchema) -> set[str]:
             required.update(bound)
     return required
 
-# Auth is a coarse boundary layer (Auth concept, Variant C). The backend is
+# Auth is a coarse boundary layer. The backend is
 # swapped via ``PROCWORKS_AUTH``; the default open backend grants every role and
 # leaves ``agent_id`` unbound, so existing clients/tests keep working unchanged.
 _auth_backend = create_auth_backend()
@@ -534,7 +533,7 @@ def require_role(*allowed: str) -> Callable[[Principal], Principal]:
     return _dep
 
 
-# Reusable role gates (see Auth concept 3.4). ``viewer`` is the read floor that
+# Reusable role gates. ``viewer`` is the read floor that
 # every authenticated role clears; writes need modeler/operator/admin. The
 # ``modeler`` is also a runtime actor: they may work tasks and drive execution
 # (including testing their own draft schemas), so they share the ``_run`` gate.
@@ -894,8 +893,8 @@ class AuthConfig(BaseModel):
     #: IdP authorization endpoint for the SPA's Authorization-Code+PKCE login.
     #: Populated only in jwt mode when ``PROCWORKS_JWT_AUTHORIZE_URL``,
     #: ``PROCWORKS_JWT_TOKEN_URL`` and ``PROCWORKS_JWT_CLIENT_ID`` are all set;
-    #: otherwise the SPA keeps the plain bearer-token field (Auth-Konzept
-    #: §12.4). No secrets: a public SPA client uses PKCE, not a client secret.
+    #: otherwise the SPA keeps the plain bearer-token field (the redirect
+    #: login is opt-in). No secrets: a public SPA client uses PKCE, not a client secret.
     oidc_authorize_url: str | None = None
     #: IdP token endpoint the SPA exchanges the authorization code at.
     oidc_token_url: str | None = None
@@ -958,7 +957,7 @@ class ResetRequest(BaseModel):
 class ResetResponse(BaseModel):
     demo_loaded: bool
     o2c_loaded: bool = False
-    #: Passwort der angelegten Beispiel-Logins -- nur hier, genau einmal (NT-04).
+    #: Passwort der angelegten Beispiel-Logins -- nur hier, genau einmal.
     #: Zufällig außer in der öffentlichen Demo; ``None``, wenn keine Logins
     #: angelegt wurden (kein Datensatz oder kein Passwort-Login).
     example_password: str | None = None
@@ -1077,8 +1076,8 @@ class LoopInsertRequest(BaseModel):
     cells: list[LoopCell] | None = None
     #: Hard brake (stage S3): total body runs are capped at this bound (>= 2)
     #: and the T2 critical path charges the body that many times. Defaults to
-    #: the same 10 as the web dialog (VAL-31); an explicit ``null`` means
-    #: "unbounded".
+    #: the same 10 as the web dialog, so no loop runs unbounded by accident; an explicit ``null``
+    #: means "unbounded".
     max_iterations: int | None = ops.DEFAULT_MAX_ITERATIONS
 
 
@@ -1120,7 +1119,7 @@ class FormFieldRequest(BaseModel):
     options: list[str] = Field(default_factory=list)
     help_text: str | None = None
     group: str = ""
-    #: Optional input checks (VAL-22): bounds for numbers, pattern and maximum
+    #: Optional input checks: bounds for numbers, pattern and maximum
     #: length for text. U2 checks they fit the field; completions enforce them.
     min_value: float | None = None
     max_value: float | None = None
@@ -1441,25 +1440,25 @@ class AdhocInsertRequest(BaseModel):
     after_node_id: str = Field(..., examples=["act_1"])
     label: str = Field(..., examples=["Zusatzpruefung"])
     #: Wer den neuen Schritt bearbeitet. Pflicht im Kern (B2 für den neuen
-    #: Schritt, VAL-03): ohne Regel stünde er in keiner Arbeitsliste. Optional
+    #: Schritt): ohne Regel stünde er in keiner Arbeitsliste. Optional
     #: im Schema nur, damit der Kern die Ablehnung mit Befund ``B2.no-staff``
     #: formuliert statt eines Pydantic-Fehlers.
     staff_rule: StaffRule | None = None
-    #: Anlass der Änderung; Pflicht außer bei Test-Instanzen (NT-02), steht im
+    #: Anlass der Änderung; Pflicht außer bei Test-Instanzen, steht im
     #: Ereignis ``ADHOC_INSERTED``.
     reason: str | None = None
 
 
 class AdhocDeleteRequest(BaseModel):
     node_id: str = Field(..., examples=["act_2"])
-    #: Anlass der Änderung; Pflicht außer bei Test-Instanzen (NT-02).
+    #: Anlass der Änderung; Pflicht außer bei Test-Instanzen.
     reason: str | None = None
 
 
 class AdhocRenameRequest(BaseModel):
     node_id: str = Field(..., examples=["act_2"])
     label: str = Field(..., examples=["Zusatzpruefung (angepasst)"])
-    #: Anlass der Änderung; Pflicht außer bei Test-Instanzen (NT-02).
+    #: Anlass der Änderung; Pflicht außer bei Test-Instanzen.
     reason: str | None = None
 
 
@@ -1486,7 +1485,7 @@ class WorklistReport(BaseModel):
 class ValidationReport(BaseModel):
     correct: bool
     findings: list[ValidationFinding]
-    #: Stufe B (concept §3.4): whether the schema is not merely *correct* but also
+    #: Stufe B: whether the schema is not merely *correct* but also
     #: *runnable*. ``correct`` (Stufe A) holds after every operation; this one may
     #: legitimately be false while a draft is still being built. Additive fields --
     #: an older client simply ignores them.
@@ -1544,16 +1543,34 @@ def _get_template_or_404(template_id: str) -> ProcessTemplate:
     raise HTTPException(status_code=404, detail=f"template '{template_id}' not found")
 
 
+def _findings_422(findings: Iterable[ValidationFinding]) -> HTTPException:
+    """Build the HTTP 422 that carries rule findings to the caller.
+
+    Every rejection by a correctness rule (validator, D3/D6 data checks, U4
+    mask checks) answers in the same shape ``{"findings": [...]}``, each
+    finding serialised with ``model_dump()`` so ``code``/``params`` reach the
+    client catalogue (``findingText``). Kept in one place so the shape cannot
+    drift between endpoints.
+
+    :param findings: the findings to report (typically non-empty).
+    :returns: the exception to ``raise`` (optionally ``from`` the cause) --
+        it is returned rather than raised so call sites keep their explicit
+        ``raise`` and exception chaining.
+    """
+
+    return HTTPException(
+        status_code=422,
+        detail={"findings": [f.model_dump() for f in findings]},
+    )
+
+
 def _commit_or_422(result_fn: Callable[[], ProcessSchema]) -> ProcessSchema:
     """Execute an operation callable; map CorrectnessError to HTTP 422."""
 
     try:
         schema = result_fn()
     except CorrectnessError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"findings": [f.model_dump() for f in exc.findings]},
-        ) from exc
+        raise _findings_422(exc.findings) from exc
     return _persist_schema(schema)
 
 
@@ -1588,10 +1605,7 @@ def _commit_org_or_422(result_fn: Callable[[], OrgModel]) -> OrgModel:
     try:
         org = result_fn()
     except CorrectnessError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"findings": [f.model_dump() for f in exc.findings]},
-        ) from exc
+        raise _findings_422(exc.findings) from exc
     if org.id is not None:
         breaking: list[ValidationFinding] = []
         for schema in _schemas_referencing(org.id):
@@ -1631,7 +1645,7 @@ def _execution_error_detail(exc: ExecutionError) -> dict[str, object]:
     """409 body of an engine refusal: the technical message plus ``code``/``params``.
 
     ``message`` stays unchanged for API users and tests; ``code``/``params`` let
-    the web client word the refusal in German (NT-07), exactly like a rule
+    the web client word the refusal in German, exactly like a rule
     finding (``describeError`` -> ``findingText``).
     """
 
@@ -1715,7 +1729,7 @@ def _dispatch_mail_outbox() -> None:
     dynamically so an operator/test can swap it). A successful send records a
     ``mail.sent`` audit event; an exhausted retry budget records ``mail.failed``.
     Only **metadata** is logged (recipient count, attempts, error), never the
-    address list or the body (DSGVO data minimisation, concept §8). Transient
+    address list or the body (DSGVO data minimisation). Transient
     failures stay silent -- they will be retried on a later drive. Never raises.
     """
 
@@ -1787,7 +1801,7 @@ def _after_advance(
     drives the ``HTTP_PUSH`` sink, then persists the (stamp-mutated) instance.
     Shared by every runtime-advance path -- the human mainline (start/complete),
     the external-task completion, ad-hoc changes and migration -- so a task that
-    becomes ready is notified no matter which path activated it (concept §5, §10).
+    becomes ready is notified no matter which path activated it.
     """
 
     _stamp_activations(schema, before_states, after)
@@ -1808,7 +1822,7 @@ def _record_subprocess_joins(
     than the request advanced: the child finishes, ``_propagate_completion``
     joins it into the parent, marks the parent's node COMPLETED and may finish
     the parent in turn. The boundary never saw any of it, so two entries were
-    missing from the parent's history (Nachtest 2026-09-22, defect 6):
+    missing from the parent's history:
 
     * the **completion of the SUBPROCESS step**. Without it the Soll/Ist map
       called every sub-process "never executed" and reported the transition
@@ -1886,7 +1900,7 @@ def _stamp_activations(
     Records, per human-task ACTIVITY that *just* became ready (ACTIVATED in
     ``after`` but not before), the current wall-clock into
     ``after.node_activated_at`` -- the origin from which an open task's reaction
-    time is measured (Zeitbasierte-Priorisierung-Konzept, Section 4). On a fresh
+    time is measured (time-based worklist prioritisation). On a fresh
     instance (``before_states is None``) the instance ``started_at`` is set too
     (origin of the process-deadline slack).
 
@@ -1985,10 +1999,7 @@ def _commit_instance_or_422(result_fn: Callable[[], ProcessInstance]) -> Process
     try:
         instance = result_fn()
     except CorrectnessError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"findings": [f.model_dump() for f in exc.findings]},
-        ) from exc
+        raise _findings_422(exc.findings) from exc
     return _instances.put(instance)
 
 
@@ -2095,7 +2106,7 @@ def get_auth_config() -> AuthConfig:
     mode = _auth_mode()
     cfg = AuthConfig(mode=mode, password_login=mode == "password")
     if mode == "jwt":
-        # OIDC redirect login (Auth-Konzept §12.4, opt-in): only when all
+        # OIDC redirect login (opt-in): only when all
         # three endpoints/ids are configured does the SPA offer the
         # "Über Firmenkonto anmelden" flow; otherwise the token field stays
         # the (documented) default. Values are public client metadata.
@@ -2123,7 +2134,7 @@ def get_auth_config() -> AuthConfig:
     return cfg
 
 
-#: Brute-force brake for ``POST /auth/login`` (VAL-06); see :class:`LoginThrottle`.
+#: Brute-force brake for ``POST /auth/login``; see :class:`LoginThrottle`.
 _login_throttle = LoginThrottle()
 
 
@@ -2158,7 +2169,7 @@ def _client_address(request: Request) -> str | None:
 def post_login(req: LoginRequest, request: Request) -> LoginResponse:
     """Exchange username + password for a session bearer token (password mode).
 
-    Guarded by :data:`_login_throttle` (VAL-06): after repeated failures per
+    Guarded by :data:`_login_throttle`: after repeated failures per
     login or per client address the endpoint answers 429 with ``Retry-After``
     -- *before* the password is even checked, so a locked key gives no oracle.
     """
@@ -2278,7 +2289,7 @@ def delete_user(login: str) -> Response:
 
     backend = _password_backend()
     backend.store.delete_user(login)
-    backend.revoke_sessions(login)  # sessions persist now (VAL-11) -- end them
+    backend.revoke_sessions(login)  # sessions persist across restarts -- end them
     return Response(status_code=204)
 
 
@@ -2366,7 +2377,7 @@ def get_admin_backups() -> backups.BackupsStatus:
 
     Reads only the metadata index the backup scheduler publishes into the shared
     control directory -- never the dump volume itself (the API has no access to
-    the dumps, per the concept's security rule). Reports ``available = false``
+    the dumps, per the backup security rule). Reports ``available = false``
     when no control directory is configured or nothing has been published yet,
     so the GUI can show a clear "not configured" state instead of an error.
     """
@@ -2402,7 +2413,7 @@ class MailOutboxEntryView(BaseModel):
     """Read-only, data-minimised projection of a queued notification (admin).
 
     Deliberately omits the recipient address list and the rendered body (DSGVO
-    data minimisation, concept §8): the ops view needs the delivery *state*, not
+    data minimisation): the ops view needs the delivery *state*, not
     the personal content. The recipient *count* and the modeller-authored subject
     are kept because they identify the notification without leaking a distribution
     list. ``node_label`` is a convenience lookup and may be ``None``.
@@ -2593,10 +2604,7 @@ def save_template(req: SaveTemplateRequest) -> ProcessTemplate:
             origin=TemplateOrigin.USER,
         )
     except CorrectnessError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"findings": [f.model_dump() for f in exc.findings]},
-        ) from exc
+        raise _findings_422(exc.findings) from exc
     return _template_store.put(template)
 
 
@@ -3138,10 +3146,7 @@ def post_import_bpmn(req: ImportBpmnRequest) -> ProcessSchema:
                 detail={"message": str(exc), "code": exc.code, "params": exc.params},
             ) from exc
         except CorrectnessError as exc:
-            raise HTTPException(
-                status_code=422,
-                detail={"findings": [f.model_dump() for f in exc.findings]},
-            ) from exc
+            raise _findings_422(exc.findings) from exc
 
     schema = run(req.schema_id)
     if req.schema_id is None and _store.get(schema.id) is not None:
@@ -3179,10 +3184,10 @@ def get_directory_agents() -> list[DirectoryAgent]:
     """All known agents across shared and model-local organisations, by name.
 
     A worklist spans **every** process model, so the people in it cannot be
-    resolved against the one model a client currently has open: doing so showed
+    resolved against the one model a client currently has open: that would show
     a clerk internal ids (``a-erika``) whenever another process was selected,
-    and hid her tasks behind a modeller hint when that process had no agents at
-    all (Nachtest 2026-09-22, defect 3). This directory is the model-independent
+    and hide her tasks behind a modeller hint when that process had no agents at
+    all. This directory is the model-independent
     answer: it lists the agents of the shared org registry first, then those of
     schemas that carry their own embedded organisation.
 
@@ -3334,7 +3339,7 @@ class ActivateLicenseRequest(BaseModel):
 
 
 class CheckoutRequest(BaseModel):
-    """Requested pack size / duration for a purchase (defaults per concept)."""
+    """Requested pack size / duration for a purchase (with sensible defaults)."""
 
     slots: int = 5
     months: int = 12
@@ -4118,11 +4123,11 @@ def post_release(schema_id: str) -> ProcessSchema:
 
 
 def _reads_only_own_instances(principal: Principal) -> bool:
-    """Is this caller limited to the instances it is involved in? (VAL-05)
+    """Is this caller limited to the instances it is involved in?
 
-    Before, every operator read every instance -- data values and audit
-    included, a colleague's leave request as well (Validierung 2026-09-25,
-    VAL-05). Limited is a **personal** login whose only role is ``operator``.
+    An operator reads only the instances it takes part in -- data values and
+    audit included; a colleague's leave request is none of its business.
+    Limited is a **personal** login whose only role is ``operator``.
     Not limited: ``viewer`` (the read-only role, i.e. management/revision),
     ``modeler``/``admin``, and machine identities -- open dev mode, static
     tokens, the ``integration`` role -- which keep the documented integration
@@ -4166,12 +4171,12 @@ def _involved_instance_ids(principal: Principal) -> set[str]:
 
 
 def _is_involved(principal: Principal, instance: ProcessInstance) -> bool:
-    """Is the bound agent involved in this one instance? (VAL-05 rule)
+    """Is the bound agent involved in this one instance? (involvement rule)
 
     The single-instance form of :func:`_involved_instance_ids` -- same
     definition (acting agent of any event of the instance, or eligible for /
     owner of an open step right now) -- without scanning every instance. Used
-    on every read and, since NT-08, on every action path, so it must stay cheap.
+    on every read and on every action path, so it must stay cheap.
     """
 
     agent = principal.agent_id
@@ -4192,10 +4197,9 @@ def _readable_instance_or_404(instance_id: str, principal: Principal) -> Process
 
     A limited caller gets **404** for an instance it is not involved in -- the
     same answer as for a missing one, so the endpoint does not reveal which
-    instance ids exist. Since the Nachtest 2026-09-27 (NT-08) the action
-    endpoints (claim, return, suspend, resume, fail, reset, start, complete,
-    data) load through here too: they used to answer a foreign instance with a
-    409 that named its open step, or with a D3 finding about its data.
+    instance ids exist. The action endpoints (claim, return, suspend, resume,
+    fail, reset, start, complete, data) load through here too: a 409 or a D3
+    finding for a foreign instance would reveal its state or its data.
     """
 
     instance = _get_instance_or_404(instance_id)
@@ -4210,7 +4214,7 @@ def _readable_instance_or_404(instance_id: str, principal: Principal) -> Process
     dependencies=[_read],
 )
 def get_performer_candidates(schema_id: str, node_id: str) -> list[str]:
-    """Steps whose performer a rule on ``node_id`` may name (Z3, VAL-25)."""
+    """Steps whose performer a rule on ``node_id`` may name (Z3)."""
 
     schema = _get_or_404(schema_id)
     if node_id not in schema.nodes:
@@ -4228,7 +4232,7 @@ class DisplayFieldsRequest(BaseModel):
     dependencies=[_model],
 )
 def post_display_fields(schema_id: str, req: DisplayFieldsRequest) -> ProcessSchema:
-    """Choose up to two data elements that name instances and tasks (VAL-17).
+    """Choose up to two data elements that name instances and tasks.
 
     Validated like every change (U5: existing INSTANCE elements, at most two).
     """
@@ -4244,10 +4248,10 @@ def post_display_fields(schema_id: str, req: DisplayFieldsRequest) -> ProcessSch
 def get_instance_titles(
     principal: Principal = Depends(get_principal),
 ) -> dict[str, list[assignment.DisplayValue]]:
-    """The naming values of every readable instance (VAL-17).
+    """The naming values of every readable instance.
 
     One call for the monitoring list instead of ``instance_14``. Readability
-    follows the instance list (a limited operator only sees its own, VAL-05);
+    follows the instance list (a limited operator only sees its own);
     instances without display fields are left out.
     """
 
@@ -4273,7 +4277,7 @@ def _read_gate(principal: Principal) -> None:
 
 @app.get("/instances", dependencies=[_read])
 def list_instances(principal: Principal = Depends(get_principal)) -> list[str]:
-    """All instance ids -- for a limited operator only its own (VAL-05)."""
+    """All instance ids -- for a limited operator only its own."""
 
     ids = _instances.list_ids()
     if _reads_only_own_instances(principal):
@@ -4333,7 +4337,7 @@ def post_instantiate(
         instance.id,
         instance.schema_id,
         schema_version=instance.schema_version,
-        # The starter counts as involved (VAL-05: an operator reads its own
+        # The starter counts as involved (an operator reads its own
         # instances); None for an unbound login, as before.
         agent_id=principal.agent_id,
     )
@@ -4396,7 +4400,7 @@ def get_instance_tasks(
 def _escalation_sweep(now: datetime | None = None) -> int:
     """Fire due escalation stages across all running instances (T3/E9).
 
-    The lazy boundary timer of the Eskalations-Konzept (§1): called before
+    The lazy boundary timer of the escalation feature: called before
     the worklist reads and by ``POST /admin/escalations/sweep`` -- there is
     deliberately no background scheduler. Idempotent through the persisted
     per-activation stage counter; the mail outbox additionally dedups per
@@ -4616,11 +4620,7 @@ def _known_agent_ids() -> set[str]:
     schema's embedded org model, so a per-schema agent is recognised too.
     """
 
-    ids: set[str] = set()
-    for org_id in _org_store.list_ids():
-        org = _org_store.get(org_id)
-        if org is not None:
-            ids.update(org.agents.keys())
+    ids = _all_agent_ids()
     for schema_id in _store.list_ids():
         schema = _store.get(schema_id)
         if schema is not None:
@@ -4731,6 +4731,84 @@ def _require_acting_agent(
     return acting
 
 
+def _detail_audit(
+    event: EventType,
+    instance: ProcessInstance,
+    after: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    agent_id: str | None,
+    detail: dict[str, str] | None = None,
+    principal: Principal | None = None,
+) -> None:
+    """Append one audit event of a worklist act on a step (skipped for tests).
+
+    Shared by the E1 ownership acts (claim, return, start) and the E2
+    detail-state acts (suspend, resume, fail, reset), which all record the
+    same shape: the step's node and label, the acting agent and an optional
+    detail. A throw-away test instance of a draft records no audit events, so
+    it never reaches the monitoring KPIs (mirrors instance creation).
+
+    :param event: the event type to record.
+    :param instance: the instance *before* the act (decides the test skip).
+    :param after: the instance after the act (id, schema, version).
+    :param schema: the effective schema, for the step's label.
+    :param node_id: the step acted on.
+    :param agent_id: the acting agent, ``None`` when nobody is named.
+    :param detail: extra detail (e.g. the failure reason), may be ``None``.
+    :param principal: when given, the delegating sender is merged in as
+        ``detail.actor`` if the act was done in an agent's name
+        (:func:`_delegation_detail`); without delegation ``detail`` stays
+        as passed (``None`` remains ``None``).
+    """
+
+    if instance.is_test:
+        return
+    if principal is not None:
+        delegation = _delegation_detail(principal, agent_id)
+        if delegation:
+            detail = {**(detail or {}), **delegation}
+    _audit.append(
+        event,
+        after.id,
+        after.schema_id,
+        schema_version=after.schema_version,
+        node_id=node_id,
+        label=_label_of(schema, node_id),
+        agent_id=agent_id,
+        detail=detail,
+    )
+
+
+def _force_foreign_claim(
+    principal: Principal,
+    instance: ProcessInstance,
+    node_id: str,
+    acting: str | None,
+) -> bool:
+    """Decide whether a return/reset acts on *someone else's* claim.
+
+    The owner may always return or reset their own claim. For a step claimed by
+    another agent the same supervisory authority applies as for the worklist
+    and absence endpoints (:func:`_require_agent_self_or_supervisor`, 403
+    otherwise), and the engine must be told to override the ownership check.
+
+    :param principal: the caller.
+    :param instance: the instance before the act.
+    :param node_id: the step acted on.
+    :param acting: the resolved acting agent (``None`` when nobody is named).
+    :returns: ``True`` when the step is claimed by someone other than
+        ``acting`` (and the caller may override it), else ``False``.
+    :raises HTTPException: 403 when the caller lacks supervisory authority.
+    """
+
+    holder = instance.claimed_by.get(node_id)
+    if holder is None or acting == holder:
+        return False
+    _require_agent_self_or_supervisor(principal, holder)
+    return True
+
+
 @app.post("/instances/{instance_id}/claim", response_model=ProcessInstance)
 def post_claim_activity(
     instance_id: str,
@@ -4762,17 +4840,15 @@ def post_claim_activity(
         return after
 
     after = _run_or_409(_claim_and_stamp)
-    if not instance.is_test:
-        _audit.append(
-            EventType.ACTIVITY_CLAIMED,
-            after.id,
-            after.schema_id,
-            schema_version=after.schema_version,
-            node_id=req.node_id,
-            label=_label_of(schema, req.node_id),
-            agent_id=acting,
-            detail=_delegation_detail(principal, acting),
-        )
+    _detail_audit(
+        EventType.ACTIVITY_CLAIMED,
+        instance,
+        after,
+        schema,
+        req.node_id,
+        acting,
+        principal=principal,
+    )
     return after
 
 
@@ -4793,63 +4869,22 @@ def post_return_activity(
     instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     acting = _resolve_acting_agent(principal, req.agent_id, instance)
-    holder = instance.claimed_by.get(req.node_id)
-    if holder is not None and acting != holder:
-        _require_agent_self_or_supervisor(principal, holder)
-        force = True
-    else:
-        force = False
+    force = _force_foreign_claim(principal, instance, req.node_id, acting)
     after = _run_or_409(
         lambda: exe.return_activity(
             instance, schema, req.node_id, acting or "", force=force
         )
     )
-    if not instance.is_test:
-        _audit.append(
-            EventType.ACTIVITY_RETURNED,
-            after.id,
-            after.schema_id,
-            schema_version=after.schema_version,
-            node_id=req.node_id,
-            label=_label_of(schema, req.node_id),
-            agent_id=acting,
-            detail=_delegation_detail(principal, acting),
-        )
-    return after
-
-
-def _detail_audit(
-    event: EventType,
-    instance: ProcessInstance,
-    after: ProcessInstance,
-    schema: ProcessSchema,
-    node_id: str,
-    agent_id: str | None,
-    detail: dict[str, str] | None = None,
-    principal: Principal | None = None,
-) -> None:
-    """Append one E2 detail-state audit event (skipped for test instances).
-
-    With ``principal`` the delegating sender is recorded as ``detail.actor``
-    when the act was done in an agent's name (:func:`_delegation_detail`).
-    """
-
-    if instance.is_test:
-        return
-    if principal is not None:
-        delegation = _delegation_detail(principal, agent_id)
-        if delegation:
-            detail = {**(detail or {}), **delegation}
-    _audit.append(
-        event,
-        after.id,
-        after.schema_id,
-        schema_version=after.schema_version,
-        node_id=node_id,
-        label=_label_of(schema, node_id),
-        agent_id=agent_id,
-        detail=detail,
+    _detail_audit(
+        EventType.ACTIVITY_RETURNED,
+        instance,
+        after,
+        schema,
+        req.node_id,
+        acting,
+        principal=principal,
     )
+    return after
 
 
 @app.post("/instances/{instance_id}/suspend", response_model=ProcessInstance)
@@ -4861,7 +4896,7 @@ def post_suspend_activity(
     """Pause a started activity (E2, V1) -- owner-only, base marking stays.
 
     The pause is transparency, not a deadline stop: clocks and escalation
-    keep running (Aktivitaets-Detailzustaende-Konzept §4).
+    keep running, so a pause can never quietly defer a deadline.
     """
 
     instance = _readable_instance_or_404(instance_id, principal)
@@ -4990,12 +5025,7 @@ def post_reset_activity(
     instance = _readable_instance_or_404(instance_id, principal)
     schema = _effective_schema_for(instance)
     acting = _resolve_acting_agent(principal, req.agent_id, instance)
-    holder = instance.claimed_by.get(req.node_id)
-    if holder is not None and acting != holder:
-        _require_agent_self_or_supervisor(principal, holder)
-        force = True
-    else:
-        force = False
+    force = _force_foreign_claim(principal, instance, req.node_id, acting)
 
     def _reset_and_stamp() -> ProcessInstance:
         after = exe.reset_activity(
@@ -5045,19 +5075,15 @@ def post_start_activity(
         return after
 
     after = _run_or_409(_start_and_stamp)
-    if not instance.is_test:
-        # A throw-away test instance of a draft records no audit events, so it
-        # never reaches the monitoring KPIs (mirrors instance creation).
-        _audit.append(
-            EventType.ACTIVITY_STARTED,
-            after.id,
-            after.schema_id,
-            schema_version=after.schema_version,
-            node_id=req.node_id,
-            label=_label_of(schema, req.node_id),
-            agent_id=acting,
-            detail=_delegation_detail(principal, acting),
-        )
+    _detail_audit(
+        EventType.ACTIVITY_STARTED,
+        instance,
+        after,
+        schema,
+        req.node_id,
+        acting,
+        principal=principal,
+    )
     return after
 
 
@@ -5081,31 +5107,22 @@ def post_complete_activity(
     # non-writable outputs all along; interactive completion now does the same.
     unwritable = _unwritable_completion_keys(schema, req.node_id, req.data)
     if unwritable:
-        raise HTTPException(
-            status_code=422,
-            detail={"findings": [f.model_dump() for f in unwritable]},
-        )
+        raise _findings_422(unwritable)
     # D3 at runtime: a completed step's values must fit their element's type.
-    # Before, "vielleicht" landed in a BOOLEAN element, and an XOR decision on
-    # it silently took the "true" branch (found while adding DECIMAL, VAL-16).
+    # Otherwise "vielleicht" would land in a BOOLEAN element, and an XOR
+    # decision on it would silently take the "true" branch.
     # Only wrong types of *known* elements are refused here; unknown keys keep
     # their previous behaviour so integrations sending extra fields do not break.
     type_findings = [
         f for f in _validate_data_values(schema, req.data) if f.code == "D3.wrong-type"
     ]
     if type_findings:
-        raise HTTPException(
-            status_code=422,
-            detail={"findings": [f.model_dump() for f in type_findings]},
-        )
-    # U4 (VAL-22): the input checks of the step's mask hold for every caller,
+        raise _findings_422(type_findings)
+    # U4: the input checks of the step's mask hold for every caller,
     # not only for the web form that marks the field.
     form_findings = form_value_findings(schema, req.node_id, req.data)
     if form_findings:
-        raise HTTPException(
-            status_code=422,
-            detail={"findings": [f.model_dump() for f in form_findings]},
-        )
+        raise _findings_422(form_findings)
     after = _run_or_409(
         lambda: exe.complete_activity(
             before,
@@ -5149,7 +5166,7 @@ def post_complete_activity(
 
 # --- ad-hoc changes (per-instance variant; R1/R2) ------------------------
 
-#: Hinweis, wenn einer Ad-hoc-Änderung der Anlass fehlt (NT-02).
+#: Hinweis, wenn einer Ad-hoc-Änderung der Anlass fehlt.
 ADHOC_REASON_REQUIRED = (
     "Ad-hoc-Änderung: Bitte einen Anlass angeben – er wird mit deinem Namen im "
     "Verlauf des Vorgangs festgehalten."
@@ -5159,12 +5176,11 @@ ADHOC_REASON_REQUIRED = (
 def _adhoc_audit_detail(
     instance: ProcessInstance, principal: Principal, reason: str | None
 ) -> dict[str, str]:
-    """Check the reason of an ad-hoc change and build its audit detail (NT-02).
+    """Check the reason of an ad-hoc change and build its audit detail.
 
-    An ad-hoc change alters *how one running case continues* -- in the
-    Nachtest 2026-09-27 an operator renamed "Genehmigung durch Leitung" in his
-    own leave request, and the history named nobody. So, like a supervisory
-    data correction (VAL-01), a real instance needs a reason, and the event
+    An ad-hoc change alters *how one running case continues* -- so it must be
+    traceable who changed it and why. Like a supervisory data correction
+    (:func:`_authorize_data_write`), a real instance needs a reason, and the event
     records who acted. Test instances write no audit events and need none.
 
     :param instance: the instance to be changed (before the change).
@@ -5197,9 +5213,9 @@ def post_adhoc_insert(
 
     ``staff_rule`` is required by the core for the new step (422 with
     ``B2.no-staff`` otherwise) -- a step without one would stand in nobody's
-    worklist (VAL-03). Only modeller/admin may change a running case, and a
+    worklist. Only modeller/admin may change a running case, and a
     real instance needs a ``reason``; both travel into ``ADHOC_INSERTED``
-    together with the actor (NT-02, see :func:`_adhoc_audit_detail`).
+    together with the actor (see :func:`_adhoc_audit_detail`).
     """
 
     instance = _get_instance_or_404(instance_id)
@@ -5228,7 +5244,7 @@ def post_adhoc_insert(
             label=_label_of(schema, req.after_node_id),
             detail=detail,
         )
-        # An ad-hoc insert can make a mail-bound activity ready -> notify (§10.7).
+        # An ad-hoc insert can make a mail-bound activity ready -> notify.
         _after_advance(_effective_schema_for(after), before_states, after)
     return after
 
@@ -5245,7 +5261,7 @@ def post_adhoc_delete(
     """Remove a not yet reached serial step from one running instance (R1/R2).
 
     Modeller/admin only, with a reason for a real instance; the actor and the
-    reason are recorded in ``ADHOC_DELETED`` (NT-02).
+    reason are recorded in ``ADHOC_DELETED``.
     """
 
     instance = _get_instance_or_404(instance_id)
@@ -5285,7 +5301,7 @@ def post_adhoc_rename(
     """Rename a not yet reached step of one running instance (R1/R2).
 
     Modeller/admin only, with a reason for a real instance; the actor and the
-    reason are recorded in ``ADHOC_RENAMED`` next to the new label (NT-02).
+    reason are recorded in ``ADHOC_RENAMED`` next to the new label.
     """
 
     instance = _get_instance_or_404(instance_id)
@@ -5332,7 +5348,7 @@ def post_migration_check(
     """Dry-run check whether one instance could move onto ``target_schema_id``.
 
     A limited operator sees only instances it is involved in; any other is 404
-    like a missing one (NT-02, the VAL-05 rule).
+    like a missing one (the involvement rule of :func:`_is_involved`).
     """
 
     instance = _readable_instance_or_404(instance_id, principal)
@@ -5358,7 +5374,7 @@ def post_migrate(
 
     Operators may migrate -- the instance view offers it to them -- but a
     limited operator only an instance it is involved in; a foreign one is 404
-    (NT-02: in the Nachtest an uninvolved operator moved a colleague's case).
+    like a missing one.
     """
 
     instance = _readable_instance_or_404(instance_id, principal)
@@ -5393,8 +5409,8 @@ def _migrate_and_record(
         )
     )
     # Wer hat migriert? Eine Migration ist eine Entscheidung, kein
-    # Maschinenereignis -- der Verlauf zeigte bis zum Nachtest 2026-09-22
-    # (Mangel 7) "System". Gebundener Login: der Agent (der Verlauf loest ihn zum
+    # Maschinenereignis -- der Verlauf nennt deshalb den Handelnden statt
+    # "System". Gebundener Login: der Agent (der Verlauf loest ihn zum
     # Namen auf); ungebundener: der Login in ``detail.actor``, dieselbe
     # Schreibweise wie beim Abschluss (:func:`_completion_detail`).
     detail: dict[str, str] = {
@@ -5413,7 +5429,7 @@ def _migrate_and_record(
     )
     if not instance.is_test:
         # Migration can activate mail-bound nodes on the *target* schema (a step
-        # the source did not have, or a re-mapped position) -> notify (§10.7).
+        # the source did not have, or a re-mapped position) -> notify.
         _after_advance(_effective_schema_for(after), before_states, after)
     return after
 
@@ -5531,7 +5547,7 @@ def _mapping_for(
 def _visible_migration_candidates(
     target: ProcessSchema, principal: Principal
 ) -> list[ProcessInstance]:
-    """Migration candidates the caller may see and act on (NT-02).
+    """Migration candidates the caller may see and act on.
 
     Everyone but a limited operator gets all candidates. A limited operator
     (see :func:`_reads_only_own_instances`) gets only the instances it is
@@ -5558,7 +5574,7 @@ def get_migration_report(
 
     Read-only. For a draft target every candidate reports M1 (not released) --
     the assistant is meant for released revisions, but the answer stays honest.
-    A limited operator sees only the instances it is involved in (NT-02).
+    A limited operator sees only the instances it is involved in.
     """
 
     target = _get_or_404(schema_id)
@@ -5599,15 +5615,13 @@ def post_migrate_instances(
     first (D3); a type error rejects the whole request before anything moves.
     Requested ids that are not candidates are reported as not migrated --
     for a limited operator that includes every instance it is not involved in
-    (NT-02); the answer is the same as for an id that does not exist.
+    -- the answer is the same as for an id that does not exist.
     """
 
     target = _get_or_404(schema_id)
     type_findings = _validate_data_values(target, req.data_mapping)
     if type_findings:
-        raise HTTPException(
-            status_code=422, detail={"findings": [f.model_dump() for f in type_findings]}
-        )
+        raise _findings_422(type_findings)
     candidates = {i.id: i for i in _visible_migration_candidates(target, principal)}
     wanted = req.instance_ids if req.instance_ids is not None else list(candidates)
     results: list[BulkMigrateResult] = []
@@ -5689,7 +5703,7 @@ def get_migration_target(
 def get_instance_audit(
     instance_id: str, principal: Principal = Depends(get_principal)
 ) -> list[AuditEvent]:
-    """History of one instance; a limited operator only for its own (VAL-05)."""
+    """History of one instance; a limited operator only for its own."""
 
     _readable_instance_or_404(instance_id, principal)
     return instance_timeline(_audit.list_all(), instance_id)
@@ -5724,12 +5738,12 @@ def get_kpis(schema_id: str | None = None) -> KpiReport:
 def get_unstaffed_steps(
     principal: Principal = Depends(get_principal),
 ) -> list[assignment.UnstaffedStep]:
-    """Open human steps across all running instances that nobody may work (VAL-09).
+    """Open human steps across all running instances that nobody may work.
 
     The monitoring's "Niemand zuständig" figure and filter. Test instances are
-    left out (throw-away, not operations). Before this, a stalled instance
-    showed "overdue 0, escalated 0" and was only visible in its own detail
-    view (Validierung 2026-09-25). See :func:`assignment.unstaffed_steps`.
+    left out (throw-away, not operations). Without it a stalled instance would
+    show "overdue 0, escalated 0" and be visible only in its own detail view.
+    See :func:`assignment.unstaffed_steps`.
     """
 
     absent = _current_absent_agents()
@@ -5737,7 +5751,7 @@ def get_unstaffed_steps(
     found: list[assignment.UnstaffedStep] = []
     for instance_id in _instances.list_ids():
         if own is not None and instance_id not in own:
-            continue  # VAL-05: a limited operator sees only its own instances
+            continue  # a limited operator sees only its own instances
         instance = _instances.get(instance_id)
         if instance is None or instance.is_test:
             continue
@@ -5929,12 +5943,11 @@ def _authorize_data_write(
     element_ids: Iterable[str],
     reason: str | None,
 ) -> str | None:
-    """Decide whether the caller may set these values directly (VAL-01).
+    """Decide whether the caller may set these values directly.
 
-    ``PUT /instances/{id}/data`` used to accept any value on any instance from
-    every operator, and wrote no audit event -- so a four-eyes approval could be
-    changed afterwards without a trace (Validierung 2026-09-25, VAL-01). The
-    rules, all at the boundary (identity is boundary knowledge):
+    ``PUT /instances/{id}/data`` must not undermine what a step decided: a
+    value a four-eyes approval rests on may change only with a right, a reason
+    and an audit event. The rules, all at the boundary (identity is boundary knowledge):
 
     * **Test instances** stay free (no audit, no productive work).
     * A **completed** instance is closed: 409 for everybody.
@@ -5998,8 +6011,8 @@ def _set_instance_data(
     """Shared body of both data endpoints: authorise, type-check, store, audit.
 
     Order matters: first the instance must be readable for the caller (a
-    foreign one is 404 -- before NT-08 the D3 check ran first and told an
-    uninvolved operator which values a colleague's case holds), then the D3
+    foreign one is 404, so a D3 finding never describes the data of a case the
+    caller may not read), then the D3
     type check (a malformed request is a 422 regardless of who sends it), then
     :func:`_authorize_data_write`. Every
     element whose value actually changes gets one ``INSTANCE_DATA_SET`` event
@@ -6013,10 +6026,7 @@ def _set_instance_data(
     schema = _effective_schema_for(instance)
     findings = _validate_data_values(schema, req.values)
     if findings:
-        raise HTTPException(
-            status_code=422,
-            detail={"findings": [f.model_dump() for f in findings]},
-        )
+        raise _findings_422(findings)
     supervision = _authorize_data_write(
         principal, instance, schema, req.values.keys(), req.reason
     )
@@ -6065,7 +6075,7 @@ def put_instance_data(
     Lets a caller enter instance data outside an activity completion -- e.g.
     right after the start. Unknown elements or type mismatches are rejected
     with 422 (D3). Who may write what is decided by
-    :func:`_authorize_data_write` (VAL-01): a bound operator only the elements
+    :func:`_authorize_data_write`: a bound operator only the elements
     of its own open steps, modeller/admin anything else only with a reason.
     Every change is audited as ``INSTANCE_DATA_SET``; that event type is not
     part of any KPI or mining aggregation, so the figures stay unchanged.
@@ -6409,8 +6419,7 @@ def v1_list_incidents(
     """List external-task incidents (optionally only the unresolved ones).
 
     A limited operator (see :func:`_reads_only_own_instances`) sees only the
-    incidents of instances it is involved in -- the list named every case of
-    the installation before (Nachtest 2026-09-27, NT-14).
+    incidents of instances it is involved in, like every other instance view.
     """
 
     incidents = _external_runtime().list_incidents(unresolved_only=unresolved_only)
@@ -6434,7 +6443,7 @@ def v1_resolve_incident(
     """Resolve an incident and re-queue its task for another attempt.
 
     A limited operator may resolve only incidents of instances it can read;
-    any other is 404 like a missing one (NT-14, the VAL-05 rule).
+    any other is 404 like a missing one (the involvement rule).
     """
 
     if _reads_only_own_instances(principal):
@@ -6545,7 +6554,7 @@ def v1_test_connector(
 
 
 #: Schemas/prefixes of database *system* catalogues. The sample read never
-#: reads them, whatever the connector's catalogue says (VAL-08).
+#: reads them, whatever the connector's catalogue says.
 _SYSTEM_ENTITY_PREFIXES = (
     "sqlite_",
     "information_schema.",
@@ -6560,9 +6569,8 @@ _SYSTEM_ENTITY_PREFIXES = (
 def _check_sample_entity(connector_id: str, entity: str) -> None:
     """Admit only an entity the connector itself offers (sample-read allowlist).
 
-    ``POST /v1/connectors/{id}/sample-read {"entity": "sqlite_master"}`` used to
-    return the database's system table, although ``/entities`` offered only the
-    business tables (Validierung 2026-09-25, VAL-08). Rules:
+    The sample read offers exactly what ``/entities`` offers -- the business
+    tables -- and never a system catalogue such as ``sqlite_master``. Rules:
 
     * system catalogues (:data:`_SYSTEM_ENTITY_PREFIXES`) → 422, always;
     * an unqualified name must be in the connector's catalogue
@@ -6609,7 +6617,7 @@ def v1_sample_read_connector(
 
     A modelling aid, so only modeller/admin (and service tokens with
     ``data:read``) may call it -- an operator has no mapping to build and
-    must not browse external tables (VAL-08). The entity must pass
+    must not browse external tables. The entity must pass
     :func:`_check_sample_entity`. Status codes: an unsafe or unknown entity
     is the caller's error (422), a failing external system is 502.
     """
@@ -6847,7 +6855,7 @@ class _ApiPrefixShim:
         await self._app(scope, receive, send)
 
 
-#: Browser hardening for the SPA (VAL-06). Must equal the headers in
+#: Browser hardening for the SPA. Must equal the headers in
 #: ``deploy/Caddyfile`` (SPA block) -- ``test_spa_headers_match_the_caddyfile``.
 SPA_SECURITY_HEADERS: dict[str, str] = {
     "Content-Security-Policy": (
@@ -6894,7 +6902,7 @@ class _SpaSecurityHeaders:
 def _maybe_mount_web(target: FastAPI, web_dir: str) -> bool:
     """Mount the static web client at ``/`` when ``web_dir`` is a real directory.
 
-    D0b (Demo-Hosting-Konzept, Variante A): optionally serve the static web
+    D0b: optionally serve the static web
     client from this same process, so one container = whole app = one URL --
     the simplest UX for a throw-away cloud demo (no separate Caddy reverse
     proxy). Off by default: regular deployments front the SPA with Caddy and

@@ -166,7 +166,7 @@ def test_bound_but_ineligible_login_is_still_refused_by_the_core(
 
     iid, act_id, backend = task
     # A modeller role keeps the case visible (a pure operator who is not
-    # involved gets 404 before the core is asked, NT-08) -- so this still
+    # involved gets 404 before the core is asked) -- so this still
     # reaches the core's eligibility check.
     headers = _login(backend, "fremd", roles=["operator", "modeler"], agent_id="ghost")
 

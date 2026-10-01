@@ -81,7 +81,7 @@ class ValidationFinding(BaseModel):
     shows). Language is a boundary concern -- the core stays language-neutral
     and every existing consumer keeps working.
 
-    **Every finding carries a code** since the Validierung 2026-09-25 (VAL-07);
+    **Every finding carries a code**;
     ``tests/test_every_finding_has_a_code.py`` guards it, the ``fail`` helpers of the rule
     checks take ``code`` as a required keyword (:class:`_Fail`). ``message``
     stays unchanged -- never edit it to improve a display text.
@@ -194,8 +194,8 @@ def check_executable(schema: ProcessSchema) -> list[ValidationFinding]:
 
     Deliberately **not** part of :func:`validate`. Stufe A (K/D/Z/…) holds after
     every single operation, so a half-finished draft stays editable; Stufe B is
-    the additional bar a schema must clear to be **released** (concept §1.1.1,
-    §3.4). Calling it from ``validate`` would make an incomplete draft
+    the additional bar a schema must clear to be **released**.
+    Calling it from ``validate`` would make an incomplete draft
     unmodellable, which is exactly the "Verbotsmodell" the architecture rejects.
 
     Implemented rule:
@@ -208,12 +208,12 @@ def check_executable(schema: ProcessSchema) -> list[ValidationFinding]:
 
     Not enforced here, on purpose:
 
-    * **B1 -- Dienstzuordnung** as literally worded in the concept ("every
+    * **B1 -- Dienstzuordnung** as literally worded in the original rule catalogue ("every
       activity node is linked to an executable ActivityTemplate") does not match
       how the product is actually used: an interactive step with an input mask
       needs no service, and *none* of the shipped example processes or built-in
       templates binds one. Enforcing it would reject the product's own corpus.
-      The concept text is the outdated part; see §3.4.
+      The original wording is the outdated part; B2 is what is enforced.
     * **B3 -- Vollständige Datenbindung** is already guaranteed by Stufe A: D1
       supplies every mandatory input on every path and K7 makes each branch
       partition total, both checked on every commit. A separate gate would only
@@ -254,7 +254,7 @@ _TEXT_WIDGETS = frozenset({WidgetKind.TEXT, WidgetKind.TEXTAREA})
 
 
 def _check_field_constraints(node_id: str, field: FormField) -> list[ValidationFinding]:
-    """U2 for the optional input checks of a mask field (VAL-22).
+    """U2 for the optional input checks of a mask field.
 
     ``min_value``/``max_value`` only on a NUMBER field and not crossed;
     ``pattern`` and ``max_length`` only on TEXT/TEXTAREA, the pattern a valid
@@ -308,7 +308,7 @@ def form_value_findings(
     """U4: check submitted values against the input checks of the step's mask.
 
     Runs at the boundary on every completion (web and ``/v1`` alike), so a
-    bound cannot be bypassed by calling the API directly (VAL-22). Only
+    bound cannot be bypassed by calling the API directly. Only
     values that are present are checked -- whether a required field must be
     present stays the client's matter, as before. Values of the wrong type
     are left to D3.
@@ -431,7 +431,7 @@ def _deg(node_id: str, msg: str, ind: int, outd: int) -> ValidationFinding:
     """K2 degree finding; ``msg`` reads ``"<KIND> must have <expected>"``.
 
     The params split it into the node kind and the expected degrees, so the
-    client can word it ("ACTIVITY must have in=1, out=1" was shown raw, VAL-07).
+    client can word it ("ACTIVITY must have in=1, out=1" was shown raw).
     """
 
     kind, _, expected = msg.partition(" must have ")
@@ -561,7 +561,7 @@ def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
     """K6: loops are properly paired and decidable per iteration.
 
     Fully additive -- a schema without LOOP nodes produces no findings. The
-    sub-rules (Schleifen-Konzept §4):
+    sub-rules:
 
     - K6a: LOOP_START/LOOP_END occur only as properly nested pairs.
     - K6b: every LOOP_END carries exactly one ``LoopDecision`` over an
@@ -580,19 +580,7 @@ def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
     """
 
     findings: list[ValidationFinding] = []
-
-    def fail(
-        message: str,
-        node_id: str | None = None,
-        *,
-        code: str,
-        params: dict[str, str] | None = None,
-    ) -> None:
-        findings.append(
-            ValidationFinding(
-                rule="K6", node_id=node_id, message=message, code=code, params=params or {}
-            )
-        )
+    fail = _collecting_fail("K6", findings)
 
     starts = [n.id for n in schema.nodes.values() if n.type is NodeType.LOOP_START]
     ends = {n.id for n in schema.nodes.values() if n.type is NodeType.LOOP_END}
@@ -728,19 +716,7 @@ def _check_single_loop(
     """K6b-K6d for one paired loop block (see :func:`_check_k6_loops`)."""
 
     findings: list[ValidationFinding] = []
-
-    def fail(
-        message: str,
-        node_id: str | None = None,
-        *,
-        code: str,
-        params: dict[str, str] | None = None,
-    ) -> None:
-        findings.append(
-            ValidationFinding(
-                rule="K6", node_id=node_id, message=message, code=code, params=params or {}
-            )
-        )
+    fail = _collecting_fail("K6", findings)
 
     if not body:
         fail(
@@ -860,11 +836,7 @@ def _written_through_body(
     intersects).
     """
 
-    mandatory_writes: dict[str, set[str]] = {}
-    for access in schema.data_accesses:
-        if access.mode in WRITE_MODES and access.mandatory:
-            mandatory_writes.setdefault(access.node_id, set()).add(access.element_id)
-
+    mandatory_writes = _mandatory_writes(schema)
     block = body | {start_id, end_id}
     available_after: dict[str, set[str]] = {start_id: set()}
     for node_id in _topological_order(schema):
@@ -873,13 +845,9 @@ def _written_through_body(
         preds = [
             e.source for e in schema.incoming(node_id) if e.source in block
         ]
-        contributions = [available_after.get(p, set()) for p in preds]
-        if not contributions:
-            guaranteed: set[str] = set()
-        elif schema.nodes[node_id].type is NodeType.AND_JOIN:
-            guaranteed = set().union(*contributions)
-        else:
-            guaranteed = set(contributions[0]).intersection(*contributions[1:])
+        guaranteed = _meet_at(
+            schema, node_id, [available_after.get(p, set()) for p in preds]
+        )
         if node_id == end_id:
             return guaranteed
         available_after[node_id] = guaranteed | mandatory_writes.get(node_id, set())
@@ -909,19 +877,7 @@ def _check_k4_sync_edges(schema: ProcessSchema) -> list[ValidationFinding]:
     """
 
     findings: list[ValidationFinding] = []
-
-    def fail(
-        message: str,
-        node_id: str | None = None,
-        *,
-        code: str,
-        params: dict[str, str] | None = None,
-    ) -> None:
-        findings.append(
-            ValidationFinding(
-                rule="K4", node_id=node_id, message=message, code=code, params=params or {}
-            )
-        )
+    fail = _collecting_fail("K4", findings)
 
     syncs = [e for e in schema.edges if e.type is EdgeType.SYNC]
     if not syncs:
@@ -1042,19 +998,7 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
     """
 
     findings: list[ValidationFinding] = []
-
-    def fail(
-        message: str,
-        node_id: str | None = None,
-        *,
-        code: str,
-        params: dict[str, str] | None = None,
-    ) -> None:
-        findings.append(
-            ValidationFinding(
-                rule="K7", node_id=node_id, message=message, code=code, params=params or {}
-            )
-        )
+    fail = _collecting_fail("K7", findings)
 
     splits = {n.id for n in schema.nodes.values() if n.type is NodeType.XOR_SPLIT}
 
@@ -1170,7 +1114,7 @@ class _Fail(Protocol):
     """The ``fail`` callback of a rule check: every finding carries a ``code``.
 
     ``code`` is keyword-only and required, so mypy rejects a finding without
-    one -- the client words every finding from its catalogue (VAL-07).
+    one -- the client words every finding from its catalogue.
     """
 
     def __call__(
@@ -1181,6 +1125,38 @@ class _Fail(Protocol):
         code: str,
         params: dict[str, str] | None = None,
     ) -> None: ...
+
+
+def _collecting_fail(rule: str, findings: list[ValidationFinding]) -> _Fail:
+    """Baut den ``fail``-Rückruf einer Regelprüfung, der in ``findings`` sammelt.
+
+    K4, K6 (samt :func:`_check_single_loop`) und K7 trugen je eine wörtlich
+    gleiche lokale ``fail``-Funktion; sie unterschieden sich nur in ``rule``.
+
+    Parameter:
+        rule: Regelgruppe, die jeder erzeugte Befund trägt (``"K6"`` …).
+        findings: Liste des Aufrufers; der Rückruf hängt **an diese** an, die
+            Reihenfolge der Befunde bleibt also die der ``fail``-Aufrufe.
+
+    Rückgabe:
+        Ein Rückruf mit der Signatur von :class:`_Fail` -- ``code`` ist
+        keyword-only und Pflicht, fehlende ``params`` werden zu ``{}``.
+    """
+
+    def fail(
+        message: str,
+        node_id: str | None = None,
+        *,
+        code: str,
+        params: dict[str, str] | None = None,
+    ) -> None:
+        findings.append(
+            ValidationFinding(
+                rule=rule, node_id=node_id, message=message, code=code, params=params or {}
+            )
+        )
+
+    return fail
 
 
 def _check_partition(
@@ -1448,7 +1424,7 @@ def _connector_supplied(element: DataElement) -> bool:
     write (D1) would make such an element **impossible** to read as a mandatory
     input. Its supply guarantee is carried instead by the connector rules: the
     lookup key / filter sources must be must-written before every reader
-    (C2 and C5, concept §9.2 -- "das Schlüssel-Datenelement muss vorher gesetzt
+    (C2 and C5 -- "das Schlüssel-Datenelement muss vorher gesetzt
     sein").
 
     A ``write``-bound element (C7-C9) is the opposite case: the *process*
@@ -1521,32 +1497,97 @@ def _must_written_before(schema: ProcessSchema) -> dict[str, set[str]]:
     runs, so contributions are intersected.
     """
 
-    order = _topological_order(schema)
-    pred = _pred_map(schema)
-    mandatory_writes: dict[str, set[str]] = {nid: set() for nid in schema.nodes}
-    for access in schema.data_accesses:
-        if access.mode in WRITE_MODES and access.mandatory:
-            mandatory_writes.setdefault(access.node_id, set()).add(access.element_id)
+    mandatory_writes = _mandatory_writes(schema)
     # A SUBPROCESS writes its mapped outputs back into the parent when it joins
     # (Datenübergabe), so those parent elements are guaranteed available once the
     # sub-process node completes -- exactly like a mandatory write.
     for node_id, produced in _subprocess_output_writes(schema).items():
         mandatory_writes.setdefault(node_id, set()).update(produced)
+    return _must_hold_before(schema, mandatory_writes)
 
+
+def _mandatory_writes(schema: ProcessSchema) -> dict[str, set[str]]:
+    """Die Datenelemente, die jeder Knoten per Pflicht-Schreibzugriff setzt.
+
+    Gemeinsame Grundlage der Must-Analysen D1 (:func:`_must_written_before`)
+    und K6c (:func:`_written_through_body`). Gezählt wird nur ein Zugriff mit
+    Schreibmodus (``WRITE_MODES``) **und** ``mandatory`` -- ein optionaler
+    Schreibzugriff garantiert keinen Wert.
+
+    Parameter:
+        schema: Das zu prüfende Schema.
+
+    Rückgabe:
+        Knoten-ID -> Menge der Element-IDs. Knoten ohne Pflicht-Schreibzugriff
+        fehlen (Aufrufer lesen per ``.get(node_id, set())``). Jeder Aufruf
+        liefert ein frisches Dict, der Aufrufer darf es erweitern.
+    """
+
+    writes: dict[str, set[str]] = {}
+    for access in schema.data_accesses:
+        if access.mode in WRITE_MODES and access.mandatory:
+            writes.setdefault(access.node_id, set()).add(access.element_id)
+    return writes
+
+
+def _meet_at(
+    schema: ProcessSchema, node_id: str, contributions: list[set[str]]
+) -> set[str]:
+    """Verknüpft die Beiträge der Vorgänger eines Knotens (Must-Analyse).
+
+    Die eine Join-Semantik aller Vorwärts-Must-Analysen (D1, K6c, Z3): An einem
+    AND_JOIN laufen alle Zweige, die Beiträge werden **vereinigt**; an jedem
+    anderen Knoten (XOR_JOIN oder seriell mit genau einem Vorgänger) wird
+    **geschnitten**, weil nur garantiert ist, was auf jedem Weg gilt.
+
+    Parameter:
+        schema: Das Schema, dem ``node_id`` angehört.
+        node_id: Der Knoten, an dem die Beiträge zusammenlaufen.
+        contributions: Je Vorgänger die Menge, die nach ihm garantiert gilt.
+
+    Rückgabe:
+        Eine neue Menge; ohne Beiträge (Startknoten bzw. Blockanfang) leer.
+        Der Knotentyp wird nur bei vorhandenen Beiträgen nachgeschlagen.
+    """
+
+    if not contributions:
+        return set()
+    if schema.nodes[node_id].type is NodeType.AND_JOIN:
+        return set().union(*contributions)
+    return set(contributions[0]).intersection(*contributions[1:])
+
+
+def _must_hold_before(
+    schema: ProcessSchema, produced: dict[str, set[str]]
+) -> dict[str, set[str]]:
+    """Globale Vorwärts-Must-Analyse über den (azyklischen) Kontrollfluss.
+
+    Gemeinsamer Kern von :func:`_must_written_before` (erzeugt werden
+    geschriebene Elemente) und :func:`_must_executed_before` (erzeugt wird der
+    Knoten selbst). Läuft in topologischer Reihenfolge, verknüpft an jedem
+    Knoten die Beiträge seiner CONTROL-Vorgänger über :func:`_meet_at` und
+    ergänzt danach, was der Knoten selbst erzeugt.
+
+    Parameter:
+        schema: Das zu analysierende Schema.
+        produced: Knoten-ID -> was der Knoten erzeugt; fehlende Knoten
+            erzeugen nichts.
+
+    Rückgabe:
+        Für jeden Knoten des Schemas die Menge, die auf **allen** Wegen vor
+        ihm garantiert gilt. Knoten, die die topologische Sortierung nicht
+        erreicht (Zyklus auf kaputtem Graphen), behalten die leere Menge.
+    """
+
+    pred = _pred_map(schema)
     before: dict[str, set[str]] = {nid: set() for nid in schema.nodes}
-    available_after: dict[str, set[str]] = {}
-    for node_id in order:
-        predecessors = pred.get(node_id, [])
-        if not predecessors:
-            guaranteed: set[str] = set()
-        else:
-            contributions = [available_after.get(p, set()) for p in predecessors]
-            if schema.nodes[node_id].type is NodeType.AND_JOIN:
-                guaranteed = set().union(*contributions)
-            else:
-                guaranteed = set(contributions[0]).intersection(*contributions[1:])
+    holds_after: dict[str, set[str]] = {}
+    for node_id in _topological_order(schema):
+        guaranteed = _meet_at(
+            schema, node_id, [holds_after.get(p, set()) for p in pred.get(node_id, [])]
+        )
         before[node_id] = guaranteed
-        available_after[node_id] = guaranteed | mandatory_writes.get(node_id, set())
+        holds_after[node_id] = guaranteed | produced.get(node_id, set())
     return before
 
 
@@ -1635,7 +1676,7 @@ def _topological_order(schema: ProcessSchema) -> list[str]:
 
 
 def performer_reference_candidates(schema: ProcessSchema, node_id: str) -> list[str]:
-    """ACTIVITY nodes a staff rule on ``node_id`` may reference (VAL-25).
+    """ACTIVITY nodes a staff rule on ``node_id`` may reference.
 
     Exactly the nodes Z3 accepts: guaranteed to have run on every path before
     ``node_id`` (:func:`_must_executed_before`). The web dialog offered every
@@ -1657,38 +1698,22 @@ def _must_executed_before(schema: ProcessSchema) -> dict[str, set[str]]:
     by Z3 to validate NodePerformingAgent back-references.
     """
 
-    order = _topological_order(schema)
-    pred = _pred_map(schema)
-    before: dict[str, set[str]] = {nid: set() for nid in schema.nodes}
-    executed_after: dict[str, set[str]] = {}
-    for node_id in order:
-        predecessors = pred.get(node_id, [])
-        if not predecessors:
-            guaranteed: set[str] = set()
-        else:
-            contributions = [executed_after.get(p, set()) for p in predecessors]
-            if schema.nodes[node_id].type is NodeType.AND_JOIN:
-                guaranteed = set().union(*contributions)
-            else:
-                guaranteed = set(contributions[0]).intersection(*contributions[1:])
-        before[node_id] = guaranteed
-        executed_after[node_id] = guaranteed | {node_id}
-    return before
+    return _must_hold_before(schema, {nid: {nid} for nid in schema.nodes})
 
 
 # --- U1-U3: input-mask (form designer) well-formedness -------------------
 
 
-#: Longest name/label any input may set (VAL-29). Long enough for every real
+#: Longest name/label any input may set. Long enough for every real
 #: caption, short enough to keep dialogs, lanes and worklists readable.
 MAX_LABEL_LENGTH = 200
 
 
 def clean_label(value: str, *, what: str) -> str:
-    """Trim a name/label and reject an empty or overlong one (VAL-29).
+    """Trim a name/label and reject an empty or overlong one.
 
-    Labels that were empty, only blanks or 5000 characters long were accepted
-    (Validierung 2026-09-25). Every operation that sets a name calls this, so
+    Empty labels, labels of only blanks and 5000-character labels are refused.
+    Every operation that sets a name calls this, so
     the rule holds for web, API and scripts alike; ``what`` names the kind of
     object for the client's wording (``OP_KIND_NAMES``). The *length* bound is
     additionally part of ``validate()`` (U6), so the BPMN import honours it
@@ -1726,7 +1751,7 @@ def _check_label_lengths(schema: ProcessSchema) -> list[ValidationFinding]:
     """U6: no node label or data element name exceeds ``MAX_LABEL_LENGTH``.
 
     Part of ``validate()`` so that also the BPMN import -- which builds nodes
-    without the operations -- cannot store a 5000-character caption (VAL-29).
+    without the operations -- cannot store a 5000-character caption.
     """
 
     findings: list[ValidationFinding] = []
@@ -1754,7 +1779,7 @@ def _check_label_lengths(schema: ProcessSchema) -> list[ValidationFinding]:
     return findings
 
 
-#: How many data elements may name an instance (VAL-17) -- more no longer fits
+#: How many data elements may name an instance -- more no longer fits
 #: a worklist row.
 MAX_DISPLAY_FIELDS = 2
 
@@ -1762,7 +1787,7 @@ MAX_DISPLAY_FIELDS = 2
 def _check_display_fields(schema: ProcessSchema) -> list[ValidationFinding]:
     """U5: the elements that name an instance exist and are INSTANCE data.
 
-    Presentation only (VAL-17): the check keeps the list meaningful, no rule
+    Presentation only: the check keeps the list meaningful, no rule
     depends on the values. EXTERNAL elements are excluded because their value
     is fetched per step and is not part of the instance data a worklist shows.
     """
@@ -1940,7 +1965,7 @@ def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
                     )
                 )
 
-            # U2 (VAL-22): input checks fit the field -- bounds on a number,
+            # U2: input checks fit the field -- bounds on a number,
             # pattern/length on text, bounds in order, pattern compiles.
             findings += _check_field_constraints(node_id, field)
 
@@ -2097,7 +2122,7 @@ def _check_key_supplied_before_readers(
     the supply guarantee intact: when the DAL resolves the element it reads the
     key from the instance values, so the key must be must-written on every path
     to every reading node -- otherwise the lookup would run with a missing key
-    and fail at runtime instead of at modelling time (concept §9.2).
+    and fail at runtime instead of at modelling time.
 
     Skipped on a structurally broken schema, where the must-analysis is not
     meaningful (same guard as D1/D2).
@@ -2209,7 +2234,7 @@ def _check_query_cardinality(
 
 
 def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
-    """Structured scalar SQL-select rules C4-C6 (concept §6).
+    """Structured scalar SQL-select rules C4-C6.
 
     Silent unless a data element carries a ``select`` binding, so it never
     affects models without scalar SQL bindings (fully additive).
@@ -2367,7 +2392,7 @@ def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
 
 
 def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
-    """Structured scalar SQL write-back rules C7-C9 (concept §7, Q4).
+    """Structured scalar SQL write-back rules C7-C9 (Q4).
 
     Silent unless a data element carries a ``write`` binding (fully additive).
 
@@ -3010,7 +3035,7 @@ def _check_t3_escalations(schema: ProcessSchema) -> list[ValidationFinding]:
     """T3: every modelled overdue reaction is well-formed and decidable.
 
     Fully additive -- a schema without escalation policies produces no
-    findings (Eskalations-Konzept §3):
+    findings:
 
     - T3a: the policy sits on an existing, *interactive* ACTIVITY with a
       resolvable target time (otherwise the due instant -- and thus every
@@ -3136,12 +3161,11 @@ def _possible_agents(org: OrgModel, rule: StaffRule) -> set[str] | None:
     EXCEPT: removing agents cannot add any, so the left operand's bound is
     always safe. It used to be the *whole* answer -- and an over-approximation
     can never prove emptiness, so ``EXCEPT(ROLE x, ROLE x)`` passed Z2, was
-    released, and its step stood in nobody's worklist (Validierung 2026-09-25,
-    VAL-02). When the right operand depends on the org model only, its runtime
-    set is known exactly (:func:`_exact_agents`), and ``left − right`` is still
-    a sound upper bound: nothing in that exact set can ever survive the
-    subtraction. With a runtime leaf on the right (a performer reference) the
-    removed set is unknown, and the bound stays at the left operand.
+    released, and its step stood in nobody's worklist. When the right operand depends on the org
+    model only, its runtime set is known exactly (:func:`_exact_agents`), and ``left − right`` is
+    still a sound upper bound: nothing in that exact set can ever survive the subtraction. With a
+    runtime leaf on the right (a performer reference) the removed set is unknown, and the bound
+    stays at the left operand.
 
     Callers besides Z2 (N3 recipients, T3 stage targets, the licensing
     guard's ``_required_agent_ids``) only gain from the tighter bound -- it is
@@ -3193,7 +3217,7 @@ def _exact_agents(org: OrgModel, rule: StaffRule) -> set[str] | None:
 
     Deputies and FUNCTIONAL escalation stages only ever *add* agents at runtime
     and are deliberately not part of this set; Z2 asks whether the rule itself
-    can find anyone (VAL-02).
+    can find anyone.
     """
 
     if rule.kind in STAFF_NODE_REF_KINDS:
@@ -3807,7 +3831,7 @@ def _check_subprocess_inputs_supplied(
     output on every path, and the parent must supply each mapped input before
     the call. Without this the child begins with a missing input and the failure
     surfaces at runtime inside a *different* schema than the one carrying the
-    modelling mistake (concept §3.6 H2 -- "Jeder Pflicht-Input des Sub-Prozesses
+    modelling mistake (H2 -- "Jeder Pflicht-Input des Sub-Prozesses
     ist aus einem geschriebenen Datenelement des Hauptprozesses versorgt").
 
     Needs only parent-side information, so it deliberately runs **without** a
@@ -3912,7 +3936,7 @@ def _check_follow_up_condition(
     # completing the final activity, the instance can then never be completed at
     # all (the same dead end K1 produced, reached by a different route). This is
     # the coupling that makes "die Auswertung beim Instanzabschluss ist
-    # garantiert definiert" (concept §3.6 F4) actually true.
+    # garantiert definiert" (F4) actually true.
     supplied = _must_written_before(schema).get(schema.end_node().id, set())
     for name in sorted(names):
         element = schema.data_elements[name]
@@ -4116,7 +4140,7 @@ def _critical_path_seconds(schema: ProcessSchema) -> float | None:
     into the LOOP_END's duration (:func:`_loop_time_extras`), so the plain
     one-pass DAG walk below stays correct. A loop without the bound keeps the
     documented one-pass approximation (a deadline over such a loop is a
-    promise for the run without repetition, Schleifen-Konzept §7).
+    promise for the run without repetition).
     """
 
     nodes = schema.nodes
@@ -4134,21 +4158,15 @@ def _critical_path_seconds(schema: ProcessSchema) -> float | None:
             indegree[edge.target] += 1
 
     extras = _loop_time_extras(schema)
-
-    def duration(node_id: str) -> float:
-        constraint = schema.time_constraints.get(node_id)
-        base = 0.0
-        if constraint is not None and constraint.max_duration_seconds is not None:
-            base = constraint.max_duration_seconds
-        return base + extras.get(node_id, 0.0)
-
     complete: dict[str, float] = {}
     queue: deque[str] = deque(nid for nid, deg in indegree.items() if deg == 0)
     visited = 0
     while queue:
         current = queue.popleft()
         visited += 1
-        complete[current] = complete.get(current, 0.0) + duration(current)
+        complete[current] = complete.get(current, 0.0) + _node_duration(
+            schema, current, extras
+        )
         for target in succ[current]:
             complete[target] = max(complete.get(target, 0.0), complete[current])
             indegree[target] -= 1
@@ -4189,15 +4207,8 @@ def _loop_time_extras(schema: ProcessSchema) -> dict[str, float]:
         if decision.max_iterations < 2:
             continue  # ill-formed bound -> K6b reports it, no time charge
 
-        def duration(node_id: str) -> float:
-            constraint = schema.time_constraints.get(node_id)
-            base = 0.0
-            if constraint is not None and constraint.max_duration_seconds is not None:
-                base = constraint.max_duration_seconds
-            return base + extras.get(node_id, 0.0)
-
         block = body | {start_id, end_id}
-        longest: dict[str, float] = {start_id: duration(start_id)}
+        longest: dict[str, float] = {start_id: _node_duration(schema, start_id, extras)}
         for node_id in _topological_order(schema):
             if node_id not in block or node_id == start_id:
                 continue
@@ -4207,8 +4218,36 @@ def _loop_time_extras(schema: ProcessSchema) -> dict[str, float]:
             best = max(
                 (longest.get(p, 0.0) for p in preds), default=0.0
             )
-            longest[node_id] = best + duration(node_id)
+            longest[node_id] = best + _node_duration(schema, node_id, extras)
         extras[end_id] = extras.get(end_id, 0.0) + (
             decision.max_iterations - 1
         ) * longest.get(end_id, 0.0)
     return extras
+
+
+def _node_duration(
+    schema: ProcessSchema, node_id: str, extras: dict[str, float]
+) -> float:
+    """Anrechenbare Dauer eines Knotens für T2 (Sekunden).
+
+    Die Soll-Dauer ``max_duration_seconds`` seiner Zeitannotation (0, wenn es
+    keine gibt) plus der Zuschlag aus ``extras`` für begrenzte Wiederholungen
+    (nur LOOP_END-Knoten tragen einen, :func:`_loop_time_extras`). Gemeinsam
+    genutzt von :func:`_critical_path_seconds` und :func:`_loop_time_extras`.
+
+    Parameter:
+        schema: Das Schema mit den Zeitannotationen.
+        node_id: Der Knoten, dessen Dauer gesucht ist.
+        extras: Bisher berechnete Schleifenzuschläge. :func:`_loop_time_extras`
+            reicht hier sein **noch wachsendes** Dict herein -- so zählt eine
+            innere, schon verrechnete Schleife im Pfad der äußeren mit.
+
+    Rückgabe:
+        Die Dauer in Sekunden, nie negativ bei wohlgeformten Annotationen (T1).
+    """
+
+    constraint = schema.time_constraints.get(node_id)
+    base = 0.0
+    if constraint is not None and constraint.max_duration_seconds is not None:
+        base = constraint.max_duration_seconds
+    return base + extras.get(node_id, 0.0)

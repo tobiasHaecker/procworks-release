@@ -1,7 +1,7 @@
 {{- /*
 Persistent volume claim for the backup dumps. Skipped when the operator points
 backup.storage.existingClaim at an existing PVC. Kept on a SEPARATE volume from
-the database data so losing one volume does not take out both (concept §8).
+the database data so losing one volume does not take out both.
 */ -}}
 {{- if and .Values.backup.enabled (not .Values.backup.storage.existingClaim) }}
 apiVersion: v1

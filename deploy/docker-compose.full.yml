@@ -37,9 +37,9 @@ services:
       retries: 5
 
   api:
-    # Scanned release image (VAL-12); `build` stays for `up --build` and as the
+    # Scanned release image; `build` stays for `up --build` and as the
     # fallback when the image cannot be pulled.
-    image: ghcr.io/tobiashaecker/procworks-api:${PROCWORKS_VERSION:-1.30.0}
+    image: ghcr.io/tobiashaecker/procworks-api:${PROCWORKS_VERSION:-1.31.0}
     build:
       context: ../core
     restart: unless-stopped
@@ -80,7 +80,7 @@ services:
       PROCWORKS_TOKENS_JSON: "${PROCWORKS_TOKENS_JSON:-}"
       # Read-only backup admin view (GET /admin/backups, POST …/run-now): the API
       # only reads the metadata index the backup scheduler publishes here and
-      # writes a .run-now trigger. It has NO access to the dump volume (§9).
+      # writes a .run-now trigger. It has NO access to the dump volume.
       PROCWORKS_BACKUP_CONTROL_DIR: /control
     depends_on:
       postgres:
@@ -91,7 +91,7 @@ services:
       - procworks_backup_control:/control
 
   web:
-    image: ghcr.io/tobiashaecker/procworks-web:${PROCWORKS_VERSION:-1.30.0}
+    image: ghcr.io/tobiashaecker/procworks-web:${PROCWORKS_VERSION:-1.31.0}
     build:
       context: ..
       dockerfile: web/Dockerfile
@@ -113,7 +113,7 @@ services:
       - caddy_config:/config
 
   # Out-of-the-box datensicherung: a small scheduler that produces one
-  # consistent pg_dump per day (concept docs/Backup-und-Restore-Konzept.md).
+  # consistent pg_dump per day (operator guide: docs/Betriebs-Backup-Leitfaden.md).
   # Built from the postgres image (pg_dump/pg_restore already inside) plus gnupg
   # for optional encryption at rest; writes to the dedicated procworks_backups
   # volume. Runs entirely on the operations layer -- the API/core is untouched.
@@ -141,9 +141,9 @@ services:
       BACKUP_CONTROL_DIR: "/control"
       # Version stamped into every backup's index (app_version) -- the same
       # default as the images above, so a restore shows which release wrote
-      # the dump (VAL-34; Helm passes .Chart.AppVersion the same way).
-      PROCWORKS_VERSION: "${PROCWORKS_VERSION:-1.30.0}"
-      # Optional hardening/extension hooks (see the concept, left empty here):
+      # the dump (Helm passes .Chart.AppVersion the same way).
+      PROCWORKS_VERSION: "${PROCWORKS_VERSION:-1.31.0}"
+      # Optional hardening/extension hooks (see docs/Betriebs-Backup-Leitfaden.md, left empty here):
       #   BACKUP_PASSPHRASE   -> symmetric encryption at rest (needs gpg/age)
       #   BACKUP_SYNC_CMD     -> off-site copy command (rsync/rclone/aws s3 ...)
       #   BACKUP_ALERT_WEBHOOK-> POST backup success/failure to an ops endpoint

@@ -371,8 +371,8 @@ def test_subprocess_input_must_be_written_before_the_call() -> None:
     Type conformance alone is not enough. Without this the child begins with a
     missing input and the failure surfaces at runtime inside a *different*
     schema -- the mirror image of the output guarantee, which was checked all
-    along. The Code-Wegweiser recorded this as a known silent gap ("H2 prueft
-    Eingaenge nur auf Existenz und Typ, der Fehler bliebe still").
+    along. Before this check H2 looked at inputs for existence and type only,
+    so the gap stayed silent.
     """
 
     target = _released_target()  # betrag: FLOAT

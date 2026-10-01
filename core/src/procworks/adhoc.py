@@ -51,7 +51,7 @@ def effective_schema(
 
 
 def _r1_error(message: str, node_id: str | None = None, *, code: str) -> CorrectnessError:
-    """R1 rejection with a ``code`` the client words (VAL-07).
+    """R1 rejection with a ``code`` the client words.
 
     ``params["node"]`` carries the node id; the client resolves it to the
     step's name in the instance variant it shows.
@@ -68,6 +68,21 @@ def _r1_error(message: str, node_id: str | None = None, *, code: str) -> Correct
             )
         ]
     )
+
+
+def _require_node(schema: ProcessSchema, node_id: str) -> Node:
+    """Return the node ``node_id`` of the instance variant, or refuse (R1).
+
+    ``schema`` is the schema the instance actually runs against
+    (:func:`effective_schema`). A missing node raises the R1 rejection
+    ``R1.not-found`` with the id in ``params["node"]`` -- the one wording all
+    three ad-hoc operations share.
+    """
+
+    node = schema.nodes.get(node_id)
+    if node is None:
+        raise _r1_error(f"node '{node_id}' does not exist", node_id, code="R1.not-found")
+    return node
 
 
 def adhoc_insert_activity(
@@ -89,7 +104,7 @@ def adhoc_insert_activity(
                    runs, so the new step must be *runnable*, not merely
                    correct: without a rule it is activated but stands in no
                    worklist, and the instance only moves on by a supervision
-                   act (Validierung 2026-09-25, VAL-03). The check is
+                   act. The check is
                    :func:`check_executable` restricted to the new node -- the
                    rest of the variant is the released schema (or, for a test
                    instance, a draft that may still be incomplete).
@@ -101,11 +116,7 @@ def adhoc_insert_activity(
     """
 
     current = effective_schema(instance, schema)
-    anchor = current.nodes.get(after_node_id)
-    if anchor is None:
-        raise _r1_error(
-            f"node '{after_node_id}' does not exist", after_node_id, code="R1.not-found"
-        )
+    anchor = _require_node(current, after_node_id)
     if anchor.type is NodeType.END:
         raise _r1_error("cannot insert after END", after_node_id, code="R1.after-end")
     outgoing = current.outgoing(after_node_id)
@@ -182,9 +193,7 @@ def adhoc_delete_node(
     """
 
     current = effective_schema(instance, schema)
-    node = current.nodes.get(node_id)
-    if node is None:
-        raise _r1_error(f"node '{node_id}' does not exist", node_id, code="R1.not-found")
+    node = _require_node(current, node_id)
     if node.type is not NodeType.ACTIVITY:
         raise _r1_error(
             "only ACTIVITY nodes can be deleted ad-hoc", node_id, code="R1.delete-not-activity"
@@ -215,10 +224,10 @@ def adhoc_delete_node(
     candidate.staff_rules.pop(node_id, None)
     candidate.service_bindings.pop(node_id, None)
     # Everything else keyed by the node goes too -- exactly what
-    # ``operations._drop_nodes`` removes on a modelling-time delete. Before the
-    # Nachtest 2026-09-27 (NT-10) a step carrying a target time could not be
-    # removed ad hoc at all: its time constraint survived as a stale key and T1
-    # ("time constraint references unknown node") rejected the whole change.
+    # ``operations._drop_nodes`` removes on a modelling-time delete. Otherwise a
+    # step carrying a target time could not be removed ad hoc at all: its time
+    # constraint would survive as a stale key and T1 ("time constraint
+    # references unknown node") would reject the whole change.
     candidate.sub_process_bindings.pop(node_id, None)
     candidate.forms.pop(node_id, None)
     candidate.time_constraints.pop(node_id, None)
@@ -267,9 +276,7 @@ def adhoc_rename_activity(
     """
 
     current = effective_schema(instance, schema)
-    node = current.nodes.get(node_id)
-    if node is None:
-        raise _r1_error(f"node '{node_id}' does not exist", node_id, code="R1.not-found")
+    node = _require_node(current, node_id)
     if node.type not in (NodeType.ACTIVITY, NodeType.SUBPROCESS):
         raise _r1_error(
             "only ACTIVITY or SUBPROCESS nodes can be renamed ad-hoc",

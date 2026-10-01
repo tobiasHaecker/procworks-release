@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: BUSL-1.1
 # Guided, atomic restore of a ProcWorks backup into PostgreSQL.
 #
-# This script performs the DATABASE-level part of the restore (concept §6.2
-# steps 2-4): verify -> replace-in-one-transaction. It runs inside the backup
+# This script performs the DATABASE-level part of the restore:
+# verify -> replace-in-one-transaction. It runs inside the backup
 # container and therefore CANNOT stop/start the API container itself. Instead it
-# HARD-GUARDS the "no writers during restore" invariant (§3.2): if any other
+# HARD-GUARDS the "no writers during restore" invariant: if any other
 # session is connected to the database it refuses (unless --force), telling the
 # operator to stop the API first.
 #
@@ -90,7 +90,7 @@ _have_sha="$(checksum "$_dump")"
     || die "checksum mismatch (manifest=$_want_sha file=$_have_sha) -- refusing to restore a corrupt/tampered dump"
 log info restore "checksum OK"
 
-# -- Step 2b: version compatibility guards (§6.3) ---------------------------
+# -- Step 2b: version compatibility guards ---------------------------------
 # PostgreSQL major version: restoring into an OLDER major is unsupported.
 _dump_pg_major="$(manifest_value "$_manifest" pg_major_version)"
 _cur_pg_major="$(db_major_version)"
@@ -130,7 +130,7 @@ if [ "$_others" -gt 0 ]; then
     fi
 fi
 
-# -- Confirmation guards (§6.3) ---------------------------------------------
+# -- Confirmation guards ---------------------------------------------------
 # A non-empty target database additionally requires --force.
 _live="$(psql_scalar 'SELECT coalesce(sum(n_live_tup),0) FROM pg_stat_user_tables;')"
 _live="${_live:-0}"

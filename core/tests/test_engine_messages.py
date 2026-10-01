@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Engine refusals and BPMN import errors carry a code (Nachtest 2026-09-27, NT-07).
+"""Engine refusals and BPMN import errors carry a code.
 
 The web client words every refusal from ``code``/``params`` in its catalogue
 ``FINDING_TEXTS``. Engine refusals (HTTP 409) and BPMN import errors (422) came
@@ -43,7 +43,7 @@ def _running(name: str) -> tuple[str, str]:
 
 
 def test_claim_conflict_names_the_step_and_the_holder() -> None:
-    iid, step = _running("NT-07 Übernahme")
+    iid, step = _running("Meldung Übernahme")
     assert client.post(
         f"/instances/{iid}/claim", json={"node_id": step, "agent_id": "a1"}
     ).status_code == 200

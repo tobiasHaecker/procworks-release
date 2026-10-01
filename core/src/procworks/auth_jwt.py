@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""JWT/OIDC bearer auth backend (Auth-Konzept §3.2, the ``JwtAuthBackend``).
+"""JWT/OIDC bearer auth backend (the ``JwtAuthBackend``).
 
 Third production backend besides token/password: the API trusts an external
 identity provider (Entra ID, Keycloak, ...) and validates the bearer JWT it
@@ -259,21 +259,31 @@ class JwtAuthBackend:
             raise AuthError("token not yet valid")
         if payload.get("iss") != self._issuer:
             raise AuthError("wrong token issuer")
-        aud = payload.get("aud")
-        audiences = [aud] if isinstance(aud, str) else aud if isinstance(aud, list) else []
-        if self._audience not in audiences:
+        if self._audience not in self._audiences(payload.get("aud")):
             raise AuthError("wrong token audience")
+
+    @staticmethod
+    def _audiences(aud: object) -> list[object]:
+        """Normalise the ``aud`` claim to a list (RFC 7519 §4.1.3).
+
+        The claim is either a single string or an array of strings; anything
+        else (missing, number, object) yields an empty list, so the audience
+        check in :meth:`_verify_claims` fails closed.
+        """
+
+        if isinstance(aud, str):
+            return [aud]
+        if isinstance(aud, list):
+            return aud
+        return []
 
     def _principal_from(self, payload: dict[str, Any]) -> Principal:
         subject = payload.get("sub")
         if not isinstance(subject, str) or not subject:
             raise AuthError("token has no subject")
-        roles = frozenset(
-            r for r in self._string_list(self._claim(payload, self._roles_claim))
-        ) & KNOWN_ROLES
-        scopes = frozenset(
-            s for s in self._string_list(self._claim(payload, self._scopes_claim))
-        ) & ALL_SCOPES
+        # Unknown roles/scopes are dropped, never an error (see module doc).
+        roles = KNOWN_ROLES & set(self._string_list(self._claim(payload, self._roles_claim)))
+        scopes = ALL_SCOPES & set(self._string_list(self._claim(payload, self._scopes_claim)))
         agent = payload.get(self._agent_claim)
         display = payload.get("name") or payload.get("preferred_username")
         return Principal(

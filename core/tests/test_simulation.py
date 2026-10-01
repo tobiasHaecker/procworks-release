@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""E6: side-effect-free what-if simulation (Simulations-Konzept).
+"""E6: side-effect-free what-if simulation.
 
 The walk uses the pure engine on a throw-away instance: chosen XOR branches
 and loop rounds follow the seeded values, a missing decision value aborts

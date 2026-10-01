@@ -24,6 +24,7 @@ same endpoint also wipes everything back to an empty system.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 from procworks import execution as exe
@@ -85,9 +86,9 @@ DEMO_USERS: list[tuple[str, str, frozenset[str], str | None]] = [
     # durchspielen. Waechter: test_every_demo_staff_rule_has_a_seeded_login.
     ("paul.klein", "Paul Klein", frozenset({"operator"}), "a-paul"),
     # Sabine leitet die Geschaeftsleitung, also die Abteilung ueber Toms
-    # Vertrieb. Seit „Vorgesetzte:r“ nie den Antragsteller selbst meint (NT-03)
+    # Vertrieb. Seit „Vorgesetzte:r“ nie den Antragsteller selbst meint
     # genehmigt sie Toms Urlaubsantrag -- ohne Login blieb der in der Demo bei
-    # „Genehmigung durch Leitung“ stehen (NT-11).
+    # „Genehmigung durch Leitung“ stehen.
     ("sabine.chef", "Sabine Chef", frozenset({"operator"}), "a-sabine"),
     ("vera.viewer", "Vera Viewer", frozenset({"viewer"}), None),
 ]
@@ -520,7 +521,7 @@ class BackdatedAudit:
     Ein Seed schreibt seine ganze Historie in Millisekunden. Damit standen alle
     Ereignisse praktisch auf derselben Sekunde, und die Auswertung zeigte, was
     sie ehrlicherweise zeigen musste: „Ø Durchlaufzeit 0.0 s" und in der
-    Engpass-Tabelle durchweg „keine Zeitdaten" (Nachtest 2026-09-22, Mangel 8).
+    Engpass-Tabelle durchweg „keine Zeitdaten".
     Der Datensatz ist aber ein **Schaufenster** -- ohne Zeitachse laesst sich
     die Zeitauswertung daran nicht zeigen.
 
@@ -627,6 +628,23 @@ def _emit(
     agent_id: str | None = None,
     detail: dict[str, str] | None = None,
 ) -> None:
+    """Schreibt ein Seed-Ereignis zu ``instance`` ins Audit-Log.
+
+    Gemeinsam genutzt von beiden Datensaetzen (auch vom Seeder in
+    :mod:`procworks.demo_o2c`): Instanz-Id, Schema-Id und -Version kommen aus
+    der Instanz, damit keine Aufrufstelle sie einzeln (und womoeglich
+    abweichend) nennt. Den Zeitstempel setzt das Log selbst -- im Seed ist das
+    :class:`BackdatedAudit`.
+
+    :param audit: Ziel-Log (im Seed die :class:`BackdatedAudit`-Huelle)
+    :param event_type: Art des Ereignisses
+    :param instance: die Instanz, *nach* dem Uebergang, den das Ereignis meldet
+    :param node_id: betroffener Knoten (bei Schritt-Ereignissen)
+    :param label: Bezeichnung des Knotens, wie sie in Auswertungen erscheint
+    :param agent_id: ausfuehrende Person, falls bekannt
+    :param detail: Zusatzangaben; ``None`` laesst sie weg
+    """
+
     audit.append(
         event_type,
         instance.id,
@@ -775,15 +793,44 @@ class _NoopSchemaStore:
 def _seed_users(backend: PasswordAuthBackend, password: str = DEMO_PASSWORD) -> int:
     """Seed the ready-to-use demo logins (idempotent); returns how many added.
 
+    Seeds :data:`DEMO_USERS` through the shared :func:`_seed_logins`.
+
+    :param backend: the password backend whose credential store receives them
     :param password: the password of every seeded login. Only the public
         throw-away demo uses the published :data:`DEMO_PASSWORD`; the admin
-        reset of a customer installation passes a random one (NT-04), because a
+        reset of a customer installation passes a random one, because a
         login with a password printed on the website would be an open door.
+    """
+
+    return _seed_logins(backend, DEMO_USERS, password)
+
+
+def _seed_logins(
+    backend: PasswordAuthBackend,
+    users: Sequence[tuple[str, str, frozenset[str], str | None]],
+    password: str,
+) -> int:
+    """Legt Beispiel-Logins an, die es noch nicht gibt; zaehlt die neu angelegten.
+
+    Gemeinsamer Kern beider Datensaetze (``_seed_users`` hier und in
+    :mod:`procworks.demo_o2c`): Jeder Eintrag wird nur angelegt, wenn der Login
+    noch fehlt -- ein zweites Laden (oder das Nebeneinander beider Datensaetze)
+    ueberschreibt also nie ein bestehendes Konto samt dessen Passwort.
+
+    :param backend: das Passwort-Backend, in dessen Store die Logins landen
+    :param users: ``(login, anzeigename, rollen, agent-id)`` je Login, in der
+        Reihenfolge, in der sie angelegt werden
+    :param password: das Passwort *aller* angelegten Logins (je Login eigens
+        gehasht). Die Logins muessen es nicht beim ersten Anmelden aendern
+        (``must_change=False``), damit sie sofort benutzbar sind -- deshalb darf
+        das veroeffentlichte :data:`DEMO_PASSWORD` nur in der oeffentlichen
+        Demo stehen.
+    :returns: Anzahl der neu angelegten Logins (bereits vorhandene zaehlen nicht)
     """
 
     store = backend.store
     seeded = 0
-    for login, name, roles, agent_id in DEMO_USERS:
+    for login, name, roles, agent_id in users:
         if store.get_user(login) is not None:
             continue
         store.put_user(
@@ -814,7 +861,7 @@ def load_demo(
     """Populate the stores with the demo world; returns the seeded-user count.
 
     ``password`` is the password of the seeded logins (see :func:`_seed_users`;
-    the published one only for the public demo, NT-04).
+    the published one only for the public demo).
 
     Call this on an already-empty system (the admin reset clears first). The
     shared org, both schemas and the three instances are always created; demo

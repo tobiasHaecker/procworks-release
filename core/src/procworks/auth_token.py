@@ -36,7 +36,47 @@ from procworks.auth import ALL_SCOPES, KNOWN_ROLES, AuthError, Principal, bearer
 
 
 def _digest(token: str) -> str:
+    """SHA-256 hex digest of a bearer token -- the only form that is kept.
+
+    Also used by :mod:`procworks.auth_password` for its session keys, so both
+    backends index tokens identically.
+    """
+
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _known_names(
+    entry: dict[str, object],
+    key: str,
+    noun: str,
+    known: frozenset[str],
+    subject: str,
+) -> frozenset[str]:
+    """Read a list-valued field of a token entry and check it against ``known``.
+
+    Shared by the ``roles`` and ``scopes`` fields, which follow the same rules:
+    a missing field means "none", anything other than a list/tuple is a
+    configuration error, and every name must be one ProcWorks knows.
+
+    :param entry: one token entry from the configuration.
+    :param key: the field to read (``"roles"`` or ``"scopes"``).
+    :param noun: singular for the error message (``"role"`` or ``"scope"``).
+    :param known: the admissible names.
+    :param subject: the entry's subject, named in every error message.
+    :returns: the names as a frozenset (each coerced to ``str``).
+    :raises ValueError: at start-up for a non-list field or an unknown name.
+    """
+
+    raw = entry.get(key, [])
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"token entry '{subject}' has non-list '{key}'")
+    names = frozenset(str(item) for item in raw)
+    unknown = names - known
+    if unknown:
+        raise ValueError(
+            f"token entry '{subject}' has unknown {noun}(s): {sorted(unknown)}"
+        )
+    return names
 
 
 class TokenAuthBackend:
@@ -53,25 +93,8 @@ class TokenAuthBackend:
         subject = entry.get("subject")
         if not isinstance(subject, str) or not subject:
             raise ValueError("each token entry needs a non-empty 'subject'")
-        raw_roles = entry.get("roles", [])
-        if not isinstance(raw_roles, (list, tuple)):
-            raise ValueError(f"token entry '{subject}' has non-list 'roles'")
-        roles = frozenset(str(r) for r in raw_roles)
-        unknown = roles - KNOWN_ROLES
-        if unknown:
-            raise ValueError(
-                f"token entry '{subject}' has unknown role(s): {sorted(unknown)}"
-            )
-        raw_scopes = entry.get("scopes", [])
-        if not isinstance(raw_scopes, (list, tuple)):
-            raise ValueError(f"token entry '{subject}' has non-list 'scopes'")
-        scopes = frozenset(str(s) for s in raw_scopes)
-        unknown_scopes = scopes - ALL_SCOPES
-        if unknown_scopes:
-            raise ValueError(
-                f"token entry '{subject}' has unknown scope(s): "
-                f"{sorted(unknown_scopes)}"
-            )
+        roles = _known_names(entry, "roles", "role", KNOWN_ROLES, subject)
+        scopes = _known_names(entry, "scopes", "scope", ALL_SCOPES, subject)
         agent_id = entry.get("agent_id")
         if agent_id is not None and not isinstance(agent_id, str):
             raise ValueError(f"token entry '{subject}' has non-string 'agent_id'")
@@ -121,7 +144,7 @@ def load_token_config() -> dict[str, dict[str, object]] | None:
 
     * ``PROCWORKS_TOKENS`` -- path to a JSON file ``{token: {subject, roles, scopes}}``;
     * ``PROCWORKS_TOKENS_JSON`` -- the same JSON as a string. Added for the
-      Compose stack (Nachtest 2026-09-27, NT-13): a variable in ``deploy/.env``
+      Compose stack: a variable in ``deploy/.env``
       reaches the container without mounting a file into it.
 
     :returns: the parsed mapping, or ``None`` when neither variable is set.

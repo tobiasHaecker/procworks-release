@@ -45,8 +45,9 @@ nachdem ein Fix verfügbar ist.
 
 ## Authentifizierung & Betrieb
 
-Die API trägt eine austauschbare Auth-Schicht am Boundary (`auth.py`,
-Auth-Konzept Variante C). Hinweise für den produktiven Betrieb:
+Die API trägt eine austauschbare Auth-Schicht am Boundary (`auth.py`): Die
+Anmeldeart wird per `PROCWORKS_AUTH` gewählt, der Kern selbst kennt keine
+Anmeldung. Hinweise für den produktiven Betrieb:
 
 - **Code-Standardmodus ist „offen“** (`PROCWORKS_AUTH=open`): keine Identitätsprüfung,
   alle Rollen freigegeben. Dieser Modus ist ausschließlich für die lokale

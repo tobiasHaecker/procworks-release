@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""HTTP-Push outbound integration -- the *push* side of §6.3 (roadmap P6).
+"""HTTP-Push outbound integration -- the *push* side (roadmap P6).
 
 Complements the EXTERNAL_TASK *pull* path (``test_external_tasks.py``). Three
 layers are covered:

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: BUSL-1.1
 """Licensing & agent metering (dormant by default, boundary-only).
 
-This module implements the technical side of the licensing/business model
-concept: a *free* agent quota plus purchasable, time-limited *agent packs*,
+This module implements the technical side of the licensing/business model:
+a *free* agent quota plus purchasable, time-limited *agent packs*,
 enforced through cryptographically signed license files with an offline-safe
 expiry check. It is deliberately **additive and boundary-only** -- the pure
 correctness core (``validator``/``execution``/``model``) is never touched.
@@ -16,7 +16,7 @@ Two design invariants make it safe to ship *now* while it only "bites" later:
   ``PROCWORKS_AUTH=open``. Activation later is *only* setting the env var.
 * **Soft, never destructive.** Enforcement only ever blocks *new* agents /
   *new* instances. Running instances and all data are never touched, mirroring
-  the "fair barrier, not DRM" line of the concept (§5A.3, §5A.4).
+  the "fair barrier, not DRM" line.
 
 The pieces:
 
@@ -25,7 +25,7 @@ The pieces:
     bought, expiring pack). :func:`verify_license` checks the Ed25519 signature.
 ``TimeAnchor``/:class:`Clock`
     A monotone, tamper-evidenced "time ratchet": ``effective_now`` never runs
-    backwards even if the operator turns the system clock back (§5A.4). It is
+    backwards even if the operator turns the system clock back. It is
     fed by the system clock, by monotone external lower bounds (the append-only,
     hash-chained audit log's newest timestamp) and -- occasionally, when online
     -- by a trusted signed anchor.
@@ -56,7 +56,7 @@ from typing import Protocol
 from pydantic import BaseModel, Field
 
 #: Free tier size: how many agents may exist without any bought pack. The
-#: concept fixes this at three (enough to exercise all demo data, §5A.1).
+#: default is three (enough to exercise all demo data).
 FREE_SLOTS_DEFAULT = 3
 
 #: Reserved id used for the synthetic ``TIME_ANCHOR`` audit events that embed
@@ -82,7 +82,7 @@ class License(BaseModel):
     ``FREE`` licenses are unsigned and never expire. ``PACK`` licenses are
     Ed25519-signed by the licensor, carry an ``expires_at`` and are bound to a
     specific installation via ``install_id`` so a copied license file does not
-    work elsewhere (§5A.4, baseline 5).
+    work elsewhere (baseline 5).
     """
 
     license_id: str
@@ -139,7 +139,7 @@ class AgentLicenseView(BaseModel):
 
 
 class PendingClaim(BaseModel):
-    """An open online purchase awaiting fulfilment ("auto-pull", §4).
+    """An open online purchase awaiting fulfilment ("auto-pull").
 
     After a checkout is started the product remembers a short-lived, single-use
     *claim* so it can later fetch the freshly signed pack from the (separate,
@@ -540,15 +540,49 @@ class LicenseManager:
         )
 
     def agent_view(self, agent_id: str) -> AgentLicenseView:
+        """Liefere das Lizenz-Abzeichen eines Agenten für die Agentenseite.
+
+        Drei Fälle:
+
+        * keine Bindung (oder die gebundene Lizenz existiert nicht mehr) ->
+          ungedeckt, ohne Lizenzangaben;
+        * gebunden an eine nicht mehr aktive Lizenz (abgelaufen, fremde
+          Installation, ungültige Signatur) -> ungedeckt, aber mit Lizenz-ID,
+          Art und Ablauf, damit die Oberfläche sagen kann, *welches* Paket
+          ausgelaufen ist;
+        * sonst gedeckt, mit den Resttagen einschließlich Kulanzzeit
+          (``None`` für das unbefristete FREE-Kontingent).
+
+        Parameters
+        ----------
+        agent_id:
+            Der Agent, dessen Status angezeigt wird.
+
+        Returns
+        -------
+        Die :class:`AgentLicenseView`; ``licensed`` ist genau im dritten Fall
+        ``True``. Liest nur, schreibt keine Bindung (die Zeit-Ratsche kann über
+        ``now()`` wie bisher vorrücken).
+        """
+
         license_id = self._binding_map().get(agent_id)
         lic = self._store.get_license(license_id) if license_id else None
-        if lic is None or not self._pack_active(lic):
+        if lic is None:
             return AgentLicenseView(
                 agent_id=agent_id,
-                license_id=license_id if lic is not None else None,
-                kind=lic.kind if lic is not None else None,
+                license_id=None,
+                kind=None,
                 licensed=False,
-                expires_at=lic.expires_at if lic is not None else None,
+                expires_at=None,
+                days_left=None,
+            )
+        if not self._pack_active(lic):
+            return AgentLicenseView(
+                agent_id=agent_id,
+                license_id=license_id,
+                kind=lic.kind,
+                licensed=False,
+                expires_at=lic.expires_at,
                 days_left=None,
             )
         days_left = (
@@ -669,7 +703,7 @@ class LicenseManager:
         self._store.bind(agent_id, license_id)
 
     def bind(self, agent_id: str, license_id: str, all_agent_ids: Iterable[str]) -> None:
-        """Manually re-home an agent onto another license (§5A.2 "umhängen").
+        """Manually re-home an agent onto another license ("umhängen").
 
         Raises 422 for an unknown/inactive target and 402 when it has no spare
         slot (excluding the agent's own current binding to that license).
@@ -736,7 +770,7 @@ class LicenseManager:
             head = self._anchor_writer(ts, True) or ""
         self._clock.advance(ts, trusted=True, audit_head=head)
 
-    # ---- online auto-pull (§4: "online kaufen, offline weiterarbeiten") ----
+    # ---- online auto-pull ("online kaufen, offline weiterarbeiten") ----
 
     def new_claim(self, claim_base: str, *, slots: int, months: int) -> PendingClaim:
         """Mint a short-lived, single-use claim for online auto-pull.
@@ -824,13 +858,18 @@ class LicenseManager:
 
 
 def _parse_token(token: str) -> License:
-    """Decode a license token into a :class:`License` (base64-JSON or JSON)."""
+    """Decode a license token into a :class:`License` (base64-JSON or JSON).
+
+    Leerraum am Rand wird vorab entfernt; beginnt der Rest mit ``{``, gilt er
+    als rohes JSON, sonst als Base64 davon. Jeder Fehler (leer, nicht
+    dekodierbar, kein JSON, falsches Format) wird zu ``LicenseError(422)``.
+    """
 
     raw = token.strip()
     if not raw:
         raise LicenseError("Leerer Lizenz-Schlüssel.", status=422)
     text = raw
-    if not raw.lstrip().startswith("{"):
+    if not raw.startswith("{"):
         try:
             text = base64.b64decode(raw).decode()
         except Exception as exc:  # noqa: BLE001 - normalise to a licensing error

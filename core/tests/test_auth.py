@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Auth/RBAC tests (Auth concept "Variante C": pluggable AuthBackend).
+"""Auth/RBAC tests (pluggable AuthBackend at the API boundary).
 
-These cover the acceptance criteria from the concept's section 8:
+These cover the acceptance criteria:
 
 * default *open* dev mode keeps every endpoint working without a token,
 * the token backend authenticates valid tokens and rejects missing/invalid ones,

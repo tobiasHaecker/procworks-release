@@ -507,7 +507,7 @@ def _incident_started_by(sid: str, topic: str, starter: dict[str, str],
 
 
 def test_uninvolved_operator_neither_sees_nor_resolves_foreign_incidents() -> None:
-    """NT-14: the incident list named every case, and any operator could resolve it."""
+    """An operator sees and resolves only incidents of cases it is involved in."""
 
     from procworks.auth_password import (
         InMemoryCredentialStore,

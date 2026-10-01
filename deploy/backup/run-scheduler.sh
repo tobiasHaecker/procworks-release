@@ -6,7 +6,7 @@
 # postgres:16-alpine image ships none). Also honours an on-demand trigger file
 # so an optional "back up now" GUI action (roadmap B6) can request an immediate
 # run by touching a marker -- the API never runs pg_dump itself (no coupling,
-# no DB credentials in the API container). See concept §5.1/§11.
+# no DB credentials in the API container).
 #
 # BACKUP_CRON: a reduced 5-field expression "MIN HOUR * * *".
 #   * MIN and HOUR accept an integer or "*" (every minute / every hour).
@@ -34,7 +34,7 @@ fi
 
 # Prepare the shared control surface (roadmap B6): the API writes .run-now here
 # (so the dir must be writable across container uids) and reads backups-index.json.
-# It holds only metadata + a trigger marker -- never dumps (concept §9).
+# It holds only metadata + a trigger marker -- never dumps.
 if [ -n "$BACKUP_CONTROL_DIR" ]; then
     mkdir -p "$BACKUP_CONTROL_DIR" 2>/dev/null || true
     chmod 0777 "$BACKUP_CONTROL_DIR" 2>/dev/null || true

@@ -38,14 +38,28 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 {{- end -}}
 
+{{/*
+Image references: <registry>/<path>:<tag>. The tag defaults to the chart
+appVersion. The path is <image.repository>-api / -web when image.repository is
+set (common prefix, e.g. for an own registry), otherwise image.apiRepository /
+image.webRepository -- by default the published release images.
+*/}}
 {{- define "procworks.api.image" -}}
 {{- $tag := .Values.image.apiTag | default .Chart.AppVersion -}}
-{{- printf "%s/%s-api:%s" .Values.image.registry .Values.image.repository $tag -}}
+{{- $path := .Values.image.apiRepository -}}
+{{- if .Values.image.repository -}}
+{{- $path = printf "%s-api" .Values.image.repository -}}
+{{- end -}}
+{{- printf "%s/%s:%s" .Values.image.registry $path $tag -}}
 {{- end -}}
 
 {{- define "procworks.web.image" -}}
 {{- $tag := .Values.image.webTag | default .Chart.AppVersion -}}
-{{- printf "%s/%s-web:%s" .Values.image.registry .Values.image.repository $tag -}}
+{{- $path := .Values.image.webRepository -}}
+{{- if .Values.image.repository -}}
+{{- $path = printf "%s-web" .Values.image.repository -}}
+{{- end -}}
+{{- printf "%s/%s:%s" .Values.image.registry $path $tag -}}
 {{- end -}}
 
 {{/* Backup component names. */}}

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 """External-task runtime for the outbound integration boundary (roadmap E11).
 
-This is the *pull* side of the maximally open API (concept §6): automatic
+This is the *pull* side of the maximally open API: automatic
 ``EXTERNAL_TASK`` activities are exposed as a work queue that outside workers
 fetch-and-lock, run, and report back to. The runtime is a thin boundary driver
 around the pure engine -- it never mutates engine state itself, it only resolves
@@ -9,7 +9,7 @@ the input data package, then calls :func:`procworks.execution.complete_activity`
 on completion. The kernel stays pure (the integration layer calls the kernel,
 never the other way round).
 
-Robustness properties (concept §6.2):
+Robustness properties:
 
 * **Lazy materialisation** -- a task is created when an automatic step is
   *activated*, discovered on the next fetch-and-lock scan. The engine is not
@@ -103,7 +103,7 @@ def _resolve_inputs(
     node_id: str,
     binding: ServiceBinding | None,
 ) -> dict[str, object]:
-    """Build the input data package handed to the worker (concept §6.2).
+    """Build the input data package handed to the worker.
 
     Mapped template parameters are exposed under their parameter name; declared
     READ accesses are additionally exposed under their data-element id, so a
@@ -194,7 +194,7 @@ class ExternalTaskRuntime:
     a completion can advance composed processes exactly like an interactive one.
 
     With a ``dal`` (Data Access Layer) the boundary also performs bidirectional
-    data exchange (concept §7.1): READ accesses on EXTERNAL elements are
+    data exchange: READ accesses on EXTERNAL elements are
     *pre-fetched* into the worker's input package at lock time, and WRITE accesses
     on EXTERNAL elements are *post-flushed* to the bound connector on completion.
     """
@@ -226,7 +226,7 @@ class ExternalTaskRuntime:
         #: Boundary side effects of an engine advance (activation stamping, mail
         #: notification, push drive, persistence). Fired after a completing task
         #: advances the instance, so a task that becomes ready via the external
-        #: path is notified exactly like the human mainline (mail concept §10.7).
+        #: path is notified exactly like the human mainline.
         self._on_advance = on_advance
 
     def _emit(self, event_type: str, **data: object) -> None:
@@ -238,6 +238,23 @@ class ExternalTaskRuntime:
 
         if self._on_event is not None:
             self._on_event(event_type, dict(data))
+
+    def _emit_task(self, event_type: str, task: ExternalTask, **extra: object) -> None:
+        """Emit a ``task.*`` event carrying the task's identifying fields.
+
+        Every task event names the task, its instance, its step and its topic
+        (empty for a push task); ``extra`` adds event-specific fields such as
+        the incident of ``task.incident``.
+        """
+
+        self._emit(
+            event_type,
+            task_id=task.id,
+            instance_id=task.instance_id,
+            node_id=task.node_id,
+            topic=task.topic,
+            **extra,
+        )
 
     # -- materialisation ---------------------------------------------------
 
@@ -299,19 +316,13 @@ class ExternalTaskRuntime:
                 self._tasks.put(task)
                 open_by_step.add((instance.id, node_id))
                 created.append(task)
-                self._emit(
-                    "task.ready",
-                    task_id=task.id,
-                    instance_id=task.instance_id,
-                    node_id=task.node_id,
-                    topic=task.topic,
-                )
+                self._emit_task("task.ready", task)
         return created
 
     def drive_push(self) -> list[ExternalTask]:
         """Push activated automatic ``HTTP_PUSH`` steps to their tool endpoint.
 
-        The *push* side of the outbound boundary (concept §6.3): instead of a
+        The *push* side of the outbound boundary: instead of a
         worker pulling work, ProcWorks proactively calls a server-configured
         endpoint with the step's input package. This is **best-effort and
         idempotent** -- it never advances or mutates the pure engine itself:
@@ -405,22 +416,11 @@ class ExternalTaskRuntime:
         self.sync()
         now = self._now()
         wanted = set(topics)
-        available: list[ExternalTask] = []
-        for task in self._tasks.list_tasks():
-            if task.topic not in wanted:
-                continue
-            if task.state is ExternalTaskState.CREATED:
-                if task.available_at is not None and task.available_at > now:
-                    continue
-            elif (
-                task.state is ExternalTaskState.LOCKED
-                and task.lock_expires_at is not None
-                and task.lock_expires_at <= now
-            ):
-                pass  # expired lock -> reclaimable
-            else:
-                continue
-            available.append(task)
+        available = [
+            task
+            for task in self._tasks.list_tasks()
+            if task.topic in wanted and self._is_claimable(task, now)
+        ]
 
         if use_priority:
             available.sort(key=lambda t: PRIORITY_RANK[t.priority], reverse=True)
@@ -435,6 +435,24 @@ class ExternalTaskRuntime:
             self._tasks.put(task)
             locked.append(task)
         return locked
+
+    @staticmethod
+    def _is_claimable(task: ExternalTask, now: float) -> bool:
+        """Whether ``fetch_and_lock`` may hand ``task`` to a worker at ``now``.
+
+        Two cases: a ``CREATED`` task whose back-off (``available_at``) is over,
+        and a ``LOCKED`` task whose lock has expired -- the worker vanished, so
+        the task is reclaimed. A lock without expiry (a pushed task) is never
+        reclaimed; every other state is not in the queue.
+        """
+
+        if task.state is ExternalTaskState.CREATED:
+            return task.available_at is None or task.available_at <= now
+        return (
+            task.state is ExternalTaskState.LOCKED
+            and task.lock_expires_at is not None
+            and task.lock_expires_at <= now
+        )
 
     def _prefetch_external(self, task: ExternalTask) -> None:
         """Pre-fetch EXTERNAL READ elements into the task's input package.
@@ -494,9 +512,7 @@ class ExternalTaskRuntime:
         now = self._now()
         task = self._require_locked(task_id, worker_id, now)
         task.state = ExternalTaskState.CREATED
-        task.worker_id = None
-        task.lock_expires_at = None
-        task.available_at = None
+        self._release(task)
         return self._tasks.put(task)
 
     # -- completion / failure ---------------------------------------------
@@ -561,13 +577,7 @@ class ExternalTaskRuntime:
         task.available_at = None
         task.instance_revision_guard += 1
         stored = self._tasks.put(task)
-        self._emit(
-            "task.completed",
-            task_id=task.id,
-            instance_id=task.instance_id,
-            node_id=task.node_id,
-            topic=task.topic,
-        )
+        self._emit_task("task.completed", task)
         if self._on_advance is not None:
             # Notify/stamp/push for any task the completion just made ready. This
             # is a best-effort boundary observer; a failure here must never undo
@@ -627,14 +637,8 @@ class ExternalTaskRuntime:
             created_at=now,
         )
         self._tasks.put_incident(incident)
-        self._emit(
-            "task.incident",
-            task_id=task.id,
-            instance_id=task.instance_id,
-            node_id=task.node_id,
-            topic=task.topic,
-            incident_id=incident.id,
-            message=error_message,
+        self._emit_task(
+            "task.incident", task, incident_id=incident.id, message=error_message
         )
         return task
 
@@ -649,9 +653,7 @@ class ExternalTaskRuntime:
         task = self._require_locked(task_id, worker_id, now)
         task.state = ExternalTaskState.BPMN_ERROR
         task.error_code = error_code
-        task.worker_id = None
-        task.lock_expires_at = None
-        task.available_at = None
+        self._release(task)
         return self._tasks.put(task)
 
     # -- queries / operator actions ---------------------------------------
@@ -684,14 +686,25 @@ class ExternalTaskRuntime:
                     budget = binding.retry_max
             task.state = ExternalTaskState.CREATED
             task.retries_left = max(1, budget)
-            task.worker_id = None
-            task.lock_expires_at = None
-            task.available_at = None
+            self._release(task)
             self._tasks.put(task)
         incident.resolved = True
         return self._tasks.put_incident(incident)
 
     # -- internal ----------------------------------------------------------
+
+    @staticmethod
+    def _release(task: ExternalTask) -> None:
+        """Detach ``task`` from any worker: no owner, no lock, no back-off.
+
+        Used where a task leaves a worker's hands without a timed retry
+        (unlock, BPMN error, resolved incident); the caller sets the new state
+        and stores the task.
+        """
+
+        task.worker_id = None
+        task.lock_expires_at = None
+        task.available_at = None
 
     def _require_locked(
         self, task_id: str, worker_id: str, now: float

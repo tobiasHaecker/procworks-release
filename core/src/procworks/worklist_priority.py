@@ -3,8 +3,8 @@
 
 This module turns the *target times* modelled on activities into the runtime
 ordering of every agent's todo list: a task that is about to blow its target
-time rises to the top, an overdue task sits above everything else. It realises
-the "Zeitbasierte-Priorisierung-Konzept" and is deliberately a **boundary /
+time rises to the top, an overdue task sits above everything else. It is
+deliberately a **boundary /
 view** concern, exactly like ``metrics.py`` and ``assignment.py``:
 
 * it holds **no state** and **persists nothing** -- the criticality of a task
@@ -15,10 +15,10 @@ view** concern, exactly like ``metrics.py`` and ``assignment.py``:
   are untouched. Correctness by Construction stays intact (leitplanke L2).
 
 The logic is pure and clock-injected (``TimeContext.now``), so it is fully
-deterministic and testable with a fake clock, without the API (concept step Z0).
+deterministic and testable with a fake clock, without the API (step Z0).
 
-Consistency note (deviation from the concept draft): the concept first proposed
-deriving the node activation time from the audit log (variant P1). The audit log
+Consistency note (a design alternative that was rejected): an early draft
+proposed deriving the node activation time from the audit log (variant P1). The audit log
 has **no** node-activation event (only ``INSTANCE_CREATED`` /
 ``ACTIVITY_STARTED`` / ``ACTIVITY_COMPLETED``), so that derivation would require
 replaying the engine's activation semantics (walking back through gateways and
@@ -75,7 +75,7 @@ def pause_credit_seconds(
 
     Returns ``0.0`` unless the modeller opted in via
     ``TimeConstraint.pause_stops_clock`` -- the default keeps the deliberate
-    anti-loophole stance of the Detailzustaende concept (§4): suspending never
+    anti-loophole stance: suspending never
     defers a deadline. With the opt-in, the credit is the sum of all *closed*
     pauses of the current activation plus the ongoing pause (if the step is
     suspended right now), so the elapsed clock freezes for the duration of
@@ -102,7 +102,7 @@ def effective_clock(
     The ONE shared due-time computation behind the worklist bands and the
     escalation sweep (T3/E9), so both always agree on when a task is overdue:
 
-    * **Rule B** (Aktivitaets-Detailzustaende-Konzept §4): once the task is
+    * **Rule B**: once the task is
       **claimed** and carries a modelled processing duration
       (``max_duration_seconds``), the clock is t_bearb -- the duration
       measured from the claim instant.
@@ -180,7 +180,7 @@ def remaining_critical_path_seconds(
     The two DPs are intentionally kept separate: the validator's version runs
     forward from START (completion time), this one runs backward from a node
     (remaining work), so reusing the validator function verbatim -- as the
-    concept draft assumed -- is not possible.
+    early draft assumed -- is not possible.
     """
 
     nodes = schema.nodes
@@ -232,7 +232,7 @@ class TimeContext:
     """The runtime clock inputs for prioritising one instance's worklist.
 
     Injected rather than read from a global clock so the whole logic is
-    deterministic and testable with a fake ``now`` (concept step Z0).
+    deterministic and testable with a fake ``now`` (step Z0).
     """
 
     #: Current wall-clock time (the "reading time").
@@ -244,7 +244,7 @@ class TimeContext:
     #: Whole-process deadline in seconds (``ProcessSchema.deadline_seconds``).
     deadline_seconds: float | None = None
     #: Per-node claim time (``ProcessInstance.node_claimed_at``, E1). Feeds
-    #: rule B (Aktivitaets-Detailzustaende-Konzept §4): once claimed, a node
+    #: rule B: once claimed, a node
     #: with a modelled processing duration is measured from its claim.
     claimed_at: dict[str, datetime] = field(default_factory=dict)
     #: Accumulated closed pause seconds per node

@@ -6,7 +6,7 @@
 # Consistency comes from the method, not from a follow-up check: pg_dump reads
 # the whole database in a single MVCC snapshot (--serializable-deferrable), so
 # every table is captured at the same logical instant even while the API keeps
-# writing. See docs/Backup-und-Restore-Konzept.md §3.1.
+# writing: a request in flight is in the dump completely or not at all.
 #
 # Usage: backup-once.sh          (invoked by run-scheduler.sh or manually)
 # Env:   see lib.sh for all knobs (BACKUP_DIR, BACKUP_KEEP_*, BACKUP_PASSPHRASE,
@@ -17,7 +17,7 @@ set -eu
 _dir="$(cd "$(dirname "$0")" && pwd)"
 . "${_dir}/lib.sh"
 
-# Backups contain sensitive business data -> owner-only files/dirs (§9/§14).
+# Backups contain sensitive business data -> owner-only files/dirs.
 umask 077
 
 mkdir -p "$BACKUP_DIR"
@@ -58,6 +58,6 @@ sync_offsite || true
 prune || log warn prune "retention pass reported an error"
 
 mark_success
-publish_index                 # refresh the API-readable metadata index (§B6)
+publish_index                 # refresh the API-readable metadata index (roadmap B6)
 alert ok "backup ${_ts} succeeded"
 log info done "backup ${_ts} finished successfully"

@@ -11,7 +11,7 @@
 #     never controls other containers and never needs Alembic -- the API
 #     container applies migrations on its own start (see docker-entrypoint.sh).
 #   * Consistency is a property of the *method*: pg_dump reads one MVCC snapshot,
-#     pg_restore replays in one transaction. See docs/Backup-und-Restore-Konzept.md.
+#     pg_restore replays in one transaction.
 
 # --------------------------------------------------------------------------
 # Configuration with sensible, out-of-the-box defaults (all overridable via env).
@@ -31,7 +31,7 @@ BACKUP_ALERT_WEBHOOK="${BACKUP_ALERT_WEBHOOK:-}"
 # Optional: shared "control" directory the API may read (roadmap B6). The
 # scheduler publishes a metadata-only index here and watches it for the
 # .run-now trigger. It NEVER contains dumps -- the API must not access the dump
-# volume (concept §9). Empty = the read-only admin view is not wired.
+# volume. Empty = the read-only admin view is not wired.
 BACKUP_CONTROL_DIR="${BACKUP_CONTROL_DIR:-}"
 # Optional: best-effort application version recorded in the manifest. The real
 # compatibility gate is the Alembic head (read from the database itself).
@@ -44,7 +44,7 @@ PROCWORKS_VERSION="${PROCWORKS_VERSION:-unknown}"
 # log LEVEL PHASE MESSAGE...
 # Emit one structured, greppable line to stdout, e.g.
 #   ts=2026-07-08T02:00:01Z level=info phase=dump msg="starting"
-# Structured logging keeps `docker compose logs backup` machine-readable (§10).
+# Structured logging keeps `docker compose logs backup` machine-readable.
 log() {
     _level="$1"; _phase="$2"; shift 2
     printf 'ts=%s level=%s phase=%s msg="%s"\n' \
@@ -122,7 +122,7 @@ psql_scalar() {
 
 # db_alembic_head -> current migration revision stored in the database.
 # This value travels *inside* every dump, so a restored dump always carries the
-# schema version it was taken at (see concept §2.1/§6).
+# schema version it was taken at; the API migrates it forward on its next start.
 db_alembic_head() {
     _head="$(psql_scalar 'SELECT version_num FROM alembic_version LIMIT 1;')"
     [ -n "$_head" ] && printf '%s' "$_head" || printf 'unknown'
@@ -135,7 +135,7 @@ db_server_version_num() {
 }
 
 # db_major_version -> PostgreSQL major version (e.g. 16), derived from the
-# numeric server version. Used by the restore major-version guard (§6.3).
+# numeric server version. Used by the restore major-version guard.
 db_major_version() {
     _num="$(db_server_version_num)"
     printf '%s' "$(( _num / 10000 ))"
@@ -143,13 +143,13 @@ db_major_version() {
 
 # db_table_rows -> newline-separated "relname n_live_tup" pairs for user tables.
 # Uses the planner's live-tuple estimate (pg_stat_user_tables): cheap and exactly
-# the "rough plausibility" the manifest promises (§7) -- not an exact count.
+# the "rough plausibility" the manifest promises -- not an exact count.
 db_table_rows() {
     psql_scalar "SELECT relname || ' ' || n_live_tup FROM pg_stat_user_tables ORDER BY relname;"
 }
 
 # --------------------------------------------------------------------------
-# Encryption at rest (optional, §9 / roadmap B5)
+# Encryption at rest (optional, roadmap B5)
 # --------------------------------------------------------------------------
 #
 # We use GnuPG symmetric encryption (AES-256). It is the right tool for an
@@ -236,7 +236,7 @@ epoch_day() {
 
 # write_manifest DUMPFILE ENCRYPTED -> writes DUMPFILE-with-.manifest.json sidecar.
 # ENCRYPTED is "true"/"false". The manifest is the audit/verification record for
-# a backup (§5/§7): timestamp, versions, Alembic head, size, sha256 and a rough
+# a backup: timestamp, versions, Alembic head, size, sha256 and a rough
 # per-table row estimate. It is consumed by restore.sh (integrity + version
 # guards) and by the optional read-only GET /admin/backups view.
 write_manifest() {
@@ -316,7 +316,7 @@ dump_month_key() {
 #   * it is among the newest BACKUP_KEEP_DAILY dumps overall, or
 #   * it is the newest dump in its ISO week, among the newest KEEP_WEEKLY weeks, or
 #   * it is the newest dump in its calendar month, among the newest KEEP_MONTHLY months.
-# Idempotent: running it repeatedly on an unchanged set deletes nothing (§8).
+# Idempotent: running it repeatedly on an unchanged set deletes nothing.
 prune() {
     _all="$(list_dumps)"
     [ -n "$_all" ] || { log info prune "no dumps to prune"; return 0; }
@@ -373,11 +373,11 @@ prune() {
 }
 
 # --------------------------------------------------------------------------
-# Off-site sync + alerting hooks (optional, §8/§10)
+# Off-site sync + alerting hooks (optional)
 # --------------------------------------------------------------------------
 
 # sync_offsite -> run the operator-provided off-site copy command, if any.
-# A local backup does not survive a total loss of the server (§8).
+# A local backup does not survive a total loss of the server.
 sync_offsite() {
     [ -n "$BACKUP_SYNC_CMD" ] || return 0
     log info sync "running off-site sync hook"
@@ -391,7 +391,7 @@ sync_offsite() {
 }
 
 # alert STATUS MESSAGE -> POST a small JSON payload to BACKUP_ALERT_WEBHOOK.
-# Operational (not the app's own webhook/outbox) to avoid coupling (§10).
+# Operational (not the app's own webhook/outbox) to avoid coupling.
 alert() {
     [ -n "$BACKUP_ALERT_WEBHOOK" ] || return 0
     command -v curl >/dev/null 2>&1 || { log warn alert "curl missing, cannot alert"; return 0; }
@@ -400,7 +400,7 @@ alert() {
         "$BACKUP_ALERT_WEBHOOK" >/dev/null 2>&1 || log warn alert "alert POST failed"
 }
 
-# mark_success -> update the last-success marker used for trivial monitoring (§10).
+# mark_success -> update the last-success marker used for trivial monitoring.
 mark_success() {
     date -u +%Y-%m-%dT%H:%M:%SZ > "${BACKUP_DIR}/.last-success"
 }
@@ -411,7 +411,7 @@ mark_success() {
 
 # publish_index -> (re)write BACKUP_CONTROL_DIR/backups-index.json from the
 # manifests, so the API can show the backup state WITHOUT any access to the
-# dumps (concept §9). The index is metadata only: it embeds each manifest object
+# dumps. The index is metadata only: it embeds each manifest object
 # plus the last-success / last-verify timestamps. Written atomically (temp file
 # + mv) so the API never reads a half-written index. No-op when unconfigured.
 publish_index() {

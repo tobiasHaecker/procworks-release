@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Pluggable authentication for the API boundary (Auth concept, Variant C).
+"""Pluggable authentication for the API boundary.
 
 The domain core stays headless and correctness-only: fine-grained eligibility
 (BZR/Z-rules in :mod:`procworks.assignment`) is *not* moved here. Auth is an
@@ -33,7 +33,7 @@ MODELER = "modeler"
 OPERATOR = "operator"
 VIEWER = "viewer"
 
-#: Machine role for external tools (integration concept, roadmap E10). A service
+#: Machine role for external tools (roadmap E10). A service
 #: token carrying this role may use the versioned ``/v1`` integration endpoints
 #: according to its :data:`scopes`; it is *not* granted to human/open principals.
 INTEGRATION = "integration"

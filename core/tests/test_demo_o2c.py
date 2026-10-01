@@ -711,7 +711,7 @@ def test_both_data_sets_can_be_loaded_side_by_side(clean_api: None) -> None:
 
 
 def test_demo_data_shows_its_subprocesses_as_executed() -> None:
-    """Das Schaufenster darf keinen Fehlalarm zeigen (Nachtest 2026-09-22, Mangel 6).
+    """Das Schaufenster darf keinen Fehlalarm zeigen.
 
     Der Seeder schreibt sein Audit selbst und kommt an der API-Boundary nicht
     vorbei -- der Rueckfluss eines Teilprozesses fehlte darin genauso wie dort.

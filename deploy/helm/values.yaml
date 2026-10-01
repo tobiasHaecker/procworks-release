@@ -6,7 +6,14 @@ fullnameOverride: ""
 
 image:
   registry: ghcr.io
-  repository: your-org/procworks
+  # Default: the published release images ghcr.io/tobiashaecker/procworks-api
+  # and ghcr.io/tobiashaecker/procworks-web. Registry paths must be lowercase.
+  apiRepository: tobiashaecker/procworks-api
+  webRepository: tobiashaecker/procworks-web
+  # Own registry or mirror: either set apiRepository/webRepository, or set a
+  # common prefix here -- the chart then uses <repository>-api and
+  # <repository>-web (e.g. "my-org/procworks"). It wins over the two above.
+  repository: ""
   # Image tags default to the chart appVersion unless overridden here.
   apiTag: ""
   webTag: ""
@@ -61,7 +68,7 @@ web:
       memory: 256Mi
 
 # ---------------------------------------------------------------------------
-# Out-of-the-box datensicherung (concept: docs/Backup-und-Restore-Konzept.md).
+# Out-of-the-box datensicherung (operator guide: docs/Betriebs-Backup-Leitfaden.md).
 # A CronJob takes one consistent pg_dump per day into a PVC, with GFS retention.
 # The scripts are loaded from a ConfigMap (deploy/helm/files/backup/*.sh) -- no
 # image rebuild needed. The image only has to carry pg_dump/pg_restore/psql.

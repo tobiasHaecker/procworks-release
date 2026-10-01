@@ -13,6 +13,7 @@ a particular style.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterator
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +21,7 @@ from procworks.model import (
     JOIN_TYPES,
     SPLIT_TYPES,
     EdgeType,
+    Node,
     NodeType,
     ProcessSchema,
     ValueClass,
@@ -132,18 +134,58 @@ def _nesting_depth(schema: ProcessSchema) -> int:
     return max_depth
 
 
-def model_metrics(schema: ProcessSchema) -> ModelMetrics:
-    """Compute the quantitative model metrics of *schema* (read-only)."""
+def _gateways(schema: ProcessSchema) -> list[Node]:
+    """All split and join nodes of *schema*, in node order.
 
-    gateways = [
-        n for n in schema.nodes.values() if n.type in SPLIT_TYPES or n.type in JOIN_TYPES
-    ]
+    Loop gateways count as well (``SPLIT_TYPES``/``JOIN_TYPES`` include them).
+    The node order is kept so the G2 hints come out in a stable order.
+    """
+
+    return [n for n in schema.nodes.values() if n.type in SPLIT_TYPES or n.type in JOIN_TYPES]
+
+
+def _node_degrees(schema: ProcessSchema) -> dict[str, int]:
+    """Total degree (incoming + outgoing edges) per node of *schema*.
+
+    Counts **every** edge type, SYNC included -- a sync edge adds to a
+    gateway's visual and cognitive load just like a control edge (7PMG G2).
+    Edges pointing at unknown node ids are ignored rather than raising, since
+    the metrics must never fail on a model the editor is still building.
+
+    :returns: node id -> degree, with an entry (possibly 0) for every node
+    """
+
     degree: dict[str, int] = {nid: 0 for nid in schema.nodes}
     for edge in schema.edges:
         if edge.source in degree:
             degree[edge.source] += 1
         if edge.target in degree:
             degree[edge.target] += 1
+    return degree
+
+
+def _interactive_activities(schema: ProcessSchema) -> Iterator[Node]:
+    """The ACTIVITY nodes a person works on (automatic service steps excluded).
+
+    Shared filter of G8 and G9: an automatic step has no worklist entry to
+    prioritise and no human to escalate to -- its failures are incidents
+    (T3a), so neither hint applies to it.
+    """
+
+    for node in schema.nodes.values():
+        if node.type is not NodeType.ACTIVITY:
+            continue
+        binding = schema.service_bindings.get(node.id)
+        if binding is not None and binding.automatic:
+            continue
+        yield node
+
+
+def model_metrics(schema: ProcessSchema) -> ModelMetrics:
+    """Compute the quantitative model metrics of *schema* (read-only)."""
+
+    gateways = _gateways(schema)
+    degree = _node_degrees(schema)
     max_connector_degree = max(
         (degree[n.id] for n in gateways), default=0
     )
@@ -202,15 +244,8 @@ def model_hints(schema: ProcessSchema) -> list[ModelHint]:
             )
         )
 
-    degree: dict[str, int] = {nid: 0 for nid in schema.nodes}
-    for edge in schema.edges:
-        if edge.source in degree:
-            degree[edge.source] += 1
-        if edge.target in degree:
-            degree[edge.target] += 1
-    for node in schema.nodes.values():
-        if node.type not in SPLIT_TYPES and node.type not in JOIN_TYPES:
-            continue
+    degree = _node_degrees(schema)
+    for node in _gateways(schema):
         if degree[node.id] >= _CONNECTOR_DEGREE_HINT_THRESHOLD:
             hints.append(
                 ModelHint(
@@ -246,7 +281,7 @@ def _target_lead_gap_hints(schema: ProcessSchema) -> list[ModelHint]:
     """G8: interactive steps without a target lead time (Soll-Reaktionszeit).
 
     G8 is ProcWorks' own addition beyond the 7PMG set (Z4 of the time-based
-    worklist prioritisation concept; the code "Z4" itself is taken by the
+    worklist prioritisation; the code "Z4" itself is taken by the
     validator's staff-rule group, hence the G numbering). It stays **silent
     unless the schema uses lead times at all**: only once at least one step
     carries ``target_lead_seconds`` is a gap surprising -- steps without a
@@ -261,12 +296,7 @@ def _target_lead_gap_hints(schema: ProcessSchema) -> list[ModelHint]:
     ):
         return []
     hints: list[ModelHint] = []
-    for node in schema.nodes.values():
-        if node.type is not NodeType.ACTIVITY:
-            continue
-        binding = schema.service_bindings.get(node.id)
-        if binding is not None and binding.automatic:
-            continue  # automatic steps have no worklist entry to prioritise
+    for node in _interactive_activities(schema):
         constraint = schema.time_constraints.get(node.id)
         if constraint is not None and constraint.target_lead_seconds is not None:
             continue
@@ -289,7 +319,7 @@ def _target_lead_gap_hints(schema: ProcessSchema) -> list[ModelHint]:
 def _escalation_gap_hints(schema: ProcessSchema) -> list[ModelHint]:
     """G9: hard target times without a modelled overdue reaction (T3 gap).
 
-    The advisory counterpart the Eskalations-Konzept sketched in §6
+    An advisory hint instead of a release gate
     ("B2/Freigabe"): T3 deliberately never *forces* a policy per target time,
     but once the modeller uses escalation at all, a timed interactive step
     without one is probably an oversight -- it turns OVERDUE in the worklist
@@ -302,12 +332,7 @@ def _escalation_gap_hints(schema: ProcessSchema) -> list[ModelHint]:
     if not schema.escalation_policies:
         return []
     hints: list[ModelHint] = []
-    for node in schema.nodes.values():
-        if node.type is not NodeType.ACTIVITY:
-            continue
-        binding = schema.service_bindings.get(node.id)
-        if binding is not None and binding.automatic:
-            continue  # incidents/retry cover automatic steps (T3a)
+    for node in _interactive_activities(schema):
         constraint = schema.time_constraints.get(node.id)
         if constraint is None or (
             constraint.target_lead_seconds is None

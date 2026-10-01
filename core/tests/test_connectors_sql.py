@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Real SQL data-connector tests (P3, concept §7).
+"""Real SQL data-connector tests (P3).
 
 Covers three layers:
 
@@ -352,7 +352,7 @@ def test_api_sample_read(registered_connector: str) -> None:
 def test_api_lists_entities_so_nobody_has_to_guess_a_table(
     registered_connector: str,
 ) -> None:
-    """Der Abnahmetest musste den Tabellennamen raten (Maengelliste Nr. 1).
+    """Niemand muss den Tabellennamen raten.
 
     Die Katalogabfrage liefert die lesbaren Entitaeten, damit Testlesen und
     Select-Assistent eine Auswahl anbieten koennen statt eines Freitextfelds.
@@ -385,11 +385,11 @@ def test_entities_include_views(tmp_path: Path) -> None:
     ]
 
 
-# --- VAL-08: sample read only for modelling, only offered entities ----------
+# --- sample read only for modelling, only offered entities -----------------
 
 
 def test_sample_read_refuses_system_tables(registered_connector: str) -> None:
-    """VAL-08 (Validierung 2026-09-25): ``sqlite_master`` came back with 200."""
+    """A system catalogue such as ``sqlite_master`` is never read."""
 
     res = client.post(
         f"/v1/connectors/{registered_connector}/sample-read",

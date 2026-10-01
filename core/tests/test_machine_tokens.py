@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Machine tokens next to password logins (Nachtest 2026-09-27, NT-13).
+"""Machine tokens next to password logins.
 
 The delivered stack runs in password mode, and the auth mode is exclusive: the
 integration tokens the Integrations-Leitfaden describes only existed in token

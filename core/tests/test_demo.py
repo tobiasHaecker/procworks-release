@@ -607,7 +607,7 @@ def test_admin_reset_demo_seeds_usable_logins(
     )
     assert resp.status_code == 200
     # Outside the public demo the example logins get a random password that the
-    # reset reports exactly once -- never the one printed on the website (NT-04).
+    # reset reports exactly once -- never the one printed on the website.
     password = resp.json()["example_password"]
     assert password and password != demo.DEMO_PASSWORD
     with pytest.raises(AuthError):
@@ -675,8 +675,8 @@ def test_seeded_history_has_a_time_course_the_kpis_can_show() -> None:
     """Der Datensatz schrieb seine ganze Historie in Millisekunden.
 
     Folge: „Ø Durchlaufzeit 0.0 s" und in der Engpass-Tabelle durchweg „keine
-    Zeitdaten" -- die Zeitauswertung war am Schaufenster nicht vorfuehrbar
-    (Nachtest 2026-09-22, Mangel 8). Jetzt liegt die Historie rueckdatiert in
+    Zeitdaten" -- die Zeitauswertung waere am Schaufenster nicht vorfuehrbar.
+    Deshalb liegt die Historie rueckdatiert in
     der Vergangenheit, und jeder abgeschlossene Schritt bringt seinen
     Bereit-Zeitpunkt mit.
     """
@@ -716,8 +716,8 @@ def test_seeded_history_has_a_time_course_the_kpis_can_show() -> None:
 
 
 def test_a_unit_head_s_leave_request_has_an_approver_with_a_login() -> None:
-    """NT-11: after NT-03 Tom's request goes to the head above (Sabine) -- who had
-    no demo login, so in the demo it stalled at "Genehmigung durch Leitung"."""
+    """Tom's request goes to the head above (Sabine, never to himself) -- she needs
+    a demo login, or the demo stalls at "Genehmigung durch Leitung"."""
 
     from procworks.store import (
         InMemoryInstanceStore,

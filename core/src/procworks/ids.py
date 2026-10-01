@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 """Allocation of the readable ids ``<prefix>_<n>`` (instances, schemas, nodes, ...).
 
-Why this module exists (Nachtest 2026-09-27, NT-01): the ids used to come from
+Why this module exists: the ids used to come from
 three process-local ``itertools.count(1)`` counters. Every restart of the API
 began again at ``1`` -- and because the stores save by *upsert*, the first new
 process instance after a restart silently **replaced** the stored

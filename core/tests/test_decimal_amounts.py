@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Monetary amounts as their own data type (Validierung 2026-09-25, VAL-16).
+"""Monetary amounts as their own data type.
 
 Amounts were modelled as FLOAT, so a value like ``0.1 + 0.2`` (=
 ``0.30000000000000004``) or ``499.999`` passed silently. ``DataType.DECIMAL``
@@ -83,7 +83,7 @@ def test_amount_drives_a_decision_and_rejects_a_third_decimal() -> None:
 
 
 def test_completion_rejects_a_value_of_the_wrong_type() -> None:
-    """Gap found on the way (VAL-16): ``/complete`` stored "vielleicht" in a
+    """Gap found on the way: ``/complete`` stored "vielleicht" in a
     BOOLEAN element, and an XOR decision on it took the "true" branch. The
     boundary now checks the types of known elements like ``PUT …/data`` does."""
 

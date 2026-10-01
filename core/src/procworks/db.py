@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Protocol
 
+from pydantic import BaseModel
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -62,6 +64,134 @@ class Base(DeclarativeBase):
     """Declarative base for the persistence models."""
 
 
+class _DocumentRow(Protocol):
+    """Strukturtyp jeder Zeilenklasse, die ein Pydantic-Dokument trägt.
+
+    Fast alle Tabellen dieses Moduls speichern das vollständige Objekt als
+    JSON(B)-Spalte ``document`` (daneben nur abfragbare Kopien einzelner
+    Felder). Der Protokolltyp erlaubt :meth:`_SqlAlchemyStore._load`, für all
+    diese Zeilenklassen typsicher auf ``document`` zuzugreifen, ohne ihnen eine
+    gemeinsame gemappte Basisklasse zu geben — das würde die Spaltenreihenfolge
+    der Tabellen berühren, die hier bewusst unverändert bleibt.
+    """
+
+    @property
+    def document(self) -> dict[str, object]: ...
+
+
+def _get_or_add[RowT: Base](
+    session: Session, row_type: type[RowT], key: str, *, key_column: str = "id"
+) -> RowT:
+    """Liefere die Zeile mit Primärschlüssel ``key`` oder lege sie neu an.
+
+    Das Upsert-Muster aller ``put``-Methoden: Existiert die Zeile, wird sie
+    zurückgegeben und vom Aufrufer überschrieben; sonst entsteht eine neue
+    Zeile, die nur den Primärschlüssel trägt und bereits der Session
+    hinzugefügt ist. Die übrigen Spalten setzt der Aufrufer, **bevor** er
+    ``session.commit()`` ruft — erst dann wird geschrieben, sodass Pflicht-
+    spalten zum Zeitpunkt des INSERT gefüllt sind.
+
+    Parameters
+    ----------
+    session:
+        Die offene Session, in der der Aufrufer auch committet.
+    row_type:
+        Die gemappte Zeilenklasse (z. B. ``SchemaRow``).
+    key:
+        Wert des Primärschlüssels.
+    key_column:
+        Name der Primärschlüsselspalte für den Konstruktor einer neuen Zeile;
+        meist ``id``, bei einzelnen Tabellen abweichend (``login``,
+        ``license_id``, ``agent_id``, ``key``).
+
+    Returns
+    -------
+    Die vorhandene oder die neu angelegte (noch nicht geschriebene) Zeile.
+    """
+
+    row = session.get(row_type, key)
+    if row is None:
+        row = row_type(**{key_column: key})
+        session.add(row)
+    return row
+
+
+class _SqlAlchemyStore:
+    """Gemeinsame Basis aller SQLAlchemy-Stores dieses Moduls.
+
+    Bündelt, was jeder Store bisher wörtlich wiederholte: den Aufbau der Engine
+    aus der Datenbank-URL, das optionale Anlegen der Tabellen und die drei
+    wiederkehrenden Einzelzeilen-Zugriffe (Dokument laden, Zeile löschen,
+    Tabellen leeren). Jeder Zugriff öffnet eine eigene Session und committet
+    selbst — die Transaktionsgrenzen sind damit dieselben wie zuvor in den
+    einzelnen Methoden.
+
+    Parameters
+    ----------
+    url:
+        SQLAlchemy database URL (e.g. ``postgresql+psycopg://user:pw@host/db``
+        or ``sqlite:///schemas.db``).
+    create_tables:
+        If True, create the tables from the ORM metadata. Useful for SQLite and
+        local development; in production prefer Alembic migrations and pass
+        ``create_tables=False``.
+    """
+
+    def __init__(self, url: str, *, create_tables: bool = False) -> None:
+        self._engine = create_engine(url, future=True)
+        if create_tables:
+            Base.metadata.create_all(self._engine)
+
+    def _load[RowT: _DocumentRow, ModelT: BaseModel](
+        self, row_type: type[RowT], key: str, model: type[ModelT]
+    ) -> ModelT | None:
+        """Lade das Dokument der Zeile ``key`` als Pydantic-Modell ``model``.
+
+        Returns
+        -------
+        Das aus der Spalte ``document`` validierte Modell, oder ``None``, wenn
+        es keine Zeile mit diesem Primärschlüssel gibt.
+        """
+
+        with Session(self._engine) as session:
+            row = session.get(row_type, key)
+            if row is None:
+                return None
+            return model.model_validate(row.document)
+
+    def _delete_row(self, row_type: type[Base], key: str) -> bool:
+        """Lösche die Zeile mit Primärschlüssel ``key``, falls vorhanden.
+
+        Idempotent: Fehlt die Zeile, geschieht nichts (auch kein Commit).
+
+        Returns
+        -------
+        ``True``, wenn eine Zeile gelöscht wurde, sonst ``False`` — Aufrufer,
+        deren Schnittstelle nichts zurückgibt, ignorieren den Wert.
+        """
+
+        with Session(self._engine) as session:
+            row = session.get(row_type, key)
+            if row is None:
+                return False
+            session.delete(row)
+            session.commit()
+            return True
+
+    def _delete_all(self, *row_types: type[Base]) -> None:
+        """Leere die Tabellen ``row_types`` in genau dieser Reihenfolge.
+
+        Alle Löschungen laufen in einer Session und werden gemeinsam
+        committet (eine Transaktion). Die Reihenfolge ist Sache des Aufrufers:
+        abhängige Tabellen zuerst.
+        """
+
+        with Session(self._engine) as session:
+            for row_type in row_types:
+                session.execute(delete(row_type))
+            session.commit()
+
+
 class SchemaRow(Base):
     """One row per process schema (keyed by schema id)."""
 
@@ -74,32 +204,17 @@ class SchemaRow(Base):
     document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
 
 
-class SqlAlchemySchemaStore:
+class SqlAlchemySchemaStore(_SqlAlchemyStore):
     """A schema store backed by a SQLAlchemy engine.
 
-    Parameters
-    ----------
-    url:
-        SQLAlchemy database URL (e.g. ``postgresql+psycopg://user:pw@host/db``
-        or ``sqlite:///schemas.db``).
-    create_tables:
-        If True, create the table from the ORM metadata. Useful for SQLite and
-        local development; in production prefer Alembic migrations and pass
-        ``create_tables=False``.
+    Constructor parameters (``url``, ``create_tables``) as in
+    :class:`_SqlAlchemyStore`.
     """
-
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
 
     def put(self, schema: ProcessSchema) -> ProcessSchema:
         payload = schema.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(SchemaRow, schema.id)
-            if row is None:
-                row = SchemaRow(id=schema.id)
-                session.add(row)
+            row = _get_or_add(session, SchemaRow, schema.id)
             row.version = schema.version
             row.name = schema.name
             row.lifecycle_state = schema.lifecycle_state.value
@@ -108,20 +223,14 @@ class SqlAlchemySchemaStore:
         return schema
 
     def get(self, schema_id: str) -> ProcessSchema | None:
-        with Session(self._engine) as session:
-            row = session.get(SchemaRow, schema_id)
-            if row is None:
-                return None
-            return ProcessSchema.model_validate(row.document)
+        return self._load(SchemaRow, schema_id, ProcessSchema)
 
     def list_ids(self) -> list[str]:
         with Session(self._engine) as session:
             return list(session.scalars(select(SchemaRow.id)))
 
     def clear(self) -> None:
-        with Session(self._engine) as session:
-            session.execute(delete(SchemaRow))
-            session.commit()
+        self._delete_all(SchemaRow)
 
 
 class OrgRow(Base):
@@ -134,7 +243,7 @@ class OrgRow(Base):
     document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
 
 
-class SqlAlchemyOrgStore:
+class SqlAlchemyOrgStore(_SqlAlchemyStore):
     """A shared-org-model store backed by a SQLAlchemy engine.
 
     Mirrors ``SqlAlchemySchemaStore``: same engine/URL conventions and the same
@@ -142,40 +251,26 @@ class SqlAlchemyOrgStore:
     API is agnostic of the backend.
     """
 
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
-
     def put(self, org: OrgModel) -> OrgModel:
         if org.id is None:
             raise ValueError("a shared org model must have an id before it is stored")
         payload = org.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(OrgRow, org.id)
-            if row is None:
-                row = OrgRow(id=org.id)
-                session.add(row)
+            row = _get_or_add(session, OrgRow, org.id)
             row.name = org.name
             row.document = payload
             session.commit()
         return org
 
     def get(self, org_id: str) -> OrgModel | None:
-        with Session(self._engine) as session:
-            row = session.get(OrgRow, org_id)
-            if row is None:
-                return None
-            return OrgModel.model_validate(row.document)
+        return self._load(OrgRow, org_id, OrgModel)
 
     def list_ids(self) -> list[str]:
         with Session(self._engine) as session:
             return list(session.scalars(select(OrgRow.id)))
 
     def clear(self) -> None:
-        with Session(self._engine) as session:
-            session.execute(delete(OrgRow))
-            session.commit()
+        self._delete_all(OrgRow)
 
 
 class InstanceRow(Base):
@@ -190,7 +285,7 @@ class InstanceRow(Base):
     document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
 
 
-class SqlAlchemyInstanceStore:
+class SqlAlchemyInstanceStore(_SqlAlchemyStore):
     """A process-instance store backed by a SQLAlchemy engine.
 
     Mirrors ``SqlAlchemySchemaStore``: same engine/URL conventions and the same
@@ -198,18 +293,10 @@ class SqlAlchemyInstanceStore:
     the execution engine and API are agnostic of the backend.
     """
 
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
-
     def put(self, instance: ProcessInstance) -> ProcessInstance:
         payload = instance.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(InstanceRow, instance.id)
-            if row is None:
-                row = InstanceRow(id=instance.id)
-                session.add(row)
+            row = _get_or_add(session, InstanceRow, instance.id)
             row.schema_id = instance.schema_id
             row.schema_version = instance.schema_version
             row.state = instance.state.value
@@ -218,20 +305,14 @@ class SqlAlchemyInstanceStore:
         return instance
 
     def get(self, instance_id: str) -> ProcessInstance | None:
-        with Session(self._engine) as session:
-            row = session.get(InstanceRow, instance_id)
-            if row is None:
-                return None
-            return ProcessInstance.model_validate(row.document)
+        return self._load(InstanceRow, instance_id, ProcessInstance)
 
     def list_ids(self) -> list[str]:
         with Session(self._engine) as session:
             return list(session.scalars(select(InstanceRow.id)))
 
     def clear(self) -> None:
-        with Session(self._engine) as session:
-            session.execute(delete(InstanceRow))
-            session.commit()
+        self._delete_all(InstanceRow)
 
 
 class AuditEventRow(Base):
@@ -272,7 +353,7 @@ def _event_from_row(row: AuditEventRow) -> AuditEvent:
     )
 
 
-class SqlAlchemyAuditLog:
+class SqlAlchemyAuditLog(_SqlAlchemyStore):
     """A durable, append-only event log backed by a SQLAlchemy engine.
 
     Implements the same ``append``/``list_all``/``for_instance`` interface as
@@ -280,11 +361,6 @@ class SqlAlchemyAuditLog:
     same way regardless of the backend. The monotonic ``seq`` is assigned by the
     database (autoincrement primary key); events are returned ordered by ``seq``.
     """
-
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
 
     def append(
         self,
@@ -389,9 +465,7 @@ class SqlAlchemyAuditLog:
             return value.timestamp()
 
     def clear(self) -> None:
-        with Session(self._engine) as session:
-            session.execute(delete(AuditEventRow))
-            session.commit()
+        self._delete_all(AuditEventRow)
 
 
 class UserRow(Base):
@@ -420,7 +494,7 @@ def _user_from_row(row: UserRow) -> User:
     )
 
 
-class SqlAlchemyCredentialStore:
+class SqlAlchemyCredentialStore(_SqlAlchemyStore):
     """A login-user store backed by a SQLAlchemy engine.
 
     Mirrors the other stores' engine/URL conventions and implements the
@@ -429,11 +503,6 @@ class SqlAlchemyCredentialStore:
     *not* persisted here -- they are ephemeral in-memory state of the backend.
     """
 
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
-
     def get_user(self, login: str) -> User | None:
         with Session(self._engine) as session:
             row = session.get(UserRow, login)
@@ -441,10 +510,7 @@ class SqlAlchemyCredentialStore:
 
     def put_user(self, user: User) -> User:
         with Session(self._engine) as session:
-            row = session.get(UserRow, user.login)
-            if row is None:
-                row = UserRow(login=user.login)
-                session.add(row)
+            row = _get_or_add(session, UserRow, user.login, key_column="login")
             row.subject = user.subject
             row.password_hash = user.password_hash
             row.agent_id = user.agent_id
@@ -459,17 +525,13 @@ class SqlAlchemyCredentialStore:
             return [_user_from_row(row) for row in session.scalars(select(UserRow))]
 
     def delete_user(self, login: str) -> None:
-        with Session(self._engine) as session:
-            row = session.get(UserRow, login)
-            if row is not None:
-                session.delete(row)
-                session.commit()
+        self._delete_row(UserRow, login)
 
 
 class SessionRow(Base):
     """One login session (password mode); keyed by the token's SHA-256 digest.
 
-    VAL-11: sessions used to live only in memory, so a restart or update logged
+    Sessions live in the database, so a restart or update does not log
     everybody out. The clear token is never stored -- only its digest.
     """
 
@@ -480,18 +542,13 @@ class SessionRow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class SqlAlchemySessionStore:
+class SqlAlchemySessionStore(_SqlAlchemyStore):
     """Login sessions in the database (``auth_session``), see ``SessionStore``.
 
     Same engine/URL conventions as the credential store. ``expires_at`` is
     stored timezone-aware; SQLite returns it naive, so it is re-attached as UTC
     on read.
     """
-
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
 
     def get(self, digest: str) -> _SessionInfo | None:
         with Session(self._engine) as session:
@@ -550,25 +607,17 @@ class IncidentRow(Base):
     document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
 
 
-class SqlAlchemyExternalTaskStore:
+class SqlAlchemyExternalTaskStore(_SqlAlchemyStore):
     """An external-task store backed by a SQLAlchemy engine.
 
     Mirrors the other stores: each task/incident is a JSON document plus a few
     queryable columns, and the runtime is agnostic of the backend.
     """
 
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
-
     def put(self, task: ExternalTask) -> ExternalTask:
         payload = task.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(ExternalTaskRow, task.id)
-            if row is None:
-                row = ExternalTaskRow(id=task.id)
-                session.add(row)
+            row = _get_or_add(session, ExternalTaskRow, task.id)
             row.instance_id = task.instance_id
             row.node_id = task.node_id
             row.topic = task.topic
@@ -579,11 +628,7 @@ class SqlAlchemyExternalTaskStore:
         return task
 
     def get(self, task_id: str) -> ExternalTask | None:
-        with Session(self._engine) as session:
-            row = session.get(ExternalTaskRow, task_id)
-            if row is None:
-                return None
-            return ExternalTask.model_validate(row.document)
+        return self._load(ExternalTaskRow, task_id, ExternalTask)
 
     def list_tasks(self) -> list[ExternalTask]:
         with Session(self._engine) as session:
@@ -593,10 +638,7 @@ class SqlAlchemyExternalTaskStore:
     def put_incident(self, incident: Incident) -> Incident:
         payload = incident.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(IncidentRow, incident.id)
-            if row is None:
-                row = IncidentRow(id=incident.id)
-                session.add(row)
+            row = _get_or_add(session, IncidentRow, incident.id)
             row.external_task_id = incident.external_task_id
             row.instance_id = incident.instance_id
             row.resolved = incident.resolved
@@ -605,11 +647,7 @@ class SqlAlchemyExternalTaskStore:
         return incident
 
     def get_incident(self, incident_id: str) -> Incident | None:
-        with Session(self._engine) as session:
-            row = session.get(IncidentRow, incident_id)
-            if row is None:
-                return None
-            return Incident.model_validate(row.document)
+        return self._load(IncidentRow, incident_id, Incident)
 
     def list_incidents(self) -> list[Incident]:
         with Session(self._engine) as session:
@@ -617,10 +655,7 @@ class SqlAlchemyExternalTaskStore:
             return [Incident.model_validate(row.document) for row in rows]
 
     def clear(self) -> None:
-        with Session(self._engine) as session:
-            session.execute(delete(ExternalTaskRow))
-            session.execute(delete(IncidentRow))
-            session.commit()
+        self._delete_all(ExternalTaskRow, IncidentRow)
 
 
 class WebhookSubscriptionRow(Base):
@@ -659,7 +694,7 @@ class WebhookDeliveryRow(Base):
     document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
 
 
-class SqlAlchemyWebhookStore:
+class SqlAlchemyWebhookStore(_SqlAlchemyStore):
     """A webhook store backed by a SQLAlchemy engine.
 
     Mirrors the other stores: subscriptions, outbox entries and deliveries are
@@ -667,18 +702,10 @@ class SqlAlchemyWebhookStore:
     agnostic of the backend.
     """
 
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
-
     def put_subscription(self, sub: WebhookSubscription) -> WebhookSubscription:
         payload = sub.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(WebhookSubscriptionRow, sub.id)
-            if row is None:
-                row = WebhookSubscriptionRow(id=sub.id)
-                session.add(row)
+            row = _get_or_add(session, WebhookSubscriptionRow, sub.id)
             row.url = sub.url
             row.active = sub.active
             row.document = payload
@@ -686,11 +713,7 @@ class SqlAlchemyWebhookStore:
         return sub
 
     def get_subscription(self, subscription_id: str) -> WebhookSubscription | None:
-        with Session(self._engine) as session:
-            row = session.get(WebhookSubscriptionRow, subscription_id)
-            if row is None:
-                return None
-            return WebhookSubscription.model_validate(row.document)
+        return self._load(WebhookSubscriptionRow, subscription_id, WebhookSubscription)
 
     def list_subscriptions(self) -> list[WebhookSubscription]:
         with Session(self._engine) as session:
@@ -698,19 +721,12 @@ class SqlAlchemyWebhookStore:
             return [WebhookSubscription.model_validate(row.document) for row in rows]
 
     def delete_subscription(self, subscription_id: str) -> None:
-        with Session(self._engine) as session:
-            row = session.get(WebhookSubscriptionRow, subscription_id)
-            if row is not None:
-                session.delete(row)
-                session.commit()
+        self._delete_row(WebhookSubscriptionRow, subscription_id)
 
     def put_entry(self, entry: OutboxEntry) -> OutboxEntry:
         payload = entry.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(OutboxEntryRow, entry.id)
-            if row is None:
-                row = OutboxEntryRow(id=entry.id)
-                session.add(row)
+            row = _get_or_add(session, OutboxEntryRow, entry.id)
             row.subscription_id = entry.subscription_id
             row.event_type = entry.event_type
             row.state = entry.state.value
@@ -720,11 +736,7 @@ class SqlAlchemyWebhookStore:
         return entry
 
     def get_entry(self, entry_id: str) -> OutboxEntry | None:
-        with Session(self._engine) as session:
-            row = session.get(OutboxEntryRow, entry_id)
-            if row is None:
-                return None
-            return OutboxEntry.model_validate(row.document)
+        return self._load(OutboxEntryRow, entry_id, OutboxEntry)
 
     def list_entries(self) -> list[OutboxEntry]:
         with Session(self._engine) as session:
@@ -734,10 +746,7 @@ class SqlAlchemyWebhookStore:
     def put_delivery(self, delivery: WebhookDelivery) -> WebhookDelivery:
         payload = delivery.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(WebhookDeliveryRow, delivery.id)
-            if row is None:
-                row = WebhookDeliveryRow(id=delivery.id)
-                session.add(row)
+            row = _get_or_add(session, WebhookDeliveryRow, delivery.id)
             row.subscription_id = delivery.subscription_id
             row.outbox_id = delivery.outbox_id
             row.at = delivery.at
@@ -758,11 +767,7 @@ class SqlAlchemyWebhookStore:
             return [WebhookDelivery.model_validate(row.document) for row in rows]
 
     def clear(self) -> None:
-        with Session(self._engine) as session:
-            session.execute(delete(WebhookDeliveryRow))
-            session.execute(delete(OutboxEntryRow))
-            session.execute(delete(WebhookSubscriptionRow))
-            session.commit()
+        self._delete_all(WebhookDeliveryRow, OutboxEntryRow, WebhookSubscriptionRow)
 
 
 class MailOutboxEntryRow(Base):
@@ -778,7 +783,7 @@ class MailOutboxEntryRow(Base):
     document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
 
 
-class SqlAlchemyMailOutboxStore:
+class SqlAlchemyMailOutboxStore(_SqlAlchemyStore):
     """A durable mail outbox backed by a SQLAlchemy engine.
 
     Mirrors the webhook outbox: each queued notification is a JSON document plus
@@ -786,18 +791,10 @@ class SqlAlchemyMailOutboxStore:
     ``next_attempt_at`` for the dispatcher). The dispatcher stays backend-agnostic.
     """
 
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
-
     def put_entry(self, entry: MailOutboxEntry) -> MailOutboxEntry:
         payload = entry.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(MailOutboxEntryRow, entry.id)
-            if row is None:
-                row = MailOutboxEntryRow(id=entry.id)
-                session.add(row)
+            row = _get_or_add(session, MailOutboxEntryRow, entry.id)
             row.dedup_key = entry.dedup_key
             row.instance_id = entry.instance_id
             row.state = entry.state.value
@@ -807,11 +804,7 @@ class SqlAlchemyMailOutboxStore:
         return entry
 
     def get_entry(self, entry_id: str) -> MailOutboxEntry | None:
-        with Session(self._engine) as session:
-            row = session.get(MailOutboxEntryRow, entry_id)
-            if row is None:
-                return None
-            return MailOutboxEntry.model_validate(row.document)
+        return self._load(MailOutboxEntryRow, entry_id, MailOutboxEntry)
 
     def find_by_dedup_key(self, dedup_key: str) -> MailOutboxEntry | None:
         with Session(self._engine) as session:
@@ -832,9 +825,7 @@ class SqlAlchemyMailOutboxStore:
             return [MailOutboxEntry.model_validate(row.document) for row in rows]
 
     def clear(self) -> None:
-        with Session(self._engine) as session:
-            session.execute(delete(MailOutboxEntryRow))
-            session.commit()
+        self._delete_all(MailOutboxEntryRow)
 
 
 class AbsenceEntryRow(Base):
@@ -847,7 +838,7 @@ class AbsenceEntryRow(Base):
     document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
 
 
-class SqlAlchemyAbsenceStore:
+class SqlAlchemyAbsenceStore(_SqlAlchemyStore):
     """A durable absence store backed by a SQLAlchemy engine.
 
     Each entry is a JSON document plus an ``agent_id`` column for lookups. Like
@@ -855,29 +846,17 @@ class SqlAlchemyAbsenceStore:
     (small) set of entries and resolves the currently-absent agents in Python.
     """
 
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
-
     def put_entry(self, entry: AbsenceEntry) -> AbsenceEntry:
         payload = entry.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(AbsenceEntryRow, entry.id)
-            if row is None:
-                row = AbsenceEntryRow(id=entry.id)
-                session.add(row)
+            row = _get_or_add(session, AbsenceEntryRow, entry.id)
             row.agent_id = entry.agent_id
             row.document = payload
             session.commit()
         return entry
 
     def get_entry(self, entry_id: str) -> AbsenceEntry | None:
-        with Session(self._engine) as session:
-            row = session.get(AbsenceEntryRow, entry_id)
-            if row is None:
-                return None
-            return AbsenceEntry.model_validate(row.document)
+        return self._load(AbsenceEntryRow, entry_id, AbsenceEntry)
 
     def list_entries(self) -> list[AbsenceEntry]:
         with Session(self._engine) as session:
@@ -885,18 +864,10 @@ class SqlAlchemyAbsenceStore:
             return [AbsenceEntry.model_validate(row.document) for row in rows]
 
     def delete_entry(self, entry_id: str) -> bool:
-        with Session(self._engine) as session:
-            row = session.get(AbsenceEntryRow, entry_id)
-            if row is None:
-                return False
-            session.delete(row)
-            session.commit()
-            return True
+        return self._delete_row(AbsenceEntryRow, entry_id)
 
     def clear(self) -> None:
-        with Session(self._engine) as session:
-            session.execute(delete(AbsenceEntryRow))
-            session.commit()
+        self._delete_all(AbsenceEntryRow)
 
 
 class TemplateRow(Base):
@@ -910,7 +881,7 @@ class TemplateRow(Base):
     document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
 
 
-class SqlAlchemyTemplateStore:
+class SqlAlchemyTemplateStore(_SqlAlchemyStore):
     """A durable user-template store backed by a SQLAlchemy engine.
 
     Stores only user-created templates as JSON documents; built-in templates
@@ -919,18 +890,10 @@ class SqlAlchemyTemplateStore:
     the API stays backend-agnostic.
     """
 
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
-
     def put(self, template: ProcessTemplate) -> ProcessTemplate:
         payload = template.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(TemplateRow, template.id)
-            if row is None:
-                row = TemplateRow(id=template.id)
-                session.add(row)
+            row = _get_or_add(session, TemplateRow, template.id)
             row.name = template.name
             row.category = template.category
             row.document = payload
@@ -938,29 +901,17 @@ class SqlAlchemyTemplateStore:
         return template
 
     def get(self, template_id: str) -> ProcessTemplate | None:
-        with Session(self._engine) as session:
-            row = session.get(TemplateRow, template_id)
-            if row is None:
-                return None
-            return ProcessTemplate.model_validate(row.document)
+        return self._load(TemplateRow, template_id, ProcessTemplate)
 
     def list_ids(self) -> list[str]:
         with Session(self._engine) as session:
             return list(session.scalars(select(TemplateRow.id).order_by(TemplateRow.id)))
 
     def delete(self, template_id: str) -> bool:
-        with Session(self._engine) as session:
-            row = session.get(TemplateRow, template_id)
-            if row is None:
-                return False
-            session.delete(row)
-            session.commit()
-            return True
+        return self._delete_row(TemplateRow, template_id)
 
     def clear(self) -> None:
-        with Session(self._engine) as session:
-            session.execute(delete(TemplateRow))
-            session.commit()
+        self._delete_all(TemplateRow)
 
 
 class LicenseRow(Base):
@@ -977,7 +928,7 @@ class LicenseRow(Base):
 
 
 class AgentBindingRow(Base):
-    """One row per agent->license assignment (explicit binding, §5A.2)."""
+    """One row per agent->license assignment (explicit binding)."""
 
     __tablename__ = "agent_license_binding"
 
@@ -994,7 +945,7 @@ class LicenseMetaRow(Base):
     document: Mapped[dict[str, object]] = mapped_column(JsonDocument, nullable=False)
 
 
-class SqlAlchemyLicenseStore:
+class SqlAlchemyLicenseStore(_SqlAlchemyStore):
     """A durable license store backed by a SQLAlchemy engine.
 
     Mirrors the other stores: each license is a JSON document plus a few
@@ -1008,11 +959,6 @@ class SqlAlchemyLicenseStore:
     #: (they are ephemeral, best-effort state that needs no dedicated schema).
     _CLAIM_PREFIX = "claim:"
 
-    def __init__(self, url: str, *, create_tables: bool = False) -> None:
-        self._engine = create_engine(url, future=True)
-        if create_tables:
-            Base.metadata.create_all(self._engine)
-
     def list_licenses(self) -> list[License]:
         with Session(self._engine) as session:
             rows = session.scalars(select(LicenseRow))
@@ -1021,10 +967,7 @@ class SqlAlchemyLicenseStore:
     def put_license(self, lic: License) -> None:
         payload = lic.model_dump(mode="json")
         with Session(self._engine) as session:
-            row = session.get(LicenseRow, lic.license_id)
-            if row is None:
-                row = LicenseRow(license_id=lic.license_id)
-                session.add(row)
+            row = _get_or_add(session, LicenseRow, lic.license_id, key_column="license_id")
             row.kind = lic.kind.value
             row.slots = lic.slots
             row.expires_at = lic.expires_at
@@ -1033,18 +976,10 @@ class SqlAlchemyLicenseStore:
             session.commit()
 
     def get_license(self, license_id: str) -> License | None:
-        with Session(self._engine) as session:
-            row = session.get(LicenseRow, license_id)
-            if row is None:
-                return None
-            return License.model_validate(row.document)
+        return self._load(LicenseRow, license_id, License)
 
     def remove_license(self, license_id: str) -> None:
-        with Session(self._engine) as session:
-            row = session.get(LicenseRow, license_id)
-            if row is not None:
-                session.delete(row)
-                session.commit()
+        self._delete_row(LicenseRow, license_id)
 
     def list_bindings(self) -> list[AgentBinding]:
         with Session(self._engine) as session:
@@ -1056,37 +991,18 @@ class SqlAlchemyLicenseStore:
 
     def bind(self, agent_id: str, license_id: str) -> None:
         with Session(self._engine) as session:
-            row = session.get(AgentBindingRow, agent_id)
-            if row is None:
-                row = AgentBindingRow(agent_id=agent_id)
-                session.add(row)
+            row = _get_or_add(session, AgentBindingRow, agent_id, key_column="agent_id")
             row.license_id = license_id
             session.commit()
 
     def unbind(self, agent_id: str) -> None:
-        with Session(self._engine) as session:
-            row = session.get(AgentBindingRow, agent_id)
-            if row is not None:
-                session.delete(row)
-                session.commit()
+        self._delete_row(AgentBindingRow, agent_id)
 
     def get_time_anchor(self) -> TimeAnchor | None:
-        with Session(self._engine) as session:
-            row = session.get(LicenseMetaRow, self._ANCHOR_KEY)
-            if row is None:
-                return None
-            return TimeAnchor.model_validate(row.document)
+        return self._load(LicenseMetaRow, self._ANCHOR_KEY, TimeAnchor)
 
     def put_time_anchor(self, anchor: TimeAnchor) -> None:
-        payload = anchor.model_dump(mode="json")
-        with Session(self._engine) as session:
-            row = session.get(LicenseMetaRow, self._ANCHOR_KEY)
-            if row is None:
-                row = LicenseMetaRow(key=self._ANCHOR_KEY, document=payload)
-                session.add(row)
-            else:
-                row.document = payload
-            session.commit()
+        self._put_meta(self._ANCHOR_KEY, anchor.model_dump(mode="json"))
 
     def list_claims(self) -> list[PendingClaim]:
         with Session(self._engine) as session:
@@ -1099,22 +1015,31 @@ class SqlAlchemyLicenseStore:
 
     def put_claim(self, claim: PendingClaim) -> None:
         key = self._CLAIM_PREFIX + claim.claim_token
-        payload = claim.model_dump(mode="json")
+        self._put_meta(key, claim.model_dump(mode="json"))
+
+    def _put_meta(self, key: str, payload: dict[str, object]) -> None:
+        """Schreibe ``payload`` als Dokument des Meta-Eintrags ``key`` (Upsert).
+
+        Gemeinsamer Schreibweg für Zeitanker und offene Claims, die sich die
+        generische Tabelle ``license_meta`` teilen. Ein fehlender Eintrag wird
+        angelegt, ein vorhandener überschrieben; ein Commit je Aufruf.
+
+        Parameters
+        ----------
+        key:
+            Primärschlüssel in ``license_meta`` (``time_anchor`` oder
+            ``claim:<token>``).
+        payload:
+            Das JSON-serialisierte Modell (``model_dump(mode="json")``).
+        """
+
         with Session(self._engine) as session:
-            row = session.get(LicenseMetaRow, key)
-            if row is None:
-                row = LicenseMetaRow(key=key, document=payload)
-                session.add(row)
-            else:
-                row.document = payload
+            row = _get_or_add(session, LicenseMetaRow, key, key_column="key")
+            row.document = payload
             session.commit()
 
     def remove_claim(self, claim_token: str) -> None:
-        with Session(self._engine) as session:
-            row = session.get(LicenseMetaRow, self._CLAIM_PREFIX + claim_token)
-            if row is not None:
-                session.delete(row)
-                session.commit()
+        self._delete_row(LicenseMetaRow, self._CLAIM_PREFIX + claim_token)
 
     def install_id(self) -> str:
         with Session(self._engine) as session:

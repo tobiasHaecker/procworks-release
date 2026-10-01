@@ -4,8 +4,7 @@
 The execution core stays pure: runtime events are recorded at the API boundary
 into an append-only :class:`AuditLog`. The recorded history is the single basis
 for monitoring KPIs, the per-instance audit timeline and a lightweight
-process-mining map (directly-follows graph), mirroring Section 5.3/8.4 of the
-architecture concept.
+process-mining map (directly-follows graph).
 
 This module holds no correctness logic; it only observes what already happened.
 """
@@ -45,7 +44,7 @@ class EventType(StrEnum):
     #: per-instance history; type-filtered like the claim events, so it never
     #: distorts a KPI or the mined process map.
     TASK_ESCALATED = "TASK_ESCALATED"
-    #: Detail-state transitions of one activity (E2, §4): pause/continue,
+    #: Detail-state transitions of one activity (E2): pause/continue,
     #: failure report (reason in ``detail``) and the recovery reset. Type-
     #: filtered like the claim events -- no KPI/mining impact.
     ACTIVITY_SUSPENDED = "ACTIVITY_SUSPENDED"
@@ -62,14 +61,14 @@ class EventType(StrEnum):
     #: carries ``element``, ``old``/``new`` (JSON) and, where known, ``actor``
     #: and a supervision ``reason``. Type-filtered like the claim events -- no
     #: KPI/mining impact, so the audit need not stay silent to keep the figures
-    #: clean (Validierung 2026-09, VAL-01).
+    #: clean.
     INSTANCE_DATA_SET = "INSTANCE_DATA_SET"
     INSTANCE_COMPLETED = "INSTANCE_COMPLETED"
     MAIL_SENT = "MAIL_SENT"          # modelled notification delivered (metadata only)
     MAIL_FAILED = "MAIL_FAILED"      # notification dead-lettered after retries (metadata)
     #: A monotone time-ratchet checkpoint of the licensing layer, embedded into
     #: the hash chain so the effective-time high-water-mark cannot be silently
-    #: rolled back (licensing concept §5A.4). It is *not* a process event and is
+    #: rolled back. It is *not* a process event and is
     #: excluded from KPI/mining aggregation via :data:`NON_PROCESS_EVENTS`.
     TIME_ANCHOR = "TIME_ANCHOR"
 
@@ -491,9 +490,7 @@ def compute_kpis(
         total_instances=len(grouped),
         running=running,
         completed=completed,
-        avg_cycle_seconds=(
-            sum(cycle_times) / len(cycle_times) if cycle_times else None
-        ),
+        avg_cycle_seconds=_mean(cycle_times),
         activity_stats=activity_stats,
         adhoc_instances=adhoc_instances,
         flexibility_adhoc_ratio=(

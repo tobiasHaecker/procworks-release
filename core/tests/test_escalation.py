@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""T3/E9: modelled overdue reactions (Eskalations-Konzept).
+"""T3/E9: modelled overdue reactions.
 
 Validator side: a policy is well-formed and decidable (T3a-T3c) or cannot be
 stored at all. Runtime side: the lazy boundary sweep fires due stages at most

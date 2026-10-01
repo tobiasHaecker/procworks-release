@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 """Aufbau des Tutorial-Beispielprozesses in seinen vier Stufen.
 
-Der Web-Client fuehrt seine geführte Tour (``docs/Tutorial-Konzept.md``) in
+Der Web-Client fuehrt seine geführte Tour in
 einem **schreibfreien Sandkasten**: Waehrend der Tour verlaesst kein
 schreibender Aufruf den Browser, stattdessen spielt der Client vorbereitete
 Schnappschuesse ab (``web/tour/fixtures.js``). Damit entstehen durch
@@ -253,7 +253,7 @@ _HEADER = """// SPDX-License-Identifier: BUSL-1.1
 // Waehrend der Tour laeuft der Web-Client im schreibfreien Sandkasten: Kein
 // POST/PUT/DELETE verlaesst den Browser, und jeder /schemas-Aufruf wird aus
 // diesen Stufen bedient. Dadurch entstehen durch Tutorial-Eingaben keine
-// dauerhaften Daten (docs/Tutorial-Konzept.md, §4).
+// dauerhaften Daten.
 //
 // Es ist eine AUFZEICHNUNG, keine Logik: Der Client wertet hier nichts aus, er
 // spielt ab, was der Kern in dieser Situation geliefert haette. Der Wachtest

@@ -9,7 +9,7 @@
 // Waehrend der Tour laeuft der Web-Client im schreibfreien Sandkasten: Kein
 // POST/PUT/DELETE verlaesst den Browser, und jeder /schemas-Aufruf wird aus
 // diesen Stufen bedient. Dadurch entstehen durch Tutorial-Eingaben keine
-// dauerhaften Daten (docs/Tutorial-Konzept.md, §4).
+// dauerhaften Daten.
 //
 // Es ist eine AUFZEICHNUNG, keine Logik: Der Client wertet hier nichts aus, er
 // spielt ab, was der Kern in dieser Situation geliefert haette. Der Wachtest

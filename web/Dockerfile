@@ -134,8 +134,12 @@ RUN apk --no-cache -U upgrade
 # 2026-08-30 verifiziert.
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 
-# Static single-page app assets.
+# Static single-page app assets. The build recipe itself (this file) must not be
+# served as /Dockerfile: the root .dockerignore excludes it where it exists, and
+# the rm covers builds from a checkout without that file (e.g. docker compose
+# --build in the release repo). Caddy serves /srv, not the image layers.
 COPY web/ /srv/
+RUN rm -f /srv/Dockerfile
 
 # Reverse-proxy + TLS + static-serving configuration.
 COPY deploy/Caddyfile /etc/caddy/Caddyfile

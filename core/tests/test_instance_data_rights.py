@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: BUSL-1.1
 """Setting instance data directly: only one's own work, never without a trace.
 
-``PUT /instances/{id}/data`` used to accept any value on any instance from
-every operator -- and wrote no audit event, "so it never pollutes the KPIs".
-An operator could thereby raise the amount of an already approved purchase
-request, or change a colleague's leave request, without anybody noticing
-(Validierung aus Außensicht 2026-09-25, VAL-01).
+A value a step decided on -- the amount of an approved purchase request, the
+dates of a colleague's leave request -- must not change afterwards without a
+right, a reason and an audit event.
 
 The boundary rule (``api._authorize_data_write``):
 
@@ -53,7 +51,7 @@ def _instance(name: str, *, release: bool = True) -> tuple[str, str]:
 
     Built in open mode. "Erfassen" (role ``sb``, agent ``a1``) writes
     ``betrag``; "Genehmigen" (role ``other``, agent ``a2``) writes nothing -- the
-    four-eyes shape of VAL-01. ``notiz`` is an element no step writes. Returns
+    four-eyes shape of a purchase approval. ``notiz`` is an element no step writes. Returns
     ``(instance_id, id of "Erfassen")``.
     """
 
@@ -180,7 +178,7 @@ def test_operator_not_responsible_for_any_open_step_is_refused(password: Any) ->
     resp = _put(iid, {"betrag": 5_000_000}, paul)
 
     # Paul is not involved at all: the case does not exist for him (404, like a
-    # read -- NT-08). An *involved* operator without the right gets the 403
+    # read). An *involved* operator without the right gets the 403
     # text, see test_operator_may_not_set_elements_its_step_does_not_write.
     assert resp.status_code == 404
     assert "betrag" not in api_module._get_instance_or_404(iid).data_values
@@ -198,7 +196,7 @@ def test_operator_may_not_set_elements_its_step_does_not_write(password: Any) ->
 
 
 def test_operator_cannot_change_data_after_its_step_is_done(password: Any) -> None:
-    # The four-eyes scenario of VAL-01: "Erfassen" is done, its amount is the
+    # The four-eyes scenario: "Erfassen" is done, its amount is the
     # basis of the approval -- neither the author nor the approver may change it.
     iid, act = _instance("Daten – nach Abschluss des Schritts")
     erika = password("erika", ["operator"], "a1")
@@ -322,8 +320,8 @@ def test_type_errors_are_reported_before_the_rights_check(password: Any) -> None
 
 
 def test_uninvolved_operator_learns_nothing_about_the_data(password: Any) -> None:
-    # Before NT-08 the D3 check ran first and told an uninvolved operator which
-    # elements a colleague's case has and of which type. Now the case is 404.
+    # The readability check runs before D3, so a foreign case is 404 and no
+    # finding describes its elements or their types.
     iid, _ = _instance("Daten – fremd, Typfehler")
     paul = password("paul", ["operator"], "a2")
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 """Password-login tests (CredentialStore + PasswordAuthBackend + API).
 
-Covers the self-contained login flow from ``docs/Auth-Konzept.md`` section 11:
+Covers the self-contained password login flow:
 
 * scrypt hashing round-trips and rejects tampering,
 * ``suggest_login`` transliterates umlauts and de-duplicates collisions,

@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: BUSL-1.1
 """A step's completion may only set what the step writes (rule D6).
 
-Found while checking whether integrations send unknown keys (2026-09-27):
-``/complete`` took over *every* key it was given. An approval step that only
-READS the amount overwrote it -- 499.99 became 5 000 000, with HTTP 200 and
-no audit event -- and unknown keys were stored as junk. The same manipulation
-VAL-01 closed for ``PUT …/data``, through another door. The external-task path
-has refused non-writable outputs all along; interactive completion now does
-the same, on the web, the internal and the ``/v1`` endpoint.
+``/complete`` takes over only the keys the step writes: a step that only READS
+a value (an approval reading the amount) must not change it, and unknown keys
+are not stored. It is the same guarantee ``PUT …/data`` gives, so neither door
+bypasses the other. The external-task path refuses non-writable outputs as
+well; interactive completion does the same on the web, the internal and the
+``/v1`` endpoint.
 """
 
 from __future__ import annotations

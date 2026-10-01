@@ -1,16 +1,12 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Who may change or move a running case (Nachtest 2026-09-27, NT-02).
+"""Who may change or move a running case.
 
-In the Nachtest an uninvolved operator (Paul, who could not even *read* the
-case) inserted an ad-hoc step into a colleague's leave request, another
-operator renamed "Genehmigung durch Leitung" in her own request, and Paul
-migrated a foreign case onto another revision. The history named nobody.
-
-Now:
+An ad-hoc change or a migration decides how a running case continues, so only
+those entitled to it may do it, and the history names who did it and why:
 * ad-hoc insert/rename/delete: modeller/admin only; a real instance needs a
   reason; actor and reason are in the audit event (test instances: optional);
 * migration: an operator still may migrate -- the instance view offers it --
-  but only a case it is involved in (the VAL-05 rule); report and bulk
+  but only a case it is involved in (the involvement rule); report and bulk
   assistant show and move nothing else.
 """
 
@@ -102,7 +98,7 @@ def _adhoc_calls(erfassen: str, genehmigen: str) -> list[tuple[str, dict[str, An
 def test_operators_may_not_change_a_running_case(login: Any) -> None:
     """Even the responsible operator: no ad-hoc change of the own case."""
 
-    sid, erfassen, genehmigen = _released("NT-02 Bearbeiter")
+    sid, erfassen, genehmigen = _released("Ad-hoc Bearbeiter")
     iid = client.post(f"/schemas/{sid}/instances").json()["id"]
     before = client.get(f"/instances/{iid}").json()
     admin = login("root", ["admin"])
@@ -119,7 +115,7 @@ def test_operators_may_not_change_a_running_case(login: Any) -> None:
 
 
 def test_modeller_needs_a_reason_and_is_named_in_the_history(login: Any) -> None:
-    sid, erfassen, genehmigen = _released("NT-02 Modellierer")
+    sid, erfassen, genehmigen = _released("Ad-hoc Modellierer")
     mara = login("mara", ["modeler"])
     for action, body, event in _adhoc_calls(erfassen, genehmigen):
         iid = client.post(f"/schemas/{sid}/instances", headers=mara).json()["id"]
@@ -146,7 +142,7 @@ def test_modeller_needs_a_reason_and_is_named_in_the_history(login: Any) -> None
 def test_test_instances_need_no_reason() -> None:
     """A test instance writes no history, so a reason would go nowhere (open mode)."""
 
-    sid, erfassen, _ = _released("NT-02 Prüfinstanz", release=False)
+    sid, erfassen, _ = _released("Ad-hoc Prüfinstanz", release=False)
     iid = client.post(f"/schemas/{sid}/instances").json()["id"]
     assert client.get(f"/instances/{iid}").json()["is_test"]
     resp = client.post(
@@ -165,7 +161,7 @@ def _revision(sid: str) -> str:
 
 
 def test_uninvolved_operator_cannot_migrate_or_even_see_a_foreign_case(login: Any) -> None:
-    sid, _, _ = _released("NT-02 Migration fremd")
+    sid, _, _ = _released("Ad-hoc Migration fremd")
     iid = client.post(f"/schemas/{sid}/instances").json()["id"]
     target = _revision(sid)
     paul = login("paul", ["operator"], "a2")
@@ -191,7 +187,7 @@ def test_uninvolved_operator_cannot_migrate_or_even_see_a_foreign_case(login: An
 
 
 def test_involved_operator_and_modeller_may_migrate(login: Any) -> None:
-    sid, _, _ = _released("NT-02 Migration eigen")
+    sid, _, _ = _released("Ad-hoc Migration eigen")
     own = client.post(f"/schemas/{sid}/instances").json()["id"]
     other = client.post(f"/schemas/{sid}/instances").json()["id"]
     target = _revision(sid)

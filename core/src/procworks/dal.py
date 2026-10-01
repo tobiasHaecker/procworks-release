@@ -33,12 +33,14 @@ from procworks.model import (
     ExternalBinding,
     FilterOperator,
     ProcessSchema,
+    QueryFilter,
     SqlSelectBinding,
     SqlWriteBinding,
 )
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
+    from sqlalchemy.sql.elements import TextClause
 
 #: A single external record as returned/accepted by a connector.
 Record = Mapping[str, object]
@@ -59,8 +61,8 @@ class UnsafeIdentifierError(DataAccessError):
     A subclass of :class:`DataAccessError`, so every existing handler keeps
     catching it; the boundary can tell it apart, because it is the *caller's*
     input that is wrong (HTTP 422), not the external system (HTTP 502).
-    Found by the Validierung 2026-09-25 (VAL-08): an unsafe entity name in the
-    sample read came back as 502 "Bad Gateway".
+    Without it an unsafe entity name in the sample read would come back as
+    502 "Bad Gateway".
     """
 
 
@@ -173,13 +175,42 @@ def _ansi_quote_entity(entity: str) -> str:
     return ".".join(_ansi_quote_identifier(part) for part in entity.split("."))
 
 
+def _compile_filters(
+    filters: list[QueryFilter], quote_identifier: Callable[[str], str]
+) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """Compile structured filters into a parameterized ``WHERE`` clause.
+
+    Shared by :func:`compile_select` and :func:`compile_update`, so both
+    statement kinds place their filters identically: each filter becomes
+    ``<quoted column> <operator> :f<i>`` (operator from the closed
+    :data:`_OPERATOR_SQL` whitelist), joined with ``AND``. No value is bound
+    here -- ``binds`` maps each placeholder to the INSTANCE element that will
+    supply it.
+
+    :param filters: the binding's filters, in declaration order.
+    :param quote_identifier: whitelisting quoter for the column names.
+    :returns: ``(where, binds)`` -- ``where`` is ``" WHERE ..."`` or ``""``
+        when there are no filters.
+    """
+
+    binds: list[tuple[str, str]] = []
+    where_parts: list[str] = []
+    for index, item in enumerate(filters):
+        param = f"f{index}"
+        operator = _OPERATOR_SQL[item.operator]
+        where_parts.append(f"{quote_identifier(item.column)} {operator} :{param}")
+        binds.append((param, item.key_element_id))
+    where = " WHERE " + " AND ".join(where_parts) if where_parts else ""
+    return where, tuple(binds)
+
+
 def compile_select(
     binding: SqlSelectBinding,
     *,
     quote_identifier: Callable[[str], str] = _ansi_quote_identifier,
     quote_entity: Callable[[str], str] = _ansi_quote_entity,
 ) -> CompiledSelect:
-    """Compile a structured scalar select into parameterized SQL (§5.1).
+    """Compile a structured scalar select into parameterized SQL.
 
     This is the *single* place SQL text is produced from a select skizze, and it
     is deterministic and DB-free: it never touches a connection and never binds a
@@ -198,17 +229,8 @@ def compile_select(
     else:
         projection = f"{binding.aggregate.value}({column})"
 
-    binds: list[tuple[str, str]] = []
-    where_parts: list[str] = []
-    for index, item in enumerate(binding.filters):
-        param = f"f{index}"
-        operator = _OPERATOR_SQL[item.operator]
-        where_parts.append(f"{quote_identifier(item.column)} {operator} :{param}")
-        binds.append((param, item.key_element_id))
-
-    sql = f"SELECT {projection} FROM {quote_entity(binding.entity)}"
-    if where_parts:
-        sql += " WHERE " + " AND ".join(where_parts)
+    where, binds = _compile_filters(binding.filters, quote_identifier)
+    sql = f"SELECT {projection} FROM {quote_entity(binding.entity)}{where}"
     if binding.cardinality is Cardinality.FIRST_ORDERED and binding.order_by:
         terms = ", ".join(
             f"{quote_identifier(term.column)} DESC"
@@ -217,7 +239,7 @@ def compile_select(
             for term in binding.order_by
         )
         sql += f" ORDER BY {terms} LIMIT 1"
-    return CompiledSelect(sql=sql, binds=tuple(binds))
+    return CompiledSelect(sql=sql, binds=binds)
 
 
 class CompiledUpdate(NamedTuple):
@@ -239,7 +261,7 @@ def compile_update(
     quote_identifier: Callable[[str], str] = _ansi_quote_identifier,
     quote_entity: Callable[[str], str] = _ansi_quote_entity,
 ) -> CompiledUpdate:
-    """Compile a structured scalar write into a parameterized ``UPDATE`` (§7).
+    """Compile a structured scalar write into a parameterized ``UPDATE``.
 
     The single place a write statement is produced: the value travels as the
     ``:val`` bind parameter and the row is located by parameterized filters, so
@@ -247,17 +269,9 @@ def compile_update(
     a binding that satisfies rules C7-C9 (single-row target) should be compiled.
     """
 
-    binds: list[tuple[str, str]] = []
-    where_parts: list[str] = []
-    for index, item in enumerate(binding.filters):
-        param = f"f{index}"
-        operator = _OPERATOR_SQL[item.operator]
-        where_parts.append(f"{quote_identifier(item.column)} {operator} :{param}")
-        binds.append((param, item.key_element_id))
+    where, binds = _compile_filters(binding.filters, quote_identifier)
     sql = f"UPDATE {quote_entity(binding.entity)} SET {quote_identifier(binding.column)} = :val"
-    if where_parts:
-        sql += " WHERE " + " AND ".join(where_parts)
-    return CompiledUpdate(sql=sql, binds=tuple(binds))
+    return CompiledUpdate(sql=sql + where, binds=binds)
 
 
 def _sql_type_to_data_type(sql_type: object) -> DataType | None:
@@ -280,6 +294,53 @@ def _sql_type_to_data_type(sql_type: object) -> DataType | None:
     if isinstance(sql_type, sa_types.String):
         return DataType.STRING
     return None
+
+
+def _bind_filters(
+    sql: str,
+    binds: tuple[tuple[str, str], ...],
+    filters: list[QueryFilter],
+    key_values: Mapping[str, object],
+    purpose: str,
+) -> tuple[TextClause, dict[str, object]]:
+    """Turn compiled SQL plus filter values into an executable statement.
+
+    Shared by :meth:`SqlAlchemyConnector.select_scalar` and
+    :meth:`SqlAlchemyConnector.update_scalar`. Each placeholder of ``binds``
+    gets the value of the INSTANCE element it names, always as a bound
+    parameter. An ``IN`` filter takes a collection: a single value is wrapped
+    into a one-element list and its parameter is declared *expanding*, so
+    SQLAlchemy renders one placeholder per element.
+
+    :param sql: the statement text from :func:`compile_select` /
+        :func:`compile_update`.
+    :param binds: its ``(placeholder, element id)`` pairs, in filter order.
+    :param filters: the binding's filters (same order), for the operators.
+    :param key_values: the filter values, keyed by element id.
+    :param purpose: ``"select"`` or ``"write"``, for the error message.
+    :returns: the statement and its parameters (the caller may add more, such
+        as the written ``val``).
+    :raises DataAccessError: when a filter's source value is missing.
+    """
+
+    from sqlalchemy import bindparam, text
+
+    stmt = text(sql)
+    bind_params: dict[str, object] = {}
+    expanding: list[str] = []
+    for (param_name, key_element_id), item in zip(binds, filters, strict=True):
+        if key_element_id not in key_values:
+            raise DataAccessError(
+                f"filter source '{key_element_id}' is not set for the {purpose}"
+            )
+        value = key_values[key_element_id]
+        if item.operator is FilterOperator.IN:
+            value = list(value) if isinstance(value, (list, tuple, set)) else [value]
+            expanding.append(param_name)
+        bind_params[param_name] = value
+    if expanding:
+        stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
+    return stmt, bind_params
 
 
 class SqlAlchemyConnector:
@@ -382,7 +443,7 @@ class SqlAlchemyConnector:
     def select_scalar(
         self, binding: SqlSelectBinding, key_values: Mapping[str, object]
     ) -> object:
-        """Resolve a structured scalar select to a single, typed value (§7).
+        """Resolve a structured scalar select to a single, typed value.
 
         Compiles the binding with this connector's dialect quoter (the single
         SQL-producing path) and binds the filter values as parameters -- keyed by
@@ -390,30 +451,14 @@ class SqlAlchemyConnector:
         matches. Only well-formed (C4-C6) bindings should reach this method.
         """
 
-        from sqlalchemy import bindparam, text
-
         compiled = compile_select(
             binding,
             quote_identifier=self._quote_ident,
             quote_entity=self._quote_entity,
         )
-        stmt = text(compiled.sql)
-        bind_params: dict[str, object] = {}
-        expanding: list[str] = []
-        for (param_name, key_element_id), item in zip(
-            compiled.binds, binding.filters, strict=True
-        ):
-            if key_element_id not in key_values:
-                raise DataAccessError(
-                    f"filter source '{key_element_id}' is not set for the select"
-                )
-            value = key_values[key_element_id]
-            if item.operator is FilterOperator.IN:
-                value = list(value) if isinstance(value, (list, tuple, set)) else [value]
-                expanding.append(param_name)
-            bind_params[param_name] = value
-        if expanding:
-            stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
+        stmt, bind_params = _bind_filters(
+            compiled.sql, compiled.binds, binding.filters, key_values, "select"
+        )
         with self._engine.connect() as conn:
             row = conn.execute(stmt, bind_params).first()
         return None if row is None else row[0]
@@ -421,7 +466,7 @@ class SqlAlchemyConnector:
     def update_scalar(
         self, binding: SqlWriteBinding, value: object, key_values: Mapping[str, object]
     ) -> int:
-        """Write a single typed value back via a parameterized ``UPDATE`` (§7, Q4).
+        """Write a single typed value back via a parameterized ``UPDATE`` (Q4).
 
         Compiles the binding with this connector's dialect quoter, binds the
         value as ``:val`` and the row-locating filters as parameters, and returns
@@ -429,34 +474,15 @@ class SqlAlchemyConnector:
         target exactly one row -- should reach this method.
         """
 
-        from sqlalchemy import bindparam, text
-
         compiled = compile_update(
             binding,
             quote_identifier=self._quote_ident,
             quote_entity=self._quote_entity,
         )
-        stmt = text(compiled.sql)
-        bind_params: dict[str, object] = {"val": value}
-        expanding: list[str] = []
-        for (param_name, key_element_id), item in zip(
-            compiled.binds, binding.filters, strict=True
-        ):
-            if key_element_id not in key_values:
-                raise DataAccessError(
-                    f"filter source '{key_element_id}' is not set for the write"
-                )
-            filter_value = key_values[key_element_id]
-            if item.operator is FilterOperator.IN:
-                filter_value = (
-                    list(filter_value)
-                    if isinstance(filter_value, (list, tuple, set))
-                    else [filter_value]
-                )
-                expanding.append(param_name)
-            bind_params[param_name] = filter_value
-        if expanding:
-            stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
+        stmt, bind_params = _bind_filters(
+            compiled.sql, compiled.binds, binding.filters, key_values, "write"
+        )
+        bind_params["val"] = value
         with self._engine.begin() as conn:
             result = conn.execute(stmt, bind_params)
         return result.rowcount
@@ -486,7 +512,7 @@ class SqlAlchemyConnector:
         return sorted(names)
 
     def columns(self, entity: str) -> list[dict[str, object]]:
-        """Reflect the columns of ``entity`` for GUI mapping help (§5.2).
+        """Reflect the columns of ``entity`` for GUI mapping help.
 
         Returns each column's name, its SQL type as text, and the ProcWorks
         :class:`DataType` it maps onto (``None`` when it is not bindable). No row
@@ -520,6 +546,32 @@ class SqlAlchemyConnector:
         with self._engine.connect() as conn:
             conn.execute(text("SELECT 1"))
 
+
+def _filter_values(
+    filters: list[QueryFilter], instance_values: Record, kind: str
+) -> dict[str, object]:
+    """Collect the instance values a scalar binding's filters read.
+
+    Shared by :meth:`DataAccessLayer.read_scalar` and
+    :meth:`DataAccessLayer.write_scalar`: every filter names the INSTANCE
+    element that supplies its value, and that value must be set before the
+    external system is asked.
+
+    :param filters: the binding's filters.
+    :param instance_values: the instance's current data values.
+    :param kind: ``"scalar-select"`` or ``"scalar-write"``, for the message.
+    :returns: the filter values, keyed by element id.
+    :raises DataAccessError: when a filter source is not set in the instance.
+    """
+
+    key_values: dict[str, object] = {}
+    for item in filters:
+        if item.key_element_id not in instance_values:
+            raise DataAccessError(
+                f"{kind} filter source '{item.key_element_id}' is not set in the instance"
+            )
+        key_values[item.key_element_id] = instance_values[item.key_element_id]
+    return key_values
 
 
 class DataAccessLayer:
@@ -589,7 +641,7 @@ class DataAccessLayer:
     def read_scalar(
         self, schema: ProcessSchema, instance_values: Record, element_id: str
     ) -> object:
-        """Resolve a scalar-select-bound EXTERNAL element to a single value (§7).
+        """Resolve a scalar-select-bound EXTERNAL element to a single value.
 
         Collects the filter values from the instance, then delegates to the
         connector's ``select_scalar``. Raises ``DataAccessError`` if the element
@@ -611,14 +663,7 @@ class DataAccessLayer:
             raise DataAccessError(
                 f"connector '{binding.connector_id}' does not support scalar SQL selects"
             )
-        key_values: dict[str, object] = {}
-        for item in binding.filters:
-            if item.key_element_id not in instance_values:
-                raise DataAccessError(
-                    f"scalar-select filter source '{item.key_element_id}' is not set "
-                    f"in the instance"
-                )
-            key_values[item.key_element_id] = instance_values[item.key_element_id]
+        key_values = _filter_values(binding.filters, instance_values, "scalar-select")
         result: object = select_scalar(binding, key_values)
         return result
 
@@ -629,7 +674,7 @@ class DataAccessLayer:
         element_id: str,
         value: object,
     ) -> int:
-        """Write ``value`` back through a scalar-write-bound EXTERNAL element (§7).
+        """Write ``value`` back through a scalar-write-bound EXTERNAL element.
 
         Collects the row-locating filter values from the instance, then delegates
         to the connector's ``update_scalar``. Raises ``DataAccessError`` if the
@@ -651,13 +696,6 @@ class DataAccessLayer:
             raise DataAccessError(
                 f"connector '{binding.connector_id}' does not support scalar SQL writes"
             )
-        key_values: dict[str, object] = {}
-        for item in binding.filters:
-            if item.key_element_id not in instance_values:
-                raise DataAccessError(
-                    f"scalar-write filter source '{item.key_element_id}' is not set "
-                    f"in the instance"
-                )
-            key_values[item.key_element_id] = instance_values[item.key_element_id]
+        key_values = _filter_values(binding.filters, instance_values, "scalar-write")
         result: int = update_scalar(binding, value, key_values)
         return result

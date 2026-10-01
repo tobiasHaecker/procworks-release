@@ -61,6 +61,22 @@ def _frozen_nodes(instance: ProcessInstance) -> set[str]:
     return {nid for nid, st in instance.node_states.items() if st in _FROZEN}
 
 
+def _internal_edges(schema: ProcessSchema, frozen: set[str]) -> set[str]:
+    """Edge keys of ``schema`` whose source *and* target are in ``frozen``.
+
+    These are the edges inside the executed region that M2 requires to be
+    identical in source and target schema. ``frozen`` is the id set from
+    :func:`_frozen_nodes`; the keys use the ``source->target`` form of the
+    instance's edge markings. Every edge type counts, exactly as before.
+    """
+
+    return {
+        _edge_key(e.source, e.target)
+        for e in schema.edges
+        if e.source in frozen and e.target in frozen
+    }
+
+
 def check_migration(
     instance: ProcessInstance,
     source_schema: ProcessSchema,
@@ -157,16 +173,14 @@ def migrate_instance(
     result.schema_version = target_schema.version
     # Fresh markings for the target, then copy over the states of every element
     # that exists in both schemas (executed region matches by id).
-    new_node_states = {nid: NodeState.NOT_ACTIVATED for nid in target_schema.nodes}
-    for nid in target_schema.nodes:
-        if nid in instance.node_states:
-            new_node_states[nid] = instance.node_states[nid]
-    new_edge_states: dict[str, EdgeState] = {}
-    for edge in target_schema.edges:
-        key = _edge_key(edge.source, edge.target)
-        new_edge_states[key] = instance.edge_states.get(key, EdgeState.NOT_SIGNALED)
-    result.node_states = new_node_states
-    result.edge_states = new_edge_states
+    result.node_states = {
+        nid: instance.node_states.get(nid, NodeState.NOT_ACTIVATED)
+        for nid in target_schema.nodes
+    }
+    result.edge_states = {
+        key: instance.edge_states.get(key, EdgeState.NOT_SIGNALED)
+        for key in (_edge_key(e.source, e.target) for e in target_schema.edges)
+    }
     if data_mapping:
         result.data_values.update(data_mapping)
     return result
@@ -240,16 +254,8 @@ def _check_m2(
                 )
             )
     # control edges with both endpoints frozen must be identical in both schemas
-    source_internal = {
-        _edge_key(e.source, e.target)
-        for e in source_schema.edges
-        if e.source in frozen and e.target in frozen
-    }
-    target_internal = {
-        _edge_key(e.source, e.target)
-        for e in target_schema.edges
-        if e.source in frozen and e.target in frozen
-    }
+    source_internal = _internal_edges(source_schema, frozen)
+    target_internal = _internal_edges(target_schema, frozen)
     for key in sorted(source_internal - target_internal):
         findings.append(
             ValidationFinding(

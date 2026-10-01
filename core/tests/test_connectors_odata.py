@@ -273,7 +273,7 @@ def test_columns_infer_types_from_sample_row() -> None:
 
 
 def test_entities_lists_the_service_documents_entity_sets() -> None:
-    """Der Katalog speist die Tabellenauswahl der Oberflaeche (Maengelliste Nr. 1).
+    """Der Katalog speist die Tabellenauswahl der Oberflaeche -- niemand muss raten.
 
     Das Servicedokument der Wurzel nennt jede angebotene Sammlung; Singletons
     und Funktionsimporte gehoeren nicht in die Auswahl, weil sie nicht als

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""move_node: relocate a step without losing its bindings (§7.2 moveNode).
+"""move_node: relocate a step without losing its bindings.
 
 The operation composes the serial splice-out of ``delete_node`` with the
 splice-in of ``serial_insert`` into one atomic, validated transformation. These

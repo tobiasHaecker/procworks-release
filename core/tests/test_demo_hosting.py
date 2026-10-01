@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 """Tests for the Demo-Hosting boot conveniences (D0a boot seed, D0b SPA mount).
 
-Both are additive boundary features (docs/Demo-Hosting-Konzept.md) that must
+Both are additive boundary features that must
 default to *off* and touch no correctness rule. See :func:`procworks.api._lifespan`
 and :func:`procworks.api._maybe_mount_web`.
 """
@@ -418,8 +418,8 @@ def test_demo_image_has_the_secret_the_webhook_dialog_suggests() -> None:
     Der Probelauf signiert nur, wenn die angegebene Secret-Referenz auf dem
     Server gesetzt ist. In der Demo war keine gesetzt: Wer die vom Dialog
     vorgeschlagene Referenz eintippte, las „Nicht signiert" -- und die auf der
-    Website beworbene Signatur war nirgends belegbar (Nachtest 2026-09-22,
-    Mangel 9). Der Wert selbst ist bedeutungslos, die Demo stellt nichts zu.
+    Website beworbene Signatur war nirgends belegbar. Der Wert selbst ist bedeutungslos, die Demo
+    stellt nichts zu.
     """
 
     path = Path(__file__).resolve().parents[2] / "deploy" / "demo" / "Dockerfile"
@@ -456,7 +456,7 @@ def test_full_stack_compose_passes_the_seed_switches_through_defaulting_to_off()
 
 
 def test_full_stack_compose_passes_mail_and_machine_token_settings_through() -> None:
-    """NT-12/NT-13: SMTP and machine tokens are configurable without editing files.
+    """SMTP and machine tokens are configurable without editing files.
 
     The admin view told customers to set ``PROCWORKS_SMTP_HOST``/``..._MAIL_FROM``,
     but the Compose file never handed any of it to the API container. Every
@@ -476,7 +476,7 @@ def test_full_stack_compose_passes_mail_and_machine_token_settings_through() -> 
 
 
 def test_co_served_spa_carries_csp_but_the_api_and_swagger_do_not() -> None:
-    """VAL-06: the SPA gets CSP and X-Frame-Options, also in the demo container.
+    """The SPA gets CSP and X-Frame-Options, also in the demo container.
 
     Behind Caddy the Caddyfile sets them; the single-container demo serves the
     SPA itself, so ``_SpaSecurityHeaders`` does. API calls and Swagger (CDN
@@ -521,9 +521,9 @@ def test_spa_headers_match_the_caddyfile() -> None:
 
 
 def test_full_stack_uses_the_released_images_of_this_version() -> None:
-    """VAL-12: Compose built API and web from source; the Trivy-scanned ghcr
-    images were never used, and "update via container image" meant git pull +
-    rebuild. The stack now names the release images, defaulting to the version
+    """Compose uses the Trivy-scanned ghcr images instead of building API and
+    web from source, so "update via container image" needs no git pull +
+    rebuild. The stack names the release images, defaulting to the version
     of this checkout -- which must move with every release, hence this guard.
     """
     import tomllib
@@ -536,11 +536,11 @@ def test_full_stack_uses_the_released_images_of_this_version() -> None:
         assert expected in compose, (
             f"{image}: Compose-Standardversion passt nicht zu pyproject ({version})"
         )
-    # VAL-34: the backup index names the release that wrote the dump.
+    # The backup index names the release that wrote the dump.
     assert f'PROCWORKS_VERSION: "${{PROCWORKS_VERSION:-{version}}}"' in compose
 
 
-# --- NT-04: example logins carry the public password only in the public demo --
+# --- example logins carry the public password only in the public demo -------
 
 
 def test_boot_seed_in_demo_mode_keeps_the_published_password(
@@ -565,7 +565,7 @@ def test_boot_seed_outside_the_demo_uses_a_random_password_from_the_log(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A customer install with ``PROCWORKS_LOAD_DEMO`` must not open a modeller
-    login with the password printed on the website (Nachtest 2026-09-27, NT-04).
+    login with the password printed on the website.
     The random password is reported once, in the server log -- like the
     admin's start password."""
     monkeypatch.setenv("PROCWORKS_LOAD_DEMO", "1")

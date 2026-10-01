@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: BUSL-1.1
 """Tests for the time-based, automatic worklist prioritisation.
 
-Realises the "Zeitbasierte-Priorisierung-Konzept": from the target times
+From the target times
 modelled on activities the todo list orders itself so that deadline risk rises
 to the top and overdue tasks sit above everything else. The logic is pure and
 clock-injected, so these tests drive it deterministically with a fake ``now``
-(concept step Z0), plus a round-trip through the change operations (Z1/Z2).
+(step Z0), plus a round-trip through the change operations (Z1/Z2).
 
 The prioritisation is a read-only *view* concern: it must never relax a
 correctness rule and must behave exactly as before for models without any
@@ -266,7 +266,7 @@ def test_pause_credit_requires_the_explicit_opt_in() -> None:
     on = TimeConstraint(max_duration_seconds=100, pause_stops_clock=True)
     off = TimeConstraint(max_duration_seconds=100)
     # Without the opt-in (the default): no credit, ever -- suspending never
-    # defers a deadline (the concept's anti-loophole stance, §4).
+    # defers a deadline (otherwise a pause would be a loophole).
     assert pause_credit_seconds(off, 60.0, _NOW - timedelta(seconds=40), _NOW) == 0.0
     assert pause_credit_seconds(None, 60.0, None, _NOW) == 0.0
     # With it: sum of closed pauses plus the ongoing one.

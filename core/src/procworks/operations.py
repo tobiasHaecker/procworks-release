@@ -89,7 +89,7 @@ def _new_id(prefix: str) -> str:
 
     The sequence survives restarts by being lifted past the stored ids at
     start-up, and the globally stored prefixes (``schema``, ``tpl``) are
-    checked against their store before use -- see :mod:`procworks.ids` (NT-01).
+    checked against their store before use -- see :mod:`procworks.ids`.
     """
 
     return ids.MODEL_IDS.new(prefix)
@@ -194,17 +194,25 @@ def _single_outgoing(schema: ProcessSchema, node_id: str) -> ControlEdge:
     return out[0]
 
 
-def serial_insert(schema: ProcessSchema, label: str, after_node_id: str) -> ProcessSchema:
-    """Insert a single ACTIVITY sequentially after ``after_node_id``.
+def _require_insert_anchor(schema: ProcessSchema, after_node_id: str) -> Node:
+    """Return the insertion anchor ``after_node_id``, rejecting a missing one or END.
 
-    requires: schema editable; anchor exists and is not END; anchor has one
-              outgoing edge.
-    ensures:  new activity spliced between anchor and its successor; K1-K3 hold.
+    Shared precondition of every operation that places something *after* a
+    node (``serial_insert``, ``parallel_insert``, ``conditional_insert``,
+    ``insert_loop``, ``insert_subprocess``, ``move_node``).
+
+    :param schema: the candidate schema being edited.
+    :param after_node_id: id of the node the new content is placed behind.
+    :returns: the anchor node.
+    :raises CorrectnessError: ``OP.not-found`` if the node does not exist
+        (via :func:`_require_node`), ``OP.after-end`` if it is the END node --
+        nothing can follow the end of the process. Whether the anchor has
+        exactly one outgoing edge is checked separately by
+        :func:`_single_outgoing`, because some callers run further checks in
+        between.
     """
 
-    candidate = schema.model_copy(deep=True)
-    _require_editable(candidate)
-    anchor = _require_node(candidate, after_node_id)
+    anchor = _require_node(schema, after_node_id)
     if anchor.type is NodeType.END:
         raise CorrectnessError(
             [
@@ -216,6 +224,154 @@ def serial_insert(schema: ProcessSchema, label: str, after_node_id: str) -> Proc
                 )
             ]
         )
+    return anchor
+
+
+def _serial_neighbours(schema: ProcessSchema, node_id: str) -> tuple[str, str]:
+    """Return ``(predecessor_id, successor_id)`` of a node on a serial stretch.
+
+    Used by :func:`move_node` and :func:`delete_node`, which both splice a node
+    out of its position and therefore need exactly one incoming and one
+    outgoing control edge.
+
+    :param schema: the candidate schema being edited.
+    :param node_id: id of an existing node.
+    :returns: the source of the single incoming edge and the target of the
+        single outgoing edge.
+    :raises CorrectnessError: ``OP.not-serial`` if the node has not exactly one
+        incoming and one outgoing edge (e.g. a gateway).
+    """
+
+    incoming = schema.incoming(node_id)
+    outgoing = schema.outgoing(node_id)
+    if len(incoming) != 1 or len(outgoing) != 1:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    code="OP.not-serial",
+                    node_id=node_id,
+                    message=(
+                        f"node '{node_id}' is not on a serial stretch (one in/one out)"
+                    ),
+                )
+            ]
+        )
+    return incoming[0].source, outgoing[0].target
+
+
+def _require_data_element(schema: ProcessSchema, element_id: str) -> DataElement:
+    """Return the data element ``element_id`` or reject the operation.
+
+    :param schema: the candidate schema being edited.
+    :param element_id: id of the data element the operation works on.
+    :returns: the (mutable) element of ``schema``.
+    :raises CorrectnessError: ``OP.not-found`` (kind ``data_element``) if the
+        element does not exist. Callers whose finding differs -- a different
+        message (discriminators) or a localising ``node_id`` (``set_form``) --
+        keep their own check.
+    """
+
+    element = schema.data_elements.get(element_id)
+    if element is None:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"data element '{element_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "data_element", "name": str(element_id)},
+                )
+            ]
+        )
+    return element
+
+
+def _require_role(schema: ProcessSchema, role_id: str) -> Role:
+    """Return the role ``role_id`` of the embedded org model or reject.
+
+    :param schema: the candidate schema being edited.
+    :param role_id: id of an organisational role.
+    :returns: the (mutable) role.
+    :raises CorrectnessError: ``OP.not-found`` (kind ``role``) if it is unknown.
+    """
+
+    role = schema.org_model.roles.get(role_id)
+    if role is None:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"role '{role_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "role", "name": str(role_id)},
+                )
+            ]
+        )
+    return role
+
+
+def _require_org_unit(schema: ProcessSchema, org_unit_id: str) -> OrgUnit:
+    """Return the org unit ``org_unit_id`` of the embedded org model or reject.
+
+    :param schema: the candidate schema being edited.
+    :param org_unit_id: id of an organisational unit.
+    :returns: the (mutable) unit.
+    :raises CorrectnessError: ``OP.not-found`` (kind ``org_unit``) if it is
+        unknown. A missing *parent* unit carries its own wording and is checked
+        by the callers themselves.
+    """
+
+    unit = schema.org_model.org_units.get(org_unit_id)
+    if unit is None:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"org unit '{org_unit_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "org_unit", "name": str(org_unit_id)},
+                )
+            ]
+        )
+    return unit
+
+
+def _require_agent(schema: ProcessSchema, agent_id: str) -> Agent:
+    """Return the agent ``agent_id`` of the embedded org model or reject.
+
+    :param schema: the candidate schema being edited.
+    :param agent_id: id of an agent (actor).
+    :returns: the (mutable) agent.
+    :raises CorrectnessError: ``OP.not-found`` (kind ``agent``) if it is unknown.
+    """
+
+    agent = schema.org_model.agents.get(agent_id)
+    if agent is None:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"agent '{agent_id}' does not exist",
+                    code="OP.not-found",
+                    params={"kind": "agent", "name": str(agent_id)},
+                )
+            ]
+        )
+    return agent
+
+
+def serial_insert(schema: ProcessSchema, label: str, after_node_id: str) -> ProcessSchema:
+    """Insert a single ACTIVITY sequentially after ``after_node_id``.
+
+    requires: schema editable; anchor exists and is not END; anchor has one
+              outgoing edge.
+    ensures:  new activity spliced between anchor and its successor; K1-K3 hold.
+    """
+
+    candidate = schema.model_copy(deep=True)
+    _require_editable(candidate)
+    _require_insert_anchor(candidate, after_node_id)
     edge = _single_outgoing(candidate, after_node_id)
     successor_id = edge.target
 
@@ -305,18 +461,7 @@ def conditional_insert(
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    anchor = _require_node(candidate, after_node_id)
-    if anchor.type is NodeType.END:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    node_id=after_node_id,
-                    message="cannot insert after END",
-                    code="OP.after-end",
-                )
-            ]
-        )
+    _require_insert_anchor(candidate, after_node_id)
     element = candidate.data_elements.get(discriminator)
     if element is None:
         raise CorrectnessError(
@@ -395,18 +540,7 @@ def _insert_block(
 ) -> ProcessSchema:
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    anchor = _require_node(candidate, after_node_id)
-    if anchor.type is NodeType.END:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    node_id=after_node_id,
-                    message="cannot insert after END",
-                    code="OP.after-end",
-                )
-            ]
-        )
+    _require_insert_anchor(candidate, after_node_id)
     edge = _single_outgoing(candidate, after_node_id)
     successor_id = edge.target
 
@@ -518,7 +652,7 @@ def _build_loop_decision(
     )
 
 
-#: Default hard brake of a new loop (VAL-29/31): the web dialog pre-fills 10,
+#: Default hard brake of a new loop: the web dialog pre-fills 10,
 #: a loop inserted via API or script used to be unbounded. ``None`` passed
 #: explicitly still means "unbounded" -- a deliberate choice, not a default.
 DEFAULT_MAX_ITERATIONS = 10
@@ -539,7 +673,7 @@ def insert_loop(
     ``max_iterations`` caps the total number of body runs as a deterministic
     hard brake and makes the T2 critical path charge the body that many times;
     at least 2 when set (K6b). Defaults to :data:`DEFAULT_MAX_ITERATIONS` like
-    the web dialog (Validierung 2026-09-25, VAL-31); ``None`` disables it.
+    the web dialog; ``None`` disables it.
 
     Builds ``LOOP_START -> body activity -> LOOP_END`` on the anchor's outgoing
     edge and stores the structured :class:`LoopDecision` on the LOOP_END.
@@ -570,18 +704,7 @@ def insert_loop(
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    anchor = _require_node(candidate, after_node_id)
-    if anchor.type is NodeType.END:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    node_id=after_node_id,
-                    message="cannot insert after END",
-                    code="OP.after-end",
-                )
-            ]
-        )
+    _require_insert_anchor(candidate, after_node_id)
     decision = _build_loop_decision(
         candidate, discriminator, repeat_value, cells, max_iterations
     )
@@ -961,36 +1084,9 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
                 )
             ]
         )
-    anchor = _require_node(candidate, after_node_id)
-    if anchor.type is NodeType.END:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    node_id=after_node_id,
-                    message="cannot insert after END",
-                    code="OP.after-end",
-                )
-            ]
-        )
+    _require_insert_anchor(candidate, after_node_id)
 
-    incoming = candidate.incoming(node_id)
-    outgoing = candidate.outgoing(node_id)
-    if len(incoming) != 1 or len(outgoing) != 1:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    code="OP.not-serial",
-                    node_id=node_id,
-                    message=(
-                        f"node '{node_id}' is not on a serial stretch (one in/one out)"
-                    ),
-                )
-            ]
-        )
-    predecessor_id = incoming[0].source
-    successor_id = outgoing[0].target
+    predecessor_id, successor_id = _serial_neighbours(candidate, node_id)
     pred_type = candidate.nodes[predecessor_id].type
     if (
         pred_type is NodeType.LOOP_START
@@ -1036,22 +1132,7 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
                     )
                 ]
             )
-        if decision is not None and any(
-            b.target == successor_id for b in decision.branches
-        ):
-            raise CorrectnessError(
-                [
-                    ValidationFinding(
-                        rule="OP",
-                        code="OP.last-xor-branch",
-                        node_id=predecessor_id,
-                        message=(
-                            "an XOR split must keep at least one non-empty branch; "
-                            "remove the whole branch block instead"
-                        ),
-                    )
-                ]
-            )
+        _require_no_empty_branch(decision, predecessor_id, successor_id)
     candidate.edges = [
         e for e in candidate.edges if e.source != node_id and e.target != node_id
     ]
@@ -1059,10 +1140,7 @@ def move_node(schema: ProcessSchema, node_id: str, after_node_id: str) -> Proces
     if decision is not None:
         # The node opened an XOR branch: its partition cell now starts at the
         # former successor (the matching join itself if the branch ran empty).
-        for branch in decision.branches:
-            if branch.target == node_id:
-                branch.target = successor_id
-                break
+        _retarget_xor_branch(decision, node_id, successor_id)
         _refresh_xor_captions(candidate, predecessor_id)
 
     # Splice in after the anchor. If the anchor was the node's predecessor the
@@ -1156,6 +1234,99 @@ def _refresh_xor_captions(candidate: ProcessSchema, split_id: str) -> None:
             edge.condition = xor_condition_text(element.name, decision, index)
 
 
+def _require_no_empty_branch(
+    decision: XorDecision | None, split_id: str, join_id: str
+) -> None:
+    """Enforce the one-empty-branch cap before a branch of ``split_id`` runs empty.
+
+    An XOR split carries **at most one** empty branch (a direct ``split -> join``
+    edge): the runtime keys edges by source+target, so a second empty branch
+    would collide with the first, and at least one branch must keep content.
+    Shared by :func:`move_node` and :func:`_empty_out_xor_branch`, the two
+    operations that can leave a branch empty.
+
+    :param decision: the split's structured decision, or ``None`` (then there is
+        no partition to inspect and the check passes -- K7 flags that case).
+    :param split_id: id of the XOR split (localises the finding).
+    :param join_id: id of the matching join; a branch targeting it is empty.
+    :raises CorrectnessError: ``OP.last-xor-branch`` if an empty branch exists.
+    """
+
+    if decision is not None and any(b.target == join_id for b in decision.branches):
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    code="OP.last-xor-branch",
+                    node_id=split_id,
+                    message=(
+                        "an XOR split must keep at least one non-empty branch; "
+                        "remove the whole branch block instead"
+                    ),
+                )
+            ]
+        )
+
+
+def _retarget_xor_branch(decision: XorDecision, old_target: str, new_target: str) -> None:
+    """Let the partition cell that started at ``old_target`` start at ``new_target``.
+
+    Used when the first node of an XOR branch leaves it (moved or deleted): the
+    branch keeps its K7 cell, only its entry node changes -- to the node's
+    former successor, or to the join when the branch runs empty. Only the first
+    matching branch is changed (targets are unique per split); no match is a
+    silent no-op.
+
+    :param decision: the split's structured decision (mutated in place).
+    :param old_target: the node that used to open the branch.
+    :param new_target: the node that opens it from now on.
+    """
+
+    for branch in decision.branches:
+        if branch.target == old_target:
+            branch.target = new_target
+            return
+
+
+def _dissolve_gateway(
+    candidate: ProcessSchema,
+    split_id: str,
+    join_id: str,
+    also_remove: set[str] | None = None,
+) -> None:
+    """Dissolve a gateway block that is down to a single branch, keeping it inline.
+
+    The split's predecessor is wired to the head of the surviving branch and
+    the tail of that branch to the join's successor; split and join disappear
+    together (a complete symmetric block, so no crossed structure can arise).
+    Shared by :func:`_remove_and_branch` and :func:`remove_empty_branch`.
+
+    :param candidate: the candidate schema, mutated in place. The caller must
+        already have removed the vanished branch's edges, so that the split has
+        exactly one outgoing and the join exactly one incoming control edge.
+    :param split_id: id of the split gateway to dissolve.
+    :param join_id: id of its matching join.
+    :param also_remove: further nodes to drop together with the gateways (and
+        their dependent bindings via :func:`_drop_nodes`), e.g. the deleted
+        branch node whose edges are already gone.
+    :returns: nothing; the caller validates the result.
+    """
+
+    predecessor_id = candidate.incoming(split_id)[0].source
+    successor_id = candidate.outgoing(join_id)[0].target
+    head_id = candidate.outgoing(split_id)[0].target
+    tail_id = candidate.incoming(join_id)[0].source
+    gateways = {split_id, join_id}
+    candidate.edges = [
+        e
+        for e in candidate.edges
+        if e.source not in gateways and e.target not in gateways
+    ]
+    candidate.edges.append(ControlEdge(source=predecessor_id, target=head_id))
+    candidate.edges.append(ControlEdge(source=tail_id, target=successor_id))
+    _drop_nodes(candidate, gateways | (also_remove or set()))
+
+
 def _empty_out_xor_branch(
     candidate: ProcessSchema, node_id: str, split_id: str, join_id: str
 ) -> ProcessSchema:
@@ -1175,20 +1346,7 @@ def _empty_out_xor_branch(
     """
 
     decision = candidate.xor_decisions.get(split_id)
-    if decision is not None and any(b.target == join_id for b in decision.branches):
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    code="OP.last-xor-branch",
-                    node_id=split_id,
-                    message=(
-                        "an XOR split must keep at least one non-empty branch; "
-                        "remove the whole branch block instead"
-                    ),
-                )
-            ]
-        )
+    _require_no_empty_branch(decision, split_id, join_id)
 
     # Drop the node's own edges (split -> node, node -> join) ...
     candidate.edges = [
@@ -1197,10 +1355,7 @@ def _empty_out_xor_branch(
     # ... retarget the branch onto the join (keeping its K7 cell) and wire the
     # empty branch as a direct split -> join edge.
     if decision is not None:
-        for branch in decision.branches:
-            if branch.target == node_id:
-                branch.target = join_id
-                break
+        _retarget_xor_branch(decision, node_id, join_id)
     candidate.edges.append(ControlEdge(source=split_id, target=join_id))
     _drop_nodes(candidate, {node_id})
     _refresh_xor_captions(candidate, split_id)
@@ -1230,19 +1385,7 @@ def _remove_and_branch(
         return raise_if_invalid(candidate)
 
     # Only a single branch survives -> dissolve the gateway and keep that branch.
-    predecessor_id = candidate.incoming(split_id)[0].source
-    successor_id = candidate.outgoing(join_id)[0].target
-    head_id = remaining[0].target
-    tail_id = candidate.incoming(join_id)[0].source
-    to_remove = {node_id, split_id, join_id}
-    candidate.edges = [
-        e
-        for e in candidate.edges
-        if e.source not in {split_id, join_id} and e.target not in {split_id, join_id}
-    ]
-    candidate.edges.append(ControlEdge(source=predecessor_id, target=head_id))
-    candidate.edges.append(ControlEdge(source=tail_id, target=successor_id))
-    _drop_nodes(candidate, to_remove)
+    _dissolve_gateway(candidate, split_id, join_id, also_remove={node_id})
     return raise_if_invalid(candidate)
 
 
@@ -1338,24 +1481,7 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
         predecessor_id = candidate.incoming(node_id)[0].source
         successor_id = candidate.outgoing(join_id)[0].target
     else:
-        incoming = candidate.incoming(node_id)
-        outgoing = candidate.outgoing(node_id)
-        if len(incoming) != 1 or len(outgoing) != 1:
-            raise CorrectnessError(
-                [
-                    ValidationFinding(
-                        rule="OP",
-                        code="OP.not-serial",
-                        node_id=node_id,
-                        message=(
-                            f"node '{node_id}' is not on a serial stretch "
-                            "(one in/one out)"
-                        ),
-                    )
-                ]
-            )
-        predecessor_id = incoming[0].source
-        successor_id = outgoing[0].target
+        predecessor_id, successor_id = _serial_neighbours(candidate, node_id)
         pred_type = candidate.nodes[predecessor_id].type
         succ_type = candidate.nodes[successor_id].type
         if pred_type in SPLIT_TYPES and succ_type in JOIN_TYPES:
@@ -1367,27 +1493,16 @@ def delete_node(schema: ProcessSchema, node_id: str) -> ProcessSchema:
                 return _delete_single_node_branch(
                     candidate, node_id, predecessor_id, successor_id
                 )
-        if (
-            pred_type is NodeType.LOOP_START
-            and succ_type is NodeType.LOOP_END
-        ):
+        if pred_type is NodeType.LOOP_START and succ_type is NodeType.LOOP_END:
             # Sole content of a loop body: an empty loop is meaningless (K6d),
             # so deleting the last body node dissolves the whole loop -- the
-            # counterpart of the single-branch gateway dissolution.
+            # counterpart of the single-branch gateway dissolution. The gap to
+            # close is then the one around the loop block.
             to_remove = {predecessor_id, node_id, successor_id}
-            outer_pred = candidate.incoming(predecessor_id)[0].source
-            outer_succ = candidate.outgoing(successor_id)[0].target
-            _drop_nodes(candidate, to_remove)
-            candidate.edges = [
-                e
-                for e in candidate.edges
-                if e.source not in to_remove and e.target not in to_remove
-            ]
-            candidate.edges.append(
-                ControlEdge(source=outer_pred, target=outer_succ)
-            )
-            return raise_if_invalid(candidate)
-        to_remove = {node_id}
+            predecessor_id = candidate.incoming(predecessor_id)[0].source
+            successor_id = candidate.outgoing(successor_id)[0].target
+        else:
+            to_remove = {node_id}
 
     _drop_nodes(candidate, to_remove)
     candidate.edges = [
@@ -1471,19 +1586,7 @@ def remove_empty_branch(schema: ProcessSchema, split_id: str) -> ProcessSchema:
         return raise_if_invalid(candidate)
 
     # Only a single branch remains -> dissolve the gateway and keep it inline.
-    predecessor_id = candidate.incoming(split_id)[0].source
-    successor_id = candidate.outgoing(join_id)[0].target
-    head_id = remaining[0].target
-    tail_id = candidate.incoming(join_id)[0].source
-    to_remove = {split_id, join_id}
-    candidate.edges = [
-        e
-        for e in candidate.edges
-        if e.source not in to_remove and e.target not in to_remove
-    ]
-    candidate.edges.append(ControlEdge(source=predecessor_id, target=head_id))
-    candidate.edges.append(ControlEdge(source=tail_id, target=successor_id))
-    _drop_nodes(candidate, to_remove)
+    _dissolve_gateway(candidate, split_id, join_id)
     return raise_if_invalid(candidate)
 
 
@@ -1538,18 +1641,7 @@ def update_data_element(
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    element = candidate.data_elements.get(element_id)
-    if element is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"data element '{element_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "data_element", "name": str(element_id)},
-                )
-            ]
-        )
+    element = _require_data_element(candidate, element_id)
     if name is not None:
         element.name = clean_label(name, what="data_element")
     if data_type is not None:
@@ -1567,18 +1659,7 @@ def reset_data_element_source(schema: ProcessSchema, element_id: str) -> Process
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    element = candidate.data_elements.get(element_id)
-    if element is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"data element '{element_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "data_element", "name": str(element_id)},
-                )
-            ]
-        )
+    element = _require_data_element(candidate, element_id)
     element.source = DataSourceKind.INSTANCE
     element.external = None
     element.select = None
@@ -1600,17 +1681,7 @@ def delete_data_element(schema: ProcessSchema, element_id: str) -> ProcessSchema
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    if element_id not in candidate.data_elements:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"data element '{element_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "data_element", "name": str(element_id)},
-                )
-            ]
-        )
+    _require_data_element(candidate, element_id)
     del candidate.data_elements[element_id]
     candidate.data_accesses = [
         a for a in candidate.data_accesses if a.element_id != element_id
@@ -1626,7 +1697,7 @@ def delete_data_element(schema: ProcessSchema, element_id: str) -> ProcessSchema
 
 
 def set_display_fields(schema: ProcessSchema, element_ids: list[str]) -> ProcessSchema:
-    """Choose the data elements that name an instance and its tasks (VAL-17).
+    """Choose the data elements that name an instance and its tasks.
 
     requires: schema editable (R0); at most two distinct INSTANCE elements
               (checked by U5 in ``validate``).
@@ -1672,17 +1743,7 @@ def connect_data(
                 )
             ]
         )
-    if element_id not in candidate.data_elements:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"data element '{element_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "data_element", "name": str(element_id)},
-                )
-            ]
-        )
+    _require_data_element(candidate, element_id)
     candidate.data_accesses.append(
         DataAccess(
             node_id=node_id,
@@ -1773,7 +1834,7 @@ class FormFieldSpec:
     help_text: str | None = None
     #: Optional heading the field is grouped under (presentation only).
     group: str = ""
-    #: Optional input checks (VAL-22), see :class:`procworks.model.FormField`.
+    #: Optional input checks, see :class:`procworks.model.FormField`.
     min_value: float | None = None
     max_value: float | None = None
     pattern: str | None = None
@@ -1993,18 +2054,7 @@ def bind_external_data(
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    element = candidate.data_elements.get(element_id)
-    if element is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"data element '{element_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "data_element", "name": str(element_id)},
-                )
-            ]
-        )
+    element = _require_data_element(candidate, element_id)
     element.source = DataSourceKind.EXTERNAL
     element.select = None
     element.write = None
@@ -2030,7 +2080,7 @@ def bind_sql_select(
     order_by: list[OrderBy] | None = None,
     unique_column: str = "",
 ) -> ProcessSchema:
-    """Bind a data element to a structured, scalar SQL select (concept §4, Q1).
+    """Bind a data element to a structured, scalar SQL select (Q1).
 
     Turns the element into an EXTERNAL element whose value is a single, typed
     scalar compiled from a :class:`SqlSelectBinding` (never free-form SQL).
@@ -2046,18 +2096,7 @@ def bind_sql_select(
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    element = candidate.data_elements.get(element_id)
-    if element is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"data element '{element_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "data_element", "name": str(element_id)},
-                )
-            ]
-        )
+    element = _require_data_element(candidate, element_id)
     element.source = DataSourceKind.EXTERNAL
     element.external = None
     element.write = None
@@ -2086,7 +2125,7 @@ def bind_sql_write(
     filters: list[QueryFilter] | None = None,
     unique_column: str = "",
 ) -> ProcessSchema:
-    """Bind a data element to a structured scalar SQL write-back (concept §7, Q4).
+    """Bind a data element to a structured scalar SQL write-back (Q4).
 
     Turns the element into an EXTERNAL element whose produced scalar is written
     back via a parameterized ``UPDATE`` (never free-form SQL).
@@ -2102,18 +2141,7 @@ def bind_sql_write(
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    element = candidate.data_elements.get(element_id)
-    if element is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"data element '{element_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "data_element", "name": str(element_id)},
-                )
-            ]
-        )
+    element = _require_data_element(candidate, element_id)
     element.source = DataSourceKind.EXTERNAL
     element.external = None
     element.select = None
@@ -2229,28 +2257,9 @@ def add_agent(
         )
     roles = role_ids or []
     for role_id in roles:
-        if role_id not in candidate.org_model.roles:
-            raise CorrectnessError(
-                [
-                    ValidationFinding(
-                        rule="OP",
-                        message=f"role '{role_id}' does not exist",
-                        code="OP.not-found",
-                        params={"kind": "role", "name": str(role_id)},
-                    )
-                ]
-            )
-    if org_unit_id is not None and org_unit_id not in candidate.org_model.org_units:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"org unit '{org_unit_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "org_unit", "name": str(org_unit_id)},
-                )
-            ]
-        )
+        _require_role(candidate, role_id)
+    if org_unit_id is not None:
+        _require_org_unit(candidate, org_unit_id)
     candidate.org_model.agents[aid] = Agent(
         id=aid,
         name=clean_label(name, what="agent"),
@@ -2274,18 +2283,7 @@ def set_org_unit_manager(
 
     candidate = schema.model_copy(deep=True)
     _require_local_org(candidate)
-    unit = candidate.org_model.org_units.get(org_unit_id)
-    if unit is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"org unit '{org_unit_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "org_unit", "name": str(org_unit_id)},
-                )
-            ]
-        )
+    unit = _require_org_unit(candidate, org_unit_id)
     unit.manager_id = manager_id
     return raise_if_invalid(candidate)
 
@@ -2303,18 +2301,7 @@ def set_role_mailbox(
 
     candidate = schema.model_copy(deep=True)
     _require_local_org(candidate)
-    role = candidate.org_model.roles.get(role_id)
-    if role is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"role '{role_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "role", "name": str(role_id)},
-                )
-            ]
-        )
+    role = _require_role(candidate, role_id)
     role.mailbox = mailbox
     return raise_if_invalid(candidate)
 
@@ -2331,18 +2318,7 @@ def set_unit_mailbox(
 
     candidate = schema.model_copy(deep=True)
     _require_local_org(candidate)
-    unit = candidate.org_model.org_units.get(org_unit_id)
-    if unit is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"org unit '{org_unit_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "org_unit", "name": str(org_unit_id)},
-                )
-            ]
-        )
+    unit = _require_org_unit(candidate, org_unit_id)
     unit.mailbox = mailbox
     return raise_if_invalid(candidate)
 
@@ -2362,18 +2338,7 @@ def set_org_unit_parent(
     candidate = schema.model_copy(deep=True)
     _require_local_org(candidate)
     units = candidate.org_model.org_units
-    unit = units.get(org_unit_id)
-    if unit is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"org unit '{org_unit_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "org_unit", "name": str(org_unit_id)},
-                )
-            ]
-        )
+    unit = _require_org_unit(candidate, org_unit_id)
     if parent_id is not None:
         if parent_id not in units:
             raise CorrectnessError(
@@ -2428,18 +2393,7 @@ def set_agent_deputy(
 
     candidate = schema.model_copy(deep=True)
     _require_local_org(candidate)
-    agent = candidate.org_model.agents.get(agent_id)
-    if agent is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"agent '{agent_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "agent", "name": str(agent_id)},
-                )
-            ]
-        )
+    agent = _require_agent(candidate, agent_id)
     agent.deputy_id = deputy_id
     return raise_if_invalid(candidate)
 
@@ -2511,46 +2465,16 @@ def update_agent(
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
     _require_local_org(candidate)
-    agent = candidate.org_model.agents.get(agent_id)
-    if agent is None:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    message=f"agent '{agent_id}' does not exist",
-                    code="OP.not-found",
-                    params={"kind": "agent", "name": str(agent_id)},
-                )
-            ]
-        )
+    agent = _require_agent(candidate, agent_id)
     if name is not None:
         agent.name = clean_label(name, what="agent")
     if role_ids is not None:
         for role_id in role_ids:
-            if role_id not in candidate.org_model.roles:
-                raise CorrectnessError(
-                    [
-                        ValidationFinding(
-                            rule="OP",
-                            message=f"role '{role_id}' does not exist",
-                            code="OP.not-found",
-                            params={"kind": "role", "name": str(role_id)},
-                        )
-                    ]
-                )
+            _require_role(candidate, role_id)
         agent.role_ids = role_ids
     if not isinstance(org_unit_id, _KeepSentinel):
-        if org_unit_id is not None and org_unit_id not in candidate.org_model.org_units:
-            raise CorrectnessError(
-                [
-                    ValidationFinding(
-                        rule="OP",
-                        message=f"org unit '{org_unit_id}' does not exist",
-                        code="OP.not-found",
-                        params={"kind": "org_unit", "name": str(org_unit_id)},
-                    )
-                ]
-            )
+        if org_unit_id is not None:
+            _require_org_unit(candidate, org_unit_id)
         agent.org_unit_id = org_unit_id
     if not isinstance(email, _KeepSentinel):
         agent.email = email
@@ -2754,7 +2678,7 @@ def release(schema: ProcessSchema, resolver: SchemaResolver | None = None) -> Pr
     ``resolver`` enables the cross-schema composition checks (H1: a SUBPROCESS
     must reference a RELEASED target).
 
-    Beyond structural correctness this is the **Stufe-B gate** (concept §3.4):
+    Beyond structural correctness this is the **Stufe-B gate**:
     :func:`~procworks.validator.check_executable` additionally requires every
     interactive step to carry a staff rule (B2), because a step without one is
     activated at runtime but shows up in no worklist. A draft may sit in that
@@ -2922,18 +2846,7 @@ def insert_subprocess(
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
-    anchor = _require_node(candidate, after_node_id)
-    if anchor.type is NodeType.END:
-        raise CorrectnessError(
-            [
-                ValidationFinding(
-                    rule="OP",
-                    node_id=after_node_id,
-                    message="cannot insert after END",
-                    code="OP.after-end",
-                )
-            ]
-        )
+    _require_insert_anchor(candidate, after_node_id)
     edge = _single_outgoing(candidate, after_node_id)
     successor_id = edge.target
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Four eyes: nobody approves their own work via "Vorgesetzte:r" (Nachtest 2026-09-27, NT-03).
+"""Four eyes: nobody approves their own work via "Vorgesetzte:r".
 
 In the demo, Tom heads "Vertrieb". He filed a leave request and was then the
 only one allowed to approve it: the rule "supervisor of the performer of
@@ -97,7 +97,7 @@ def test_employee_is_approved_by_the_head_of_their_unit() -> None:
 
 
 def test_unit_head_is_approved_by_the_head_above_not_by_themself() -> None:
-    """The NT-03 case: Tom (head of Vertrieb) approving his own leave."""
+    """Tom (head of Vertrieb) must not approve his own leave."""
 
     assert _approvers("chef") == {"boss"}
 
@@ -107,7 +107,7 @@ def test_unit_without_head_goes_to_the_head_above() -> None:
 
 
 def test_top_head_has_nobody_above_and_is_not_their_own_approver() -> None:
-    """Nobody above: an empty set -- shown as "Niemand zuständig" (VAL-09)."""
+    """Nobody above: an empty set -- shown as "Niemand zuständig"."""
 
     rel, antrag, genehmigen = _schema()
     # "boss" may not file via the Antrag rule; record the performer directly.

@@ -11,7 +11,7 @@ through the correctness validator before it is returned: an unstructured BPMN
 graph (e.g. arbitrary or inclusive-OR gateways) is rejected, never stored as an
 incorrect model.
 
-The mapping covers the semantic model plus, since the Nachtest 2026-09-22, the
+The mapping covers the semantic model plus the
 *drawn* diagram: an export carries lanes (one per staff rule), diagram
 interchange (BPMNDI shapes, edges and lane bands) and the ProcWorks extension
 that round-trips everything BPMN cannot say -- staff rules, the organisation
@@ -47,8 +47,9 @@ from __future__ import annotations
 import json
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Container, Mapping
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from procworks.model import (
     AccessMode,
@@ -115,8 +116,8 @@ class BpmnError(ValueError):
     """Raised when a BPMN document cannot be mapped onto the checked subset.
 
     ``str(exc)`` stays the technical English message. ``code``/``params`` let
-    the web client explain the refusal in German (Nachtest 2026-09-27, NT-07:
-    "unsupported BPMN element 'inclusiveGateway'" was shown raw).
+    the web client explain the refusal in German instead of showing
+    "unsupported BPMN element 'inclusiveGateway'" raw.
     """
 
     def __init__(
@@ -158,11 +159,11 @@ def export_bpmn(schema: ProcessSchema) -> str:
     ``conditionExpression`` (the exit flow stays uncaptioned: on re-import the
     back flow is dropped, and only edges leaving an XOR split may carry a
     caption). The structured ``LoopDecision`` itself round-trips through the
-    ProcWorks extension (Schleifen-Konzept §8, stage S3).
+    ProcWorks extension (stage S3).
 
     Three things the export carries beyond the bare control flow, because a
     foreign tool is otherwise handed a document it cannot draw and a re-import
-    loses half the model (Nachtest 2026-09-22, defect 4):
+    loses half the model:
 
     * **Lanes** -- one ``bpmn:lane`` per distinct staff rule, named by
       :func:`~procworks.model.staff_rule_text`, so the document shows who does
@@ -217,12 +218,7 @@ def export_bpmn(schema: ProcessSchema) -> str:
         )
         flows.append((flow_id, edge.source, edge.target))
         if edge.condition:
-            condition = ET.SubElement(
-                flow,
-                f"{{{BPMN_NS}}}conditionExpression",
-                {f"{{{XSI_NS}}}type": "bpmn:tFormalExpression"},
-            )
-            condition.text = edge.condition
+            _condition_expression(flow, edge.condition)
     flows.extend(_export_loop_back_flows(process, schema))
     _export_diagram(definitions, schema, flows, lanes)
     ET.indent(definitions)
@@ -322,13 +318,28 @@ def _export_loop_back_flows(
             element.name if element is not None else decision.discriminator,
             decision,
         )
-        condition = ET.SubElement(
-            flow,
-            f"{{{BPMN_NS}}}conditionExpression",
-            {f"{{{XSI_NS}}}type": "bpmn:tFormalExpression"},
-        )
-        condition.text = caption
+        _condition_expression(flow, caption)
     return emitted
+
+
+def _condition_expression(flow: ET.Element, text: str) -> None:
+    """Attach a ``bpmn:conditionExpression`` carrying *text* to a sequence flow.
+
+    The one place that writes a flow condition -- for the XOR branch captions
+    as well as for the derived loop-back predicate -- so both are typed the same
+    way (``xsi:type="bpmn:tFormalExpression"``) and the import reads them back
+    through the same :func:`_condition_of`.
+
+    :param flow: the ``bpmn:sequenceFlow`` element to extend
+    :param text: the caption, stored verbatim as the element text
+    """
+
+    condition = ET.SubElement(
+        flow,
+        f"{{{BPMN_NS}}}conditionExpression",
+        {f"{{{XSI_NS}}}type": "bpmn:tFormalExpression"},
+    )
+    condition.text = text
 
 
 def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
@@ -339,7 +350,7 @@ def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
     extension so an exported document re-imports to the very same,
     still-correct schema.
 
-    **Staffing travels with it** (since the Nachtest 2026-09-22, defect 4): the
+    **Staffing travels with it**: the
     staff rules *and* the organisation they resolve against. Rules alone would
     not survive -- the validating import would reject them under Z1/Z2 because
     the target has no matching roles, units or agents. The organisation is
@@ -357,53 +368,31 @@ def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
     payload: dict[str, object] = {
         "data_elements": [e.model_dump(mode="json") for e in schema.data_elements.values()],
         "data_accesses": [a.model_dump(mode="json") for a in schema.data_accesses],
-        "xor_decisions": {
-            nid: d.model_dump(mode="json") for nid, d in schema.xor_decisions.items()
-        },
-        "loop_decisions": {
-            nid: d.model_dump(mode="json") for nid, d in schema.loop_decisions.items()
-        },
+        "xor_decisions": _dump_mapping(schema.xor_decisions),
+        "loop_decisions": _dump_mapping(schema.loop_decisions),
         # K4 sync edges are no BPMN sequence flows (ordering-only); they
         # round-trip through the extension like the structured decisions.
         "sync_edges": [
             {"source": e.source, "target": e.target} for e in sync_edges
         ],
-        "forms": {nid: f.model_dump(mode="json") for nid, f in schema.forms.items()},
-        "connectors": {
-            cid: c.model_dump(mode="json") for cid, c in schema.connectors.items()
-        },
-        "staff_rules": {
-            nid: r.model_dump(mode="json") for nid, r in schema.staff_rules.items()
-        },
+        "forms": _dump_mapping(schema.forms),
+        "connectors": _dump_mapping(schema.connectors),
+        "staff_rules": _dump_mapping(schema.staff_rules),
         "org_model": (
             schema.org_model.model_dump(mode="json")
             if (schema.org_model.roles or schema.org_model.org_units or schema.org_model.agents)
             else None
         ),
         "org_model_id": schema.org_model_id,
-        "service_bindings": {
-            nid: b.model_dump(mode="json") for nid, b in schema.service_bindings.items()
-        },
-        "activity_templates": {
-            tid: t.model_dump(mode="json")
-            for tid, t in schema.activity_templates.items()
-        },
-        "node_priorities": {
-            nid: p.model_dump(mode="json") for nid, p in schema.node_priorities.items()
-        },
-        "mail_bindings": {
-            nid: m.model_dump(mode="json") for nid, m in schema.mail_bindings.items()
-        },
-        "time_constraints": {
-            nid: t.model_dump(mode="json") for nid, t in schema.time_constraints.items()
-        },
-        "escalation_policies": {
-            nid: p.model_dump(mode="json")
-            for nid, p in schema.escalation_policies.items()
-        },
+        "service_bindings": _dump_mapping(schema.service_bindings),
+        "activity_templates": _dump_mapping(schema.activity_templates),
+        "node_priorities": _dump_mapping(schema.node_priorities),
+        "mail_bindings": _dump_mapping(schema.mail_bindings),
+        "time_constraints": _dump_mapping(schema.time_constraints),
+        "escalation_policies": _dump_mapping(schema.escalation_policies),
         "deadline_seconds": schema.deadline_seconds,
         "is_library_subprocess": schema.is_library_subprocess,
-        # Presentation, but lost otherwise: which elements name an instance (VAL-17).
+        # Presentation, but lost otherwise: which elements name an instance.
         "display_fields": list(schema.display_fields),
     }
     # Empty layers are left out entirely; a pure control-flow model therefore
@@ -416,14 +405,27 @@ def _export_procworks_model(process: ET.Element, schema: ProcessSchema) -> None:
     model.text = json.dumps(payload)
 
 
+def _dump_mapping(mapping: Mapping[str, BaseModel]) -> dict[str, object]:
+    """JSON-ready copy of an id-keyed model layer for the ProcWorks extension.
+
+    Keeps the key order of the schema (so the same schema always exports the
+    same bytes) and dumps each value in JSON mode -- the form the import's
+    type adapters read back.
+
+    :param mapping: e.g. ``schema.forms`` (node id -> ``Form``)
+    :returns: key -> ``model_dump(mode="json")``; empty for an empty layer, which
+        :func:`_export_procworks_model` then leaves out entirely
+    """
+
+    return {key: value.model_dump(mode="json") for key, value in mapping.items()}
+
+
 # --- diagram interchange (BPMNDI) ----------------------------------------
 #
 # A BPMN document without diagram interchange is semantically complete but
-# *invisible*: foreign tools open it and show an empty canvas (Nachtest
-# 2026-09-22, defect 4). The layout below is deliberately simple and
-# deterministic -- the same schema always yields the same picture -- and it is
-# presentation only: nothing here ever reaches the model, and the import ignores
-# the whole diagram.
+# *invisible*: foreign tools open it and show an empty canvas. The layout below is deliberately
+# simple and deterministic -- the same schema always yields the same picture -- and it is
+# presentation only: nothing here ever reaches the model, and the import ignores the whole diagram.
 
 #: Shape size per node type, in the proportions BPMN tools expect.
 _SHAPE_SIZE: dict[NodeType, tuple[int, int]] = {
@@ -705,10 +707,17 @@ def _condition_of(flow: ET.Element) -> str | None:
     return None
 
 
-def _sync_edges_of(process: ET.Element) -> list[dict[str, str]]:
-    """Parse the K4 sync-edge list from the ProcWorks extension (or [])."""
+def _sync_edges_of(model: dict[str, object]) -> list[dict[str, str]]:
+    """Read the K4 sync-edge list from the parsed ProcWorks extension (or []).
 
-    model = _procworks_model_of(process)
+    Malformed entries (not an object, or ``source``/``target`` not strings) are
+    skipped rather than rejected here; whether the remaining edges are sound is
+    the validator's decision (K4).
+
+    :param model: the payload as returned by :func:`_procworks_model_of`
+    :returns: ``{"source", "target"}`` dicts in document order
+    """
+
     entries = model.get("sync_edges", [])
     result: list[dict[str, str]] = []
     if isinstance(entries, list):
@@ -805,7 +814,7 @@ def import_bpmn(
 
     # Implicit splits/merges (a task with several outgoing or incoming flows)
     # become explicit gateways first -- they are ordinary BPMN, and the
-    # block-structure check then sees what the document means (VAL-10).
+    # block-structure check then sees what the document means.
     flows = _normalize_implicit_gateways(raw_nodes, flows)
 
     # Loop recognition must run before node-type resolution: after dropping a
@@ -813,11 +822,7 @@ def import_bpmn(
     # split nor a pure join.
     flows, loop_roles = _split_loop_back_flows(raw_nodes, flows)
 
-    indegree = {nid: 0 for nid in raw_nodes}
-    outdegree = {nid: 0 for nid in raw_nodes}
-    for source, target, _ in flows:
-        outdegree[source] += 1
-        indegree[target] += 1
+    indegree, outdegree = _flow_degrees(raw_nodes, flows)
 
     nodes: dict[str, Node] = {}
     for node_id, (local, label) in raw_nodes.items():
@@ -830,20 +835,22 @@ def import_bpmn(
         ControlEdge(source=s, target=t, type=EdgeType.CONTROL, condition=c)
         for s, t, c in flows
     ]
-    for entry in _sync_edges_of(process):
+    # Parsed once, here -- the first place that needs it (sync edges), so a
+    # malformed payload is still reported at the same point of the import.
+    model = _procworks_model_of(process)
+    for entry in _sync_edges_of(model):
         edges.append(
             ControlEdge(
                 source=entry["source"], target=entry["target"], type=EdgeType.SYNC
             )
         )
-    model = _procworks_model_of(process)
     data_elements = {
         e.id: e for e in _DATA_ELEMENTS.validate_python(model.get("data_elements", []))
     }
     data_accesses = _DATA_ACCESSES.validate_python(model.get("data_accesses", []))
     xor_decisions = _XOR_DECISIONS.validate_python(model.get("xor_decisions", {}))
     # Splits the extension does not decide: read the decision from the
-    # standard conditionExpression texts (VAL-10). Adds missing discriminator
+    # standard conditionExpression texts. Adds missing discriminator
     # elements and, where nothing writes one, a write at the step before.
     _decisions_from_conditions(nodes, flows, data_elements, data_accesses, xor_decisions)
     loop_decisions = _LOOP_DECISIONS.validate_python(model.get("loop_decisions", {}))
@@ -895,7 +902,46 @@ def import_bpmn(
     return raise_if_invalid(schema, resolver)
 
 
-# --- normalisation of standard BPMN (Validierung 2026-09-25, VAL-10) ---------
+# --- normalisation of standard BPMN ---------
+
+
+def _flow_degrees(
+    raw_nodes: Mapping[str, object],
+    flows: list[tuple[str, str, str | None]],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """In- and out-degree of every raw flow node over the given sequence flows.
+
+    :param raw_nodes: the flow nodes of the document (only the ids are used);
+        every flow endpoint must be one of them -- :func:`import_bpmn` checks
+        that before the first call
+    :param flows: ``(source, target, condition)`` triples
+    :returns: ``(indegree, outdegree)``, each with an entry for every node
+    """
+
+    indegree = dict.fromkeys(raw_nodes, 0)
+    outdegree = dict.fromkeys(raw_nodes, 0)
+    for source, target, _ in flows:
+        outdegree[source] += 1
+        indegree[target] += 1
+    return indegree, outdegree
+
+
+def _unique_id(base: str, taken: Container[str]) -> str:
+    """*base* itself, or the first ``base_2``, ``base_3``, ... not yet taken.
+
+    Used wherever the import has to invent an id next to the document's own
+    (inserted gateways, derived discriminator elements), so an invented id never
+    shadows an existing one.
+
+    :param base: the preferred id
+    :param taken: the ids already in use (checked with ``in`` only)
+    :returns: the first free candidate
+    """
+
+    candidate, n = base, 2
+    while candidate in taken:
+        candidate, n = f"{base}_{n}", n + 1
+    return candidate
 
 
 def _normalize_implicit_gateways(
@@ -925,19 +971,13 @@ def _normalize_implicit_gateways(
     def is_gateway(node_id: str) -> bool:
         return raw_nodes[node_id][0] in _GATEWAY_TAGS
 
-    def fresh(base: str) -> str:
-        candidate, n = base, 2
-        while candidate in raw_nodes:
-            candidate, n = f"{base}_{n}", n + 1
-        return candidate
-
     result = list(flows)
     for node_id in list(raw_nodes):
         if is_gateway(node_id):
             continue
         outgoing = [f for f in result if f[0] == node_id]
         if len(outgoing) > 1 and all(f[2] is None for f in outgoing):
-            split = fresh(f"{node_id}_split")
+            split = _unique_id(f"{node_id}_split", raw_nodes)
             raw_nodes[split] = ("parallelGateway", "")
             result = [f for f in result if f[0] != node_id]
             result.append((node_id, split, None))
@@ -949,7 +989,7 @@ def _normalize_implicit_gateways(
         if len(incoming) > 1:
             common = _nearest_common_split(raw_nodes, result, [f[0] for f in incoming])
             kind = raw_nodes[common][0] if common is not None else "exclusiveGateway"
-            join = fresh(f"{node_id}_join")
+            join = _unique_id(f"{node_id}_join", raw_nodes)
             raw_nodes[join] = (kind, "")
             result = [f for f in result if f[1] != node_id]
             result += [(f[0], join, f[2]) for f in incoming]
@@ -1047,7 +1087,7 @@ def _decisions_from_conditions(
     data_accesses: list[DataAccess],
     xor_decisions: dict[str, XorDecision],
 ) -> None:
-    """Derive missing XOR decisions from ``conditionExpression`` texts (VAL-10).
+    """Derive missing XOR decisions from ``conditionExpression`` texts.
 
     The ProcWorks extension carries the structured partition; a document
     without it (a foreign tool, or an export whose extension was stripped)
@@ -1061,7 +1101,7 @@ def _decisions_from_conditions(
     3. the discriminator is the data element with that name or id, or a new
        INSTANCE element of the fitting type;
     4. if **no** step writes it, the ACTIVITY directly before the split gets a
-       mandatory WRITE -- the same default the XOR dialog uses (VAL-15). With
+       mandatory WRITE -- the same default the XOR dialog uses. With
        any other predecessor nothing is added and D1/K7 decide.
 
     Mutates the passed collections; correctness is still decided solely by
@@ -1091,10 +1131,10 @@ def _decisions_from_conditions(
             (e for e in data_elements.values() if disc_name in (e.name, e.id)), None
         )
         if element is None:
-            element_id = re.sub(r"[^A-Za-z0-9_]+", "_", disc_name).strip("_") or "merkmal"
-            base, n = element_id, 2
-            while element_id in data_elements:
-                element_id, n = f"{base}_{n}", n + 1
+            element_id = _unique_id(
+                re.sub(r"[^A-Za-z0-9_]+", "_", disc_name).strip("_") or "merkmal",
+                data_elements,
+            )
             element = DataElement(
                 id=element_id,
                 name=disc_name,
@@ -1188,11 +1228,7 @@ def _split_loop_back_flows(
     K6b in the validating import (never stored undecidable).
     """
 
-    indegree = {nid: 0 for nid in raw_nodes}
-    outdegree = {nid: 0 for nid in raw_nodes}
-    for source, target, _ in flows:
-        outdegree[source] += 1
-        indegree[target] += 1
+    indegree, outdegree = _flow_degrees(raw_nodes, flows)
 
     def is_exclusive(node_id: str) -> bool:
         return raw_nodes[node_id][0] == "exclusiveGateway"

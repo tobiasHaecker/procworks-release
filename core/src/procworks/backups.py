@@ -3,8 +3,8 @@
 
 The datensicherung itself lives entirely on the operations layer (the Compose
 ``backup`` service / Helm ``CronJob`` running ``deploy/backup/*.sh``). The API
-deliberately does **not** run ``pg_dump`` and, per the concept's security rule
-(§9, *"kein Web-/API-Zugriff auf das Backup-Verzeichnis"*), it also never mounts
+deliberately does **not** run ``pg_dump`` and, per the security rule
+(*"kein Web-/API-Zugriff auf das Backup-Verzeichnis"*), it also never mounts
 the volume that holds the actual dumps.
 
 Instead the backup scheduler publishes a small **metadata** file
@@ -104,6 +104,41 @@ def _coerce_entry(raw: object) -> BackupEntry | None:
         return BackupEntry(file=file)
 
 
+def _read_index(index_path: Path) -> dict[str, object] | None:
+    """Lese den veröffentlichten Metadaten-Index als JSON-Objekt.
+
+    Liest ausschließlich die Index-Datei im Control-Verzeichnis, nie das
+    Dump-Volume.
+
+    Parameters
+    ----------
+    index_path:
+        Pfad zu ``backups-index.json`` im Control-Verzeichnis.
+
+    Returns
+    -------
+    Das geparste Objekt, oder ``None``, wenn die Datei fehlt, nicht lesbar ist,
+    kein gültiges JSON enthält oder kein JSON-Objekt auf oberster Ebene ist.
+    Wirft nie — der Aufrufer meldet in all diesen Fällen ``available = false``.
+    """
+    if not index_path.is_file():
+        return None
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _str_or_none(value: object) -> str | None:
+    """Gib ``value`` zurück, wenn es ein nicht-leerer String ist, sonst ``None``.
+
+    Der Index stammt aus einem Shell-Skript; leere oder falsch typisierte
+    Zeitstempel sollen als „unbekannt“ erscheinen statt die Antwort zu brechen.
+    """
+    return value if isinstance(value, str) and value else None
+
+
 def load_status(directory: Path | None) -> BackupsStatus:
     """Read the published index and return a :class:`BackupsStatus`.
 
@@ -114,16 +149,8 @@ def load_status(directory: Path | None) -> BackupsStatus:
     if directory is None:
         return BackupsStatus(available=False)
 
-    index_path = directory / INDEX_FILE
-    if not index_path.is_file():
-        return BackupsStatus(available=False, directory=str(directory))
-
-    try:
-        data = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return BackupsStatus(available=False, directory=str(directory))
-
-    if not isinstance(data, dict):
+    data = _read_index(directory / INDEX_FILE)
+    if data is None:
         return BackupsStatus(available=False, directory=str(directory))
 
     raw_backups = data.get("backups")
@@ -133,9 +160,6 @@ def load_status(directory: Path | None) -> BackupsStatus:
             entry = _coerce_entry(item)
             if entry is not None:
                 entries.append(entry)
-
-    def _str_or_none(value: object) -> str | None:
-        return value if isinstance(value, str) and value else None
 
     return BackupsStatus(
         available=True,

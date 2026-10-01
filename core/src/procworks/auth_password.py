@@ -5,7 +5,7 @@ This is the second concrete :class:`procworks.auth.AuthBackend`. It exists so a
 deployment can offer a real login screen (username + password, self-service
 password change) without an external identity provider.
 
-Design decisions (see ``docs/Auth-Konzept.md`` section 11):
+Design decisions:
 
 * **Credentials are not part of the org model.** An :class:`procworks.model.Agent`
   is a *modelling* artefact (CbC-validated, persisted, shareable across models);
@@ -37,7 +37,7 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 from procworks.auth import ALL_ROLES, INTEGRATION, AuthError, Principal, bearer_token
-from procworks.auth_token import TokenAuthBackend, load_token_config
+from procworks.auth_token import TokenAuthBackend, _digest, load_token_config
 
 #: Login used for the auto-provisioned initial admin when none is configured.
 DEFAULT_ADMIN_LOGIN = "admin"
@@ -227,10 +227,6 @@ def create_credential_store() -> CredentialStore:
     return InMemoryCredentialStore()
 
 
-def _digest(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
 class _SessionInfo:
     __slots__ = ("login", "expires_at")
 
@@ -241,7 +237,7 @@ class _SessionInfo:
 
 @runtime_checkable
 class SessionStore(Protocol):
-    """Where login sessions live (Validierung 2026-09-25, VAL-11).
+    """Where login sessions live.
 
     Keys are the SHA-256 **digests** of the bearer tokens -- the clear token is
     never stored, so a leaked table cannot be replayed. Sessions used to live
@@ -363,18 +359,8 @@ class PasswordAuthBackend:
         display_name = os.environ.get("PROCWORKS_ADMIN_NAME")
 
         if login and password:
-            if self._store.get_user(login) is not None:
-                return
-            self._store.put_user(
-                User(
-                    login=login,
-                    password_hash=hash_password(password),
-                    subject=login,
-                    roles=frozenset({"admin"}),
-                    display_name=display_name,
-                    must_change=True,
-                )
-            )
+            if self._store.get_user(login) is None:
+                self._put_initial_admin(login, password, display_name)
             return
 
         # No explicit admin password configured: only seed when the store is
@@ -384,6 +370,29 @@ class PasswordAuthBackend:
             return
         login = login or DEFAULT_ADMIN_LOGIN
         password = generate_initial_password()
+        self._put_initial_admin(login, password, display_name)
+        _logger.warning(
+            "Initial admin account created (login=%r, temporary password=%r). "
+            "Log in and change this password immediately; it will not be shown "
+            "again.",
+            login,
+            password,
+        )
+
+    def _put_initial_admin(
+        self, login: str, password: str, display_name: str | None
+    ) -> None:
+        """Store the initial administrator of :meth:`_bootstrap_admin`.
+
+        Both seeding paths create the same kind of account: subject equal to
+        the login, only the role ``admin``, and ``must_change`` set so the
+        password -- configured or generated -- is replaced on first login.
+
+        :param login: login (and subject) of the new administrator.
+        :param password: clear-text initial password; only its hash is stored.
+        :param display_name: optional display name (``PROCWORKS_ADMIN_NAME``).
+        """
+
         self._store.put_user(
             User(
                 login=login,
@@ -394,13 +403,6 @@ class PasswordAuthBackend:
                 must_change=True,
             )
         )
-        _logger.warning(
-            "Initial admin account created (login=%r, temporary password=%r). "
-            "Log in and change this password immediately; it will not be shown "
-            "again.",
-            login,
-            password,
-        )
 
     # -- AuthBackend protocol ----------------------------------------------
 
@@ -409,27 +411,27 @@ class PasswordAuthBackend:
 
         People log in with a password and get a session token. A worker or an
         ERP bridge cannot do that sensibly (sessions expire, a password is a
-        person's secret) -- before the Nachtest 2026-09-27 (NT-13) the only way
-        for an integration in the delivered stack was a personal operator
-        account. When static machine tokens are configured
-        (:func:`machine_tokens_from_env`), an unknown session token is tried
-        against them; they carry only the ``integration`` role with its scopes.
+        person's secret) -- without machine tokens an integration in the
+        delivered stack would need a personal operator account. When static machine tokens are
+        configured (:func:`machine_tokens_from_env`), an unknown session token is tried against
+        them; they carry only the ``integration`` role with its scopes.
         """
 
         token = bearer_token(authorization)
         if token is None:
             raise AuthError("missing session token")
-        session = self._sessions.get(_digest(token))
+        digest = _digest(token)
+        session = self._sessions.get(digest)
         if session is None and self._machine_tokens is not None:
             return self._machine_tokens.authenticate(authorization)
         if session is None:
             raise AuthError("invalid session")
         if session.expires_at <= datetime.now(UTC):
-            self._sessions.delete(_digest(token))
+            self._sessions.delete(digest)
             raise AuthError("session expired")
         user = self._store.get_user(session.login)
         if user is None:
-            self._sessions.delete(_digest(token))
+            self._sessions.delete(digest)
             raise AuthError("unknown user")
         return _principal_of(user)
 
@@ -522,7 +524,7 @@ class PasswordAuthBackend:
             )
         )
         # A reset usually means "this account is no longer safe": sessions now
-        # survive restarts (VAL-11), so they must end here explicitly.
+        # survive restarts, so they must end here explicitly.
         self.revoke_sessions(login)
         return initial
 
@@ -532,7 +534,7 @@ class PasswordAuthBackend:
         self._sessions.delete_for_login(login)
 
 
-# -- brute-force throttling (Validierung 2026-09-25, VAL-06) ------------------
+# -- brute-force throttling ------------------
 
 
 class _Strikes(BaseModel):
@@ -546,8 +548,7 @@ class _Strikes(BaseModel):
 class LoginThrottle:
     """Slow down password guessing per login **and** per client address.
 
-    Before this, 26 wrong passwords against the admin account in a row were all
-    answered at once with 401 (VAL-06). The policy:
+    Wrong passwords must not be answerable at full speed. The policy:
 
     * ``free_attempts`` consecutive failures per key cost nothing (typos);
     * every further failure locks the key for ``base_lock`` doubled per extra
@@ -634,7 +635,7 @@ class LoginThrottle:
 
 
 def machine_tokens_from_env() -> TokenAuthBackend | None:
-    """Static machine tokens for the password mode, or ``None`` (NT-13).
+    """Static machine tokens for the password mode, or ``None``.
 
     Same configuration as the token mode (``PROCWORKS_TOKENS`` or
     ``PROCWORKS_TOKENS_JSON``), with one restriction: every entry must carry

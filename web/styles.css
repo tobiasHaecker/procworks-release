@@ -244,8 +244,8 @@ body {
 /* ---- Panels / cards ---- */
 .panel { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; margin-bottom: 18px; }
 .panel-h { padding: 13px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; row-gap: 8px; }
-/* VAL-30: Die Kopfzeile der Modellieren-Sicht lief rechts ueber („Pruefinstanz“
-   abgeschnitten) -- sie bricht jetzt um. Lange Bezeichnungen sprengen keinen
+/* Die Kopfzeile der Modellieren-Sicht bricht um, statt rechts ueberzulaufen
+   („Pruefinstanz“ abgeschnitten). Lange Bezeichnungen sprengen keinen
    Dialog mehr, und Links sind auch im dunklen Schema lesbar (vorher Browser-
    Standardblau auf dunklem Grund). Farben nur ueber :root-Variablen. */
 .modal-h h3, .modal-b .field, .modal-b p { overflow-wrap: anywhere; }
@@ -275,10 +275,10 @@ textarea { resize: vertical; min-height: 90px; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: end; }
 .field-help { font-size: 11px; color: var(--txt-dim); opacity: .8; }
-/* Fehlerhaftes Feld der Aufgabenmaske (VAL-22): Rahmen und Hinweis am Feld. */
+/* Fehlerhaftes Feld der Aufgabenmaske: Rahmen und Hinweis am Feld. */
 .field-invalid input, .field-invalid select, .field-invalid textarea { border-color: var(--red); }
 .field-error-msg { font-size: 11px; color: var(--red); }
-/* Benennende Werte unter Aufgabe bzw. Vorgang (VAL-17). */
+/* Benennende Werte unter Aufgabe bzw. Vorgang. */
 .task-context { font-size: 11px; color: var(--txt-dim); }
 /* Ein Feld ueber die volle Dialogbreite: Tabellennamen und andere lange
    Eingaben waren im halbierten Raster zu schmal, um sie lesen zu koennen. */
@@ -382,7 +382,7 @@ tr.hl-row td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 }
 .canvas-fit:hover { color: var(--txt); opacity: 1; border-color: var(--accent); }
 .canvas-fit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-/* Randpfeile: das Modell geht links/rechts weiter (VAL-23). Nur Hinweis --
+/* Randpfeile: das Modell geht links/rechts weiter. Nur Hinweis --
    Klicks gehen durch, verschoben wird wie immer per Ziehen oder Rad. */
 .canvas-more {
   position: absolute; bottom: 8px; z-index: 2; pointer-events: none;
@@ -417,8 +417,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .ngateway rect { fill: var(--amber-soft); stroke: var(--amber); }
 .nsub rect { fill: var(--purple-soft); stroke: var(--purple); }
 .s-COMPLETED rect { fill: var(--green-soft); stroke: var(--green); }
-.s-RUNNING rect { fill: var(--accent-soft); stroke: var(--accent); }
-.s-ACTIVATED rect { fill: var(--accent-soft); stroke: var(--accent); }
+.s-RUNNING rect, .s-ACTIVATED rect { fill: var(--accent-soft); stroke: var(--accent); }
 .s-SKIPPED rect { fill: var(--gray-soft); stroke: var(--gray); opacity: .6; }
 .gnode.selected rect { stroke: var(--graph-sel-stroke); stroke-width: 2.5px; }
 
@@ -663,7 +662,6 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .id-row { display: grid; grid-template-columns: 100px 1fr; gap: 8px; font-size: 13px; }
 .id-row .id-label { color: var(--txt-dim); }
 .id-row .id-value { font-weight: 600; }
-.pill.pill-amber { background: var(--amber-soft); color: var(--amber); }
 
 /* ---- Modellieren: Datenherkunft-Ueberlagerung (gestrichelt) ---- */
 .gprov {
@@ -677,12 +675,9 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   stroke: var(--gray); stroke-width: 1.4px; fill: none;
   opacity: .75; pointer-events: none;
 }
-.gloop-txt {
-  font-size: 9px; fill: var(--muted); pointer-events: none;
-  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
-}
-/* Iterationszähler unter dem Schleifenende (nur Laufzeit-Sichten). */
-.gloop-iter {
+/* Beschriftung des Bogens und Iterationszähler unter dem Schleifenende (nur
+   Laufzeit-Sichten) teilen sich dieselbe Darstellung. */
+.gloop-txt, .gloop-iter {
   font-size: 9px; fill: var(--muted); pointer-events: none;
   paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
 }
@@ -712,7 +707,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
    Die Karte liegt als Overlay UEBER dem Canvas (nicht als Grid-Nachbar), damit
    die Canvas-Groesse beim Aus-/Abwaehlen konstant bleibt und das Einpassen
    nicht bei jeder Auswahl neu rechnen muss. Alle Farben ueber die Variablen --
-   sonst bricht die helle Variante (siehe CLAUDE.md). */
+   sonst bricht die helle Variante. */
 .model-canvas .canvas-wrap { height: clamp(420px, 66vh, 900px); }
 /* Bezugsrahmen der Karte: ohne `position: relative` haengt sie sich an den
    naechsten positionierten Vorfahren -- im Zweifel das Fenster -- und liegt
@@ -837,9 +832,8 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .pal-chip {
   display: flex; align-items: center; gap: 8px;
   padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
-  background: var(--bg-elev2); font-size: 13px;
+  background: var(--bg-elev2); font-size: 13px; cursor: default;
 }
-.pal-chip[onclick], .pal-chip { cursor: default; }
 .pal-chip.active { border-color: var(--amber); background: var(--amber-soft); }
 .pal-chip-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pal-chip-sub { font-size: 11px; color: var(--txt-dim); white-space: nowrap; }
@@ -858,7 +852,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .pal-bind.disabled { border-color: var(--line); background: transparent; color: var(--txt-dim); cursor: not-allowed; }
 
 /* Licensing (agent page): quota bar + staged renewal banner. Colours strictly
-   via CSS variables so the light theme keeps working (see CLAUDE.md). Hidden by
+   via CSS variables so the light theme keeps working. Hidden by
    default -- these only render once the backend reports enforced licensing. */
 .lic-bar {
   height: 10px; border-radius: 999px; background: var(--gray-soft);
@@ -1083,15 +1077,14 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 }
 
 
-/* Z4 (Priorisierungs-Konzept §7): ρ-Verbrauchsbalken in Arbeitslisten.
+/* Z4: ρ-Verbrauchsbalken in Arbeitslisten.
    Farben ausschließlich über die Themen-Variablen (helle Variante!). */
 .due-wrap { display: inline-flex; flex-direction: column; gap: 3px; }
 .rho-bar { display: block; width: 90px; height: 4px; border-radius: 2px;
   background: var(--gray-soft); overflow: hidden; }
 .rho-fill { display: block; height: 100%; border-radius: 2px;
   background: var(--green); }
-.rho-fill.rho-warning { background: var(--amber); }
-.rho-fill.rho-at_risk { background: var(--amber); }
+.rho-fill.rho-warning, .rho-fill.rho-at_risk { background: var(--amber); }
 .rho-fill.rho-overdue { background: var(--red); }
 .task-filter { margin-left: auto; }
 
@@ -1123,7 +1116,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .gnode.d-failed rect { stroke: var(--red); stroke-width: 2.5; }
 .gnode.d-failed .gstate { fill: var(--red); }
 
-/* Passwort der Beispiel-Anmeldungen, einmal nach "Beispieldaten laden" (NT-04):
+/* Passwort der Beispiel-Anmeldungen, einmal nach "Beispieldaten laden":
    gut lesbar und mit einem Klick markierbar. */
 .example-password {
   display: inline-block;
@@ -1137,7 +1130,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   user-select: all;
 }
 
-/* Werte, die ein Schritt ohne Maske nur liest (NT-06): kompakt als „Name: Wert“. */
+/* Werte, die ein Schritt ohne Maske nur liest: kompakt als „Name: Wert“. */
 .read-values {
   display: grid;
   grid-template-columns: max-content 1fr;
@@ -1152,7 +1145,7 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .read-values dd { margin: 0; color: var(--txt); font-weight: 600; }
 
 /* Rollenwechsel der Demo-Leiste auf dem Handy: eine Auswahlliste statt vieler
-   Knoepfe (NT-05), damit die Leiste flach bleibt. */
+   Knoepfe, damit die Leiste flach bleibt. */
 .demo-switch-select {
   max-width: 100%;
   padding: 4px 8px;

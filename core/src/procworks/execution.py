@@ -89,10 +89,9 @@ class ExecutionError(Exception):
 
     ``message`` stays the technical English base (tests, API users, logs).
     ``code``/``params`` let a client word it -- the web client formulates it in
-    its one catalogue ``FINDING_TEXTS`` like any rule finding. Before the
-    Nachtest 2026-09-27 (NT-07) the 409 carried only the message, and a
-    colleague who claimed the same task a second earlier was shown
-    "activity 'act_1' is already claimed by 'a-tom' (W1)". ``params`` name
+    its one catalogue ``FINDING_TEXTS`` like any rule finding. With the message
+    alone, a colleague who claimed the same task a second earlier would be
+    shown "activity 'act_1' is already claimed by 'a-tom' (W1)". ``params`` name
     steps by their label (``step``) and agents by id (``agent``), never only
     by node id: the client may be showing another schema than the instance's.
     """
@@ -128,7 +127,7 @@ def _new_instance_id() -> str:
     """Return a fresh ``instance_<n>`` id from the shared, store-guarded sequence.
 
     Never a process-local counter again: that restarted at 1 after every API
-    restart and overwrote stored instances (NT-01, see :mod:`procworks.ids`).
+    restart and would overwrite stored instances (see :mod:`procworks.ids`).
     """
 
     return ids.INSTANCE_IDS.new("instance")
@@ -323,11 +322,8 @@ def return_activity(
             params={"step": _step(schema, node_id), "agent": str(holder)},
         )
     result = instance.model_copy(deep=True)
-    result.claimed_by.pop(node.id, None)
-    result.node_claimed_at.pop(node.id, None)
+    _release_claim(result, node.id)
     result.node_details.pop(node.id, None)  # returning ends a pause (E2)
-    result.node_paused_seconds.pop(node.id, None)  # net-time credit too
-    result.node_suspended_at.pop(node.id, None)
     if result.node_states[node.id] is NodeState.RUNNING:
         result.node_states[node.id] = NodeState.ACTIVATED
     return result
@@ -346,7 +342,7 @@ def start_activity(
     Starting presupposes ownership (W4): an unclaimed step is claimed
     implicitly for ``agent_id`` (Offered -> Started collapses Allocated), a
     step claimed by someone else is refused. The RUNNING marking is what the
-    §6.2.1 state machine calls *Started*.
+    worklist state machine calls *Started*.
     """
 
     claimed = claim_activity(
@@ -366,7 +362,7 @@ def _require_started_owner(
     """Collapse to the Started state under ``agent_id`` (V1/V3 helper).
 
     Suspend/fail act on a *started, owned* step; a merely offered or claimed
-    step is started implicitly (the same §6.2.1 collapse ``start_activity``
+    step is started implicitly (the same collapse ``start_activity``
     performs), while a step owned by someone else is refused there (W1).
     A FAILED step is frozen until its recovery (V4) and refuses everything.
     """
@@ -404,7 +400,7 @@ def suspend_activity(
 
     Owner-only; idempotent for a re-suspend by the owner. The base marking
     stays RUNNING (nothing propagates), the overlay blocks completion until
-    ``resume_activity`` (V2) -- the §4 automaton only finishes from RUNNING.
+    ``resume_activity`` (V2) -- the detail-state automaton only finishes from RUNNING.
     By default the clock deliberately keeps running (a pause is transparency,
     not a deadline stop -- otherwise suspending would dodge the escalation);
     only a constraint with the explicit ``pause_stops_clock`` opt-in earns
@@ -465,7 +461,7 @@ def fail_activity(
     """Mark a started ACTIVITY as failed: RUNNING -> FAILED overlay (E2, V3).
 
     Owner-only (implicit start collapse like V1); a suspended step resumes
-    first (the §4 automaton aborts only from RUNNING). The failed step is
+    first (the detail-state automaton aborts only from RUNNING). The failed step is
     frozen -- not completable, not workable -- until its recovery
     (``reset_activity``, V4): the instance waits *defined*, never undefined.
     """
@@ -519,13 +515,7 @@ def reset_activity(
             params={"step": _step(schema, node_id)},
         )
     result = instance.model_copy(deep=True)
-    result.node_details.pop(node_id, None)
-    result.node_detail_reason.pop(node_id, None)
-    result.claimed_by.pop(node_id, None)
-    result.node_claimed_at.pop(node_id, None)
-    result.escalated_stages.pop(node_id, None)
-    result.node_paused_seconds.pop(node_id, None)  # fresh clocks (net time)
-    result.node_suspended_at.pop(node_id, None)
+    _clear_activation(result, node_id)
     result.node_states[node_id] = NodeState.ACTIVATED
     return result
 
@@ -582,7 +572,7 @@ def complete_activity(
         )
     detail = instance.node_details.get(node.id)
     if detail is NodeDetailState.SUSPENDED:
-        # E2 (V2): the §4 automaton only finishes from RUNNING -- resume first.
+        # E2 (V2): the detail-state automaton only finishes from RUNNING -- resume first.
         raise ExecutionError(
             f"activity '{node_id}' is suspended -- resume it before completing",
             code="EX.suspended",
@@ -597,10 +587,7 @@ def complete_activity(
     result = instance.model_copy(deep=True)
     if agent_id is not None:
         result.performed_by[node.id] = agent_id
-    result.claimed_by.pop(node.id, None)
-    result.node_claimed_at.pop(node.id, None)
-    result.node_paused_seconds.pop(node.id, None)  # net-time credit is per activation
-    result.node_suspended_at.pop(node.id, None)
+    _release_claim(result, node.id)
     if data:
         result.data_values.update(data)
     _complete_node(result, schema, node)
@@ -695,14 +682,9 @@ def _resolve_xor_branch(
             code="EX.no-decision",
             params={},
         )
-    if decision.discriminator not in instance.data_values:
-        raise ExecutionError(
-            f"XOR split '{node.id}' needs data element "
-            f"'{decision.discriminator}' but it is not set",
-            code="EX.value-missing",
-            params={"element": _element(schema, decision.discriminator)},
-        )
-    value = instance.data_values[decision.discriminator]
+    value = _discriminator_value(
+        instance, schema, f"XOR split '{node.id}'", decision.discriminator
+    )
     target = resolve_xor_target(decision, value)
     if target is None:
         raise ExecutionError(
@@ -717,7 +699,7 @@ def _resolve_xor_branch(
 def _resolve_loop_end(
     instance: ProcessInstance, schema: ProcessSchema, node: Node
 ) -> bool:
-    """Decide a REPEAT-UNTIL loop at its LOOP_END (K6, Schleifen-Konzept §6).
+    """Decide a REPEAT-UNTIL loop at its LOOP_END (K6).
 
     Returns ``True`` when the loop repeats (block reset), ``False`` when it
     exits -- :func:`_advance` uses that for its loop safety net.
@@ -744,14 +726,9 @@ def _resolve_loop_end(
             code="EX.no-decision",
             params={},
         )
-    if decision.discriminator not in instance.data_values:
-        raise ExecutionError(
-            f"LOOP_END '{node.id}' needs data element "
-            f"'{decision.discriminator}' but it is not set",
-            code="EX.value-missing",
-            params={"element": _element(schema, decision.discriminator)},
-        )
-    value = instance.data_values[decision.discriminator]
+    value = _discriminator_value(
+        instance, schema, f"LOOP_END '{node.id}'", decision.discriminator
+    )
     repeat = resolve_loop_repeat(decision, value)
     if repeat is None:
         raise ExecutionError(
@@ -767,13 +744,7 @@ def _resolve_loop_end(
         if instance.loop_iterations.get(node.id, 0) + 2 > decision.max_iterations:
             repeat = False
     if repeat:
-        start_id = next(
-            nid
-            for nid, n in schema.nodes.items()
-            if n.type is NodeType.LOOP_START
-            and loop_block(schema, nid)[0] == node.id
-        )
-        _, body = loop_block(schema, start_id)
+        start_id, body = _loop_of_end(schema, node.id)
         _reset_loop_block(instance, schema, start_id, node.id, body)
         instance.loop_iterations[node.id] = (
             instance.loop_iterations.get(node.id, 0) + 1
@@ -781,6 +752,60 @@ def _resolve_loop_end(
         return True
     _complete_node(instance, schema, node)
     return False
+
+
+def _discriminator_value(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    subject: str,
+    discriminator: str,
+) -> object:
+    """Read the discriminator value a structured decision is evaluated on.
+
+    Shared by the XOR split (K7) and the LOOP_END (K6) resolution: both need
+    the value of their decision's discriminator element from the instance data.
+
+    ``subject`` names the deciding node for the technical message (e.g.
+    ``"XOR split 'x_1'"`` or ``"LOOP_END 'le_1'"``); ``discriminator`` is the
+    data element id. Returns the stored value as is -- classifying it (branch,
+    repeat/exit) stays with the caller, which also words its own refusal for a
+    value that fits no branch.
+
+    Raises :class:`ExecutionError` (``EX.value-missing``, ``params.element`` =
+    element name) when the element has no value yet. The modelling rules
+    guarantee the write before the decision, so this means the model bypassed
+    validation.
+    """
+
+    if discriminator not in instance.data_values:
+        raise ExecutionError(
+            f"{subject} needs data element '{discriminator}' but it is not set",
+            code="EX.value-missing",
+            params={"element": _element(schema, discriminator)},
+        )
+    return instance.data_values[discriminator]
+
+
+def _loop_of_end(schema: ProcessSchema, end_id: str) -> tuple[str, set[str]]:
+    """Find the loop block a LOOP_END closes.
+
+    ``model.loop_block`` pairs from the LOOP_START side, so the LOOP_STARTs are
+    tried in schema order until the one whose block ends at ``end_id`` is found
+    -- the block is computed only once per candidate.
+
+    Returns ``(start_id, body)``: the id of the paired LOOP_START and the node
+    ids strictly between start and end. A LOOP_END without a paired start is
+    impossible on a K6-valid schema; it would surface as ``StopIteration``
+    exactly as the former inline lookup did.
+    """
+
+    for start_id, start in schema.nodes.items():
+        if start.type is not NodeType.LOOP_START:
+            continue
+        paired_end, body = loop_block(schema, start_id)
+        if paired_end == end_id:
+            return start_id, body
+    raise StopIteration(f"no LOOP_START pairs with LOOP_END '{end_id}'")
 
 
 def _reset_loop_block(
@@ -815,18 +840,9 @@ def _reset_loop_block(
     for nid in block:
         instance.node_states[nid] = NodeState.NOT_ACTIVATED
         instance.child_instances.pop(nid, None)
-        # W4 (E1): every iteration is a fresh offer -- a claim never survives
-        # the activation it was made for.
-        instance.claimed_by.pop(nid, None)
-        instance.node_claimed_at.pop(nid, None)
-        # T3/E9: each round measures its own target time -- fired escalation
-        # stages belong to the activation, not the node.
-        instance.escalated_stages.pop(nid, None)
-        # E2: detail overlays hang on one activation like claims do.
-        instance.node_details.pop(nid, None)
-        instance.node_detail_reason.pop(nid, None)
-        instance.node_paused_seconds.pop(nid, None)  # net-time credit too
-        instance.node_suspended_at.pop(nid, None)
+        # Every iteration is a fresh offer with fresh clocks: claim, escalation
+        # stages and detail overlay belong to the activation, not the node.
+        _clear_activation(instance, nid)
     internal_sources = body | {start_id}
     for edge in schema.edges:
         if edge.source in internal_sources:
@@ -1087,6 +1103,44 @@ def _evaluate_targets(instance: ProcessInstance, schema: ProcessSchema) -> bool:
             _skip_node(instance, schema, node)
         changed = True
     return changed
+
+
+# --- per-activation bookkeeping ----------------------------------------
+
+
+def _release_claim(instance: ProcessInstance, node_id: str) -> None:
+    """Drop the claim of ``node_id`` together with its claim-bound clocks.
+
+    Mutates ``instance`` in place (callers work on their own copy). Removes
+    the owner (``claimed_by``), the claim stamp (``node_claimed_at``) and the
+    net-time bookkeeping (``node_paused_seconds``/``node_suspended_at``, E2
+    Stufe C) -- all of it belongs to one activation (W4) and must never carry
+    over to the next owner or round. Used by completion and return; the
+    detail overlay is left alone here, since each caller treats it differently
+    (a return ends a pause, a completion only happens without one).
+    """
+
+    instance.claimed_by.pop(node_id, None)
+    instance.node_claimed_at.pop(node_id, None)
+    instance.node_paused_seconds.pop(node_id, None)
+    instance.node_suspended_at.pop(node_id, None)
+
+
+def _clear_activation(instance: ProcessInstance, node_id: str) -> None:
+    """Wipe every runtime trace of the current activation of ``node_id``.
+
+    Mutates ``instance`` in place. On top of :func:`_release_claim` it removes
+    the fired escalation stages (T3/E9: each activation measures its own
+    target time) and the detail overlay with its reason (E2). This is the
+    common ground of a recovery reset (V4) and a loop reset (K6): in both
+    cases the node becomes a fresh offer with fresh clocks. Markings and child
+    instance links are the caller's business.
+    """
+
+    _release_claim(instance, node_id)
+    instance.escalated_stages.pop(node_id, None)
+    instance.node_details.pop(node_id, None)
+    instance.node_detail_reason.pop(node_id, None)
 
 
 # --- guards --------------------------------------------------------------

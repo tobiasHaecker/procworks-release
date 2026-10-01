@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: BUSL-1.1
 """Webhook subscriptions and the transactional outbox dispatcher (roadmap E13).
 
-The *event* side of the maximally open API (concept §6.3): outside tools
+The *event* side of the maximally open API: outside tools
 subscribe to domain events (``instance.started``, ``task.completed``, ...) and
-ProcWorks delivers them as signed HTTP POSTs. Delivery is **robust by design**
-(concept §6.3 "Robuste Zustellung"):
+ProcWorks delivers them as signed HTTP POSTs. Delivery is **robust by design**:
 
 * **Transactional outbox** -- an emitted event is first written to the outbox in
   the same step as the triggering state, so nothing is lost on a crash; a
@@ -50,7 +49,7 @@ from procworks.model import (
 )
 from procworks.store import WebhookStore
 
-#: The domain events a tool may subscribe to (concept §6.3).
+#: The domain events a tool may subscribe to.
 WEBHOOK_EVENTS = frozenset(
     {
         "instance.started",
@@ -90,8 +89,8 @@ class WebhookError(Exception):
     Like :class:`~procworks.validator.ValidationFinding` it stays **language
     neutral**: ``message`` is the unchanged technical basis for logs, tests and
     API users, while ``code`` plus ``params`` let a client word the same fact in
-    its own language. The webhook preview was the last place where an English
-    sentence reached a German user interface (Nachtest 2026-09-22, Mangel 9).
+    its own language, so no English sentence reaches a German user interface
+    through the webhook preview.
     """
 
     def __init__(
@@ -180,6 +179,21 @@ class PinnedTarget:
     ip: str
 
 
+def _unresolvable(host: str) -> WebhookError:
+    """The refusal for a target host without any address (``WH.no-resolve``).
+
+    Raised by :func:`resolve_target` both when the lookup fails and when it
+    returns nothing -- one wording for one fact.
+    """
+
+    return WebhookError(
+        f"webhook host '{host}' does not resolve",
+        422,
+        code="WH.no-resolve",
+        params={"host": host},
+    )
+
+
 def resolve_target(
     url: str,
     *,
@@ -260,19 +274,9 @@ def resolve_target(
     try:
         addresses = _lookup(host)
     except OSError as exc:
-        raise WebhookError(
-            f"webhook host '{host}' does not resolve",
-            422,
-            code="WH.no-resolve",
-            params={"host": host},
-        ) from exc
+        raise _unresolvable(host) from exc
     if not addresses:
-        raise WebhookError(
-            f"webhook host '{host}' does not resolve",
-            422,
-            code="WH.no-resolve",
-            params={"host": host},
-        )
+        raise _unresolvable(host)
     if not trusted and not all(_is_public(a) for a in addresses):
         raise WebhookError(
             f"webhook host '{host}' resolves to an internal address",
@@ -344,9 +348,8 @@ class DeliveryPreview:
     ``secret_ref`` echoes the requested reference and ``secret_known`` says
     whether the server has it. Without those two, "not signed" was a dead end:
     a modeller typed the suggested name, saw no signature and could not tell an
-    unset server-side secret from a feature that does not work (Nachtest
-    2026-09-22, Mangel 9). An empty ``secret_ref`` simply means none was asked
-    for -- then ``secret_known`` is False without anything being wrong.
+    unset server-side secret from a feature that does not work. An empty ``secret_ref`` simply
+    means none was asked for -- then ``secret_known`` is False without anything being wrong.
     """
 
     allowed: bool
@@ -585,9 +588,9 @@ class UrllibTransport:
         conn.sock = sock  # already connected to the pinned address
         try:
             default_port = 443 if target.scheme == "https" else 80
-            name = f"[{target.host}]" if ":" in target.host else target.host  # IPv6 literal
+            host_name = f"[{target.host}]" if ":" in target.host else target.host  # IPv6
             port_suffix = "" if target.port == default_port else f":{target.port}"
-            host_header = name + port_suffix
+            host_header = host_name + port_suffix
             conn.putrequest("POST", target.path, skip_host=True, skip_accept_encoding=True)
             conn.putheader("Host", host_header)
             for name, value in headers.items():
@@ -609,6 +612,49 @@ class UrllibTransport:
         """Compatibility entry point: resolve with the strict policy, then pin."""
 
         return self.post_pinned(resolve_target(url), body, headers, timeout)
+
+
+def _new_entry(
+    subscription_id: str,
+    event_type: str,
+    url: str,
+    payload: dict[str, object],
+    *,
+    max_attempts: int,
+    now: float,
+    secret_ref: str = "",
+) -> OutboxEntry:
+    """A fresh, immediately due ``PENDING`` outbox entry.
+
+    The one place the three enqueue paths of :class:`OutboxDispatcher`
+    (subscription event, test ping, subscription-less push) build an entry, so
+    each gets its own entry id and its own ``delivery_id`` -- the idempotency
+    token a receiver de-duplicates on.
+
+    :param subscription_id: owning subscription, ``""`` for a push (which also
+        selects the relaxed, admin-trusted SSRF policy at delivery).
+    :param event_type: the domain event (or ``webhook.test``).
+    :param url: the delivery target.
+    :param payload: the event data.
+    :param max_attempts: attempt budget before the entry becomes ``DEAD``.
+    :param now: creation time, also the first attempt time.
+    :param secret_ref: signing secret reference; only a push carries its own,
+        a subscription entry signs with the subscription's secret.
+    :returns: the entry (not yet stored).
+    """
+
+    return OutboxEntry(
+        id=f"ob_{uuid.uuid4().hex}",
+        subscription_id=subscription_id,
+        event_type=event_type,
+        delivery_id=uuid.uuid4().hex,
+        url=url,
+        payload=payload,
+        max_attempts=max_attempts,
+        next_attempt_at=now,
+        created_at=now,
+        secret_ref=secret_ref,
+    )
 
 
 class OutboxDispatcher:
@@ -675,16 +721,8 @@ class OutboxDispatcher:
         for sub in self._store.list_subscriptions():
             if not sub.active or event_type not in sub.events:
                 continue
-            entry = OutboxEntry(
-                id=f"ob_{uuid.uuid4().hex}",
-                subscription_id=sub.id,
-                event_type=event_type,
-                delivery_id=uuid.uuid4().hex,
-                url=sub.url,
-                payload=payload,
-                max_attempts=self._max_attempts,
-                next_attempt_at=now,
-                created_at=now,
+            entry = _new_entry(
+                sub.id, event_type, sub.url, payload, max_attempts=self._max_attempts, now=now
             )
             self._store.put_entry(entry)
             created.append(entry)
@@ -713,16 +751,13 @@ class OutboxDispatcher:
         if sub is None:
             raise WebhookError(f"subscription '{subscription_id}' not found", 404)
         now = self._now()
-        entry = OutboxEntry(
-            id=f"ob_{uuid.uuid4().hex}",
-            subscription_id=sub.id,
-            event_type="webhook.test",
-            delivery_id=uuid.uuid4().hex,
-            url=sub.url,
-            payload={"message": "ProcWorks webhook test"},
+        entry = _new_entry(
+            sub.id,
+            "webhook.test",
+            sub.url,
+            {"message": "ProcWorks webhook test"},
             max_attempts=1,
-            next_attempt_at=now,
-            created_at=now,
+            now=now,
         )
         self._store.put_entry(entry)
         return self._deliver(entry, now)
@@ -738,7 +773,7 @@ class OutboxDispatcher:
     ) -> OutboxEntry:
         """Enqueue a subscription-less push to a trusted, server-configured URL.
 
-        Used for the ``HTTP_PUSH`` activity pattern (concept §6.3): when an
+        Used for the ``HTTP_PUSH`` activity pattern: when an
         automatic step is activated the boundary pushes its input package to the
         bound tool endpoint. Delivery reuses the full outbox machinery (durable
         queue, HMAC signature, back-off retry, circuit breaker, delivery log).
@@ -747,30 +782,43 @@ class OutboxDispatcher:
         """
 
         assert_url_allowed(url, allow_internal=True)
-        now = self._now()
-        entry = OutboxEntry(
-            id=f"ob_{uuid.uuid4().hex}",
-            subscription_id="",
-            event_type=event_type,
-            delivery_id=uuid.uuid4().hex,
-            url=url,
-            payload=payload,
+        entry = _new_entry(
+            "",
+            event_type,
+            url,
+            payload,
             max_attempts=max_attempts,
-            next_attempt_at=now,
-            created_at=now,
+            now=self._now(),
             secret_ref=secret_ref,
         )
         return self._store.put_entry(entry)
 
     # -- internal ----------------------------------------------------------
 
+    @staticmethod
+    def _circuit_key(url: str) -> str:
+        """The circuit-breaker key of a target: its host name (else the raw URL).
+
+        Keyed by host, not URL, so all paths of one failing endpoint share a
+        breaker.
+        """
+
+        return urlparse(url).hostname or url
+
     def _circuit_open(self, url: str, now: float) -> bool:
-        host = urlparse(url).hostname or url
-        state = self._circuit.get(host)
+        """Whether the breaker for ``url``'s host is open (still cooling down)."""
+
+        state = self._circuit.get(self._circuit_key(url))
         return state is not None and state[1] > now
 
     def _record_circuit(self, url: str, *, ok: bool, now: float) -> None:
-        host = urlparse(url).hostname or url
+        """Update the breaker after a delivery: success closes, failures count.
+
+        After ``circuit_threshold`` consecutive failures the breaker opens for
+        ``circuit_cooldown_s``; a single success resets it.
+        """
+
+        host = self._circuit_key(url)
         if ok:
             self._circuit.pop(host, None)
             return
@@ -784,9 +832,7 @@ class OutboxDispatcher:
 
     def _deliver(self, entry: OutboxEntry, now: float) -> WebhookDelivery:
         sub = self._store.get_subscription(entry.subscription_id)
-        secret = _resolve_secret(sub.secret_ref) if sub is not None else _resolve_secret(
-            entry.secret_ref
-        )
+        secret = _resolve_secret(sub.secret_ref if sub is not None else entry.secret_ref)
         body, headers = build_request(
             entry.delivery_id, entry.event_type, entry.payload, now, secret
         )

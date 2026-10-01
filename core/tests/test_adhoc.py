@@ -87,7 +87,7 @@ def test_insert_into_unexecuted_region_runs_through_variant() -> None:
     instance = instantiate(schema, context=context)
 
     # A is ready, edge A->B not signaled, B not yet activated -> R1 holds.
-    # The new step is worked by the same people as A (B2, VAL-03).
+    # The new step is worked by the same people as A (B2).
     instance = adhoc_insert_activity(
         instance, schema, a_id, "Zusatzpruefung", staff_rule=schema.staff_rules[a_id]
     )
@@ -110,8 +110,8 @@ def test_insert_into_unexecuted_region_runs_through_variant() -> None:
 
 
 def test_insert_without_staff_rule_is_rejected_by_b2() -> None:
-    """VAL-03 (Validierung 2026-09-25): an ad-hoc step without a staff rule was
-    structurally correct, got activated -- and stood in nobody's worklist.
+    """An ad-hoc step without a staff rule would be structurally correct, get
+    activated -- and stand in nobody's worklist.
 
     The core now demands the rule for the *new* step (``check_executable``
     restricted to that node; B2 itself stays outside ``validate()``).
@@ -256,7 +256,7 @@ def test_rename_gateway_violates_r1() -> None:
 
 
 def test_a_step_with_a_target_time_can_be_removed_ad_hoc() -> None:
-    """NT-10: its time constraint survived as a stale key and T1 refused the delete.
+    """Its time constraint must not survive as a stale key that makes T1 refuse the delete.
 
     The modelling-time delete (``operations._drop_nodes``) always removed every
     annotation keyed by the node; the ad-hoc delete removed only accesses,

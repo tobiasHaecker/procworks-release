@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Operators read only the instances they are involved in (Validierung 2026-09-25, VAL-05).
+"""Operators read only the instances they are involved in.
 
-``erika.sander`` (operator) read all 26 demo instances with their data and
-audit -- a colleague's leave request included. A personal login whose only
-role is ``operator`` now reads an instance only when it appears in its
+A colleague's leave request is none of an operator's business. A personal
+login whose only role is ``operator`` reads an instance only when it appears in its
 history as the acting agent or may work (or has claimed) an open step; any
 other instance is 404, like a missing one. Viewers (revision), modellers,
 admins and machine identities keep reading everything; the global audit is
@@ -168,8 +167,8 @@ _ACTIONS = ("claim", "return", "suspend", "resume", "fail", "reset", "start", "c
 
 
 def test_uninvolved_operator_gets_404_on_every_action(login: Any) -> None:
-    """NT-08: the action paths answered a foreign case with 409 naming its open
-    step ("not eligible to claim activity 'act_144'") -- now they say nothing."""
+    """The action paths answer a foreign case like a missing one: no 409 that
+    names its open step, no hint about its state."""
 
     iid, erfassen, _ = _instance("Aktion – fremd")
     before = client.get(f"/instances/{iid}").json()

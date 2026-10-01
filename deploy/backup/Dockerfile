@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 # Backup runner image: the standard PostgreSQL client tools (pg_dump/pg_restore/
 # psql from the base image) plus GnuPG for optional symmetric encryption at rest
-# (BACKUP_PASSPHRASE, concept §9 / roadmap B5). Kept intentionally tiny -- it is
+# (BACKUP_PASSPHRASE, roadmap B5). Kept intentionally tiny -- it is
 # only the base image plus gnupg.
 #
 # Build (from the repository root):

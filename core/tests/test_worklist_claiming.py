@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BUSL-1.1
 """E1: worklist state machine -- claim ("uebernehmen") and return
-("zuruecklegen"), Arbeitslisten-Zustandsmaschine-Konzept.
+("zuruecklegen").
 
 The runtime guards W1-W4: at most one owner per activated step (W1), claiming
 and completing a claimed step require eligibility/ownership (W2), returning is

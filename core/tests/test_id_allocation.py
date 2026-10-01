@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""A restarted API never hands out an id that is already stored (Nachtest 2026-09-27, NT-01).
+"""A restarted API never hands out an id that is already stored.
 
 The ids ``instance_<n>``, ``schema_<n>``, ``tpl_<n>``, ``org_<n>`` (and the
 node/element ids inside a schema) came from process-local counters starting
@@ -87,7 +87,7 @@ def _released_schema(name: str) -> str:
 
 
 def test_new_instance_after_restart_never_replaces_a_stored_one(restart: None) -> None:
-    sid = _released_schema("NT-01 Instanz")
+    sid = _released_schema("Kennung Instanz")
     first = client.post(f"/schemas/{sid}/instances").json()["id"]
     before = client.get(f"/instances/{first}").json()
 
@@ -100,34 +100,34 @@ def test_new_instance_after_restart_never_replaces_a_stored_one(restart: None) -
 
 
 def test_new_schema_after_restart_never_replaces_a_stored_one(restart: None) -> None:
-    existing = client.post("/schemas", json={"name": "NT-01 bestehend"}).json()["id"]
+    existing = client.post("/schemas", json={"name": "Kennung bestehend"}).json()["id"]
 
     _simulate_restart(at=_number(existing))
     new_ids = [
-        client.post("/schemas", json={"name": f"NT-01 neu {i}"}).json()["id"] for i in range(3)
+        client.post("/schemas", json={"name": f"Kennung neu {i}"}).json()["id"] for i in range(3)
     ]
 
     assert existing not in new_ids
-    assert client.get(f"/schemas/{existing}").json()["name"] == "NT-01 bestehend"
+    assert client.get(f"/schemas/{existing}").json()["name"] == "Kennung bestehend"
 
 
 def test_revision_after_restart_never_replaces_a_stored_schema(restart: None) -> None:
-    sid = _released_schema("NT-01 Revision")
-    other = client.post("/schemas", json={"name": "NT-01 Nachbar"}).json()["id"]
+    sid = _released_schema("Kennung Revision")
+    other = client.post("/schemas", json={"name": "Kennung Nachbar"}).json()["id"]
 
     _simulate_restart(at=_number(other))
     for _ in range(3):
         revision = client.post(f"/schemas/{sid}/revision", json={}).json()["id"]
         assert revision not in {sid, other}
-    assert client.get(f"/schemas/{other}").json()["name"] == "NT-01 Nachbar"
+    assert client.get(f"/schemas/{other}").json()["name"] == "Kennung Nachbar"
 
 
 def test_new_org_model_and_template_after_restart_never_replace_stored_ones(
     restart: None,
 ) -> None:
-    org = client.post("/org-models", json={"name": "NT-01 Org"}).json()["id"]
-    sid = _released_schema("NT-01 Vorlage")
-    template = client.post("/templates", json={"schema_id": sid, "name": "NT-01 T"}).json()["id"]
+    org = client.post("/org-models", json={"name": "Kennung Org"}).json()["id"]
+    sid = _released_schema("Kennung Vorlage")
+    template = client.post("/templates", json={"schema_id": sid, "name": "Kennung T"}).json()["id"]
 
     _simulate_restart(at=_number(org))
     orgs = [client.post("/org-models", json={"name": f"Org {i}"}).json()["id"] for i in range(3)]
@@ -139,8 +139,8 @@ def test_new_org_model_and_template_after_restart_never_replace_stored_ones(
 
     assert org not in orgs
     assert template not in templates
-    assert client.get(f"/org-models/{org}").json()["name"] == "NT-01 Org"
-    assert client.get(f"/templates/{template}").json()["name"] == "NT-01 T"
+    assert client.get(f"/org-models/{org}").json()["name"] == "Kennung Org"
+    assert client.get(f"/templates/{template}").json()["name"] == "Kennung T"
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ def test_new_org_model_and_template_after_restart_never_replace_stored_ones(
 
 
 def test_startup_lifts_every_sequence_past_the_stored_ids(restart: None) -> None:
-    sid = _released_schema("NT-01 Start")
+    sid = _released_schema("Kennung Start")
     iid = client.post(f"/schemas/{sid}/instances").json()["id"]
     schema = client.get(f"/schemas/{sid}").json()
     highest_node = max(
@@ -168,7 +168,7 @@ def test_startup_lifts_every_sequence_past_the_stored_ids(restart: None) -> None
 def test_node_ids_inside_an_existing_schema_do_not_clash_after_restart(restart: None) -> None:
     """Without the lift the first inserts got ids the schema already used (K2)."""
 
-    sid = client.post("/schemas", json={"name": "NT-01 Knoten"}).json()["id"]
+    sid = client.post("/schemas", json={"name": "Kennung Knoten"}).json()["id"]
     for label in ("Eins", "Zwei", "Drei"):
         response = client.post(
             f"/schemas/{sid}/serial-insert", json={"label": label, "after_node_id": "start"}

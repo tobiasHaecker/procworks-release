@@ -47,7 +47,7 @@ spec:
             {{- end }}
           {{- with .Values.api.envFromSecret }}
           # Weitere Einstellungen aus einem Secret, z. B. PROCWORKS_SMTP_* oder
-          # PROCWORKS_TOKENS_JSON (Nachtest 2026-09-27, NT-12/NT-13).
+          # PROCWORKS_TOKENS_JSON.
           envFrom:
             - secretRef:
                 name: {{ . }}

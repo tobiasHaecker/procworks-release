@@ -451,7 +451,7 @@ def test_api_enforced_agent_quota_blocks_with_402(monkeypatch: pytest.MonkeyPatc
 
 
 # --------------------------------------------------------------------------
-# online auto-pull (§4: claim + poll + best-effort auto-activate)
+# online auto-pull (claim + poll + best-effort auto-activate)
 # --------------------------------------------------------------------------
 
 

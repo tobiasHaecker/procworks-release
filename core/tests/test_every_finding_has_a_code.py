@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Every finding of the core carries a ``code`` (Validierung 2026-09-25, VAL-07).
+"""Every finding of the core carries a ``code``.
 
 The client words findings from one catalogue (``FINDING_TEXTS``) and falls back
 to the English ``message`` only when a finding has no code. The validation saw

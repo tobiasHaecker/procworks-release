@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 // ---------------------------------------------------------------------------
-// Engine der geführten Tour (docs/Tutorial-Konzept.md).
+// Engine der geführten Tour.
 //
 // Kennt KEINE Inhalte -- die stehen in tours.js, die Aufzeichnung des
 // Beispielprozesses in fixtures.js. Diese Datei kann drei Dinge:
@@ -96,9 +96,36 @@ const Tour = (() => {
     try { localStorage.setItem(LS + who() + key, value); } catch (_e) { /* egal */ }
   }
 
+  /**
+   * Schlüssel des Merkers „erledigt“ einer Tour.
+   *
+   * Enthält die Fassung (``tour.version``): Wird eine Tour inhaltlich
+   * überarbeitet und ihre Fassung angehoben, gilt sie wieder als unerledigt
+   * und wird erneut angeboten.
+   *
+   * @param {object} tour Die Tour aus tours.js.
+   * @returns {string} Schlüssel ohne Präfix (siehe :func:`mark`).
+   */
+  function doneKey(tour) {
+    return `done.${tour.id}.${tour.version}`;
+  }
+
+  /**
+   * Schlüssel des Merkers „zuletzt erreichter Schritt“ einer Tour.
+   *
+   * Ebenfalls an die Fassung gebunden -- ein gemerkter Schritt-Index einer
+   * älteren Fassung könnte in der neuen auf einen ganz anderen Schritt zeigen.
+   *
+   * @param {object} tour Die Tour aus tours.js.
+   * @returns {string} Schlüssel ohne Präfix (siehe :func:`mark`).
+   */
+  function progressKey(tour) {
+    return `progress.${tour.id}.${tour.version}`;
+  }
+
   /** @returns {boolean} true, wenn die Tour in dieser Fassung erledigt ist. */
   function isDone(tour) {
-    return mark(`done.${tour.id}.${tour.version}`) === "1";
+    return mark(doneKey(tour)) === "1";
   }
 
   /** @returns {number} Wie oft die Tour bereits verschoben wurde. */
@@ -108,7 +135,7 @@ const Tour = (() => {
 
   /** @returns {number} Gemerkter Schritt-Index eines Abbruchs (0, wenn keiner). */
   function savedProgress(tour) {
-    const raw = mark(`progress.${tour.id}.${tour.version}`);
+    const raw = mark(progressKey(tour));
     const i = Number(raw);
     return Number.isFinite(i) && i > 0 && i < tour.steps.length ? i : 0;
   }
@@ -156,7 +183,7 @@ const Tour = (() => {
       if (t.tour) return;
       // Hoechstens ein Angebot je Browsersitzung: Jeder Rollenwechsel in der
       // Demo ist ein neuer Login, und die Frage fing danach jedes Mal die
-      // Klicks ab (Validierung 2026-09-25, VAL-19). Die Touren bleiben ueber
+      // Klicks ab. Die Touren bleiben ueber
       // „Hilfe“ erreichbar.
       if (sessionGet(OFFERED_KEY) === "1") return;
       const tour = availableTours().find(
@@ -174,7 +201,7 @@ const Tour = (() => {
    */
   function offer(tour) {
     if (t.tour) return;
-    // Nie ueber einen offenen Dialog (NT-15): Das Angebot legte sich sonst
+    // Nie ueber einen offenen Dialog: Das Angebot legte sich sonst
     // darueber und zog den Tastatur-Fokus aus dem Dialog. Es wartet, bis der
     // Dialog zu ist.
     if (byId("modal-root").children.length) {
@@ -205,7 +232,7 @@ const Tour = (() => {
           ? el("button", { class: "btn ghost", onClick: () => { clear(root); start(tour.id, { resume: false }); } }, "Von vorn")
           : null,
         el("button", { class: "btn ghost", onClick: () => { postpone(tour); clear(root); } }, "Später erinnern"),
-        el("button", { class: "btn ghost", onClick: () => { setMark(`done.${tour.id}.${tour.version}`, "1"); clear(root); } }, "Nein danke")));
+        el("button", { class: "btn ghost", onClick: () => { setMark(doneKey(tour), "1"); clear(root); } }, "Nein danke")));
     root.appendChild(el("div", { class: "tour-offer-backdrop" }, card));
   }
 
@@ -244,14 +271,13 @@ const Tour = (() => {
 
     if (tour.sandbox) enterSandbox();
 
-    const step = tour.steps[t.index];
-    if (step && step.view && state.view !== step.view) state.view = step.view;
+    switchToStepView(tour.steps[t.index]);
     render();
     t.timer = setInterval(tick, TICK_MS);
     document.addEventListener("keydown", onKey, true);
     // Rollen bewegt Anker, Ring und Aussparung gemeinsam -- nur der 300-ms-Takt
-    // zieht sie nach, und das sieht man (im Nachtest 2026-09-22 stand der Ring
-    // nach dem selbsttaetigen Rollen sichtbar an der alten Stelle). Deshalb
+    // zieht sie nach, und das sieht man (der Ring stuende nach dem
+    // selbsttaetigen Rollen sichtbar an der alten Stelle). Deshalb
     // zusaetzlich am Rollereignis nachfuehren, gedrosselt auf ein Bild.
     document.addEventListener("scroll", onScroll, true);
   }
@@ -278,10 +304,10 @@ const Tour = (() => {
     const completed = !!(opts && opts.completed);
     try {
       if (completed) {
-        setMark(`done.${tour.id}.${tour.version}`, "1");
-        setMark(`progress.${tour.id}.${tour.version}`, "0");
+        setMark(doneKey(tour), "1");
+        setMark(progressKey(tour), "0");
       } else {
-        setMark(`progress.${tour.id}.${tour.version}`, String(t.index));
+        setMark(progressKey(tour), String(t.index));
       }
     } catch (_e) { /* egal */ }
 
@@ -403,7 +429,21 @@ const Tour = (() => {
 
     if (!write) return () => Promise.resolve(readSchemaPath(path));
     if (isSchemaPath) return () => applySimulation(body);
-    return () => Promise.reject({
+    return () => refuseWrite();
+  }
+
+  /**
+   * Freundliche Ablehnung eines schreibenden Aufrufs im Sandkasten.
+   *
+   * Gilt für jeden Schreibversuch, den der laufende Schritt nicht vorsieht --
+   * außerhalb von /schemas ebenso wie unter /schemas ohne ``step.sim``. Die
+   * Form (``status`` + ``detail`` als Text) entspricht einer echten
+   * API-Ablehnung, damit ``describeError`` in app.js sie als Meldung anzeigt.
+   *
+   * @returns {Promise<never>} Stets abgelehnte Zusage (HTTP 400).
+   */
+  function refuseWrite() {
+    return Promise.reject({
       status: 400,
       detail: "Im Tutorial werden keine Daten gespeichert.",
     });
@@ -443,12 +483,7 @@ const Tour = (() => {
   function applySimulation(body) {
     const step = current();
     const sim = step && step.sim;
-    if (!sim) {
-      return Promise.reject({
-        status: 400,
-        detail: "Im Tutorial werden keine Daten gespeichert.",
-      });
-    }
+    if (!sim) return refuseWrite();
     if (sim.reject) {
       t.rejected = true;
       // Form der echten API-Antwort nachbilden: Der Kern antwortet mit
@@ -491,13 +526,24 @@ const Tour = (() => {
     if (t.index >= t.tour.steps.length - 1) { stop({ completed: true }); return; }
     t.index += 1;
     t.anchorSince = 0;
-    const step = current();
-    if (step && step.view && state.view !== step.view) {
-      state.view = step.view;
-      render();
-      return;
-    }
+    if (switchToStepView(current())) { render(); return; }
     paint();
+  }
+
+  /**
+   * Stellt die Sicht ein, die ein Schritt voraussetzt (``step.view``).
+   *
+   * Rendert bewusst NICHT selbst: :func:`start` rendert ohnehin immer, und
+   * :func:`next` muss nur dann neu rendern, wenn tatsächlich gewechselt wurde
+   * -- sonst genügt ein :func:`paint`.
+   *
+   * @param {object|null|undefined} step Schritt aus tours.js (fehlend = nichts tun).
+   * @returns {boolean} true, wenn ``state.view`` geändert wurde.
+   */
+  function switchToStepView(step) {
+    if (!step || !step.view || state.view === step.view) return false;
+    state.view = step.view;
+    return true;
   }
 
   /** Geht einen Schritt zurück (ohne den Modellzustand zurückzudrehen). */
@@ -635,7 +681,7 @@ const Tour = (() => {
     }
     // Mobil liegt das Menue in einer Schublade: Ein Anker darin existiert, ist
     // bei geschlossener Schublade aber ausserhalb des Bildes -- die Admin-Tour
-    // hing so in Schritt 2 (Validierung 2026-09-25, VAL-32). Solange zeigt die
+    // hing so in Schritt 2. Solange zeigt die
     // Tour auf den Menue-Knopf und sagt, was dort zu tippen ist; oeffnet der
     // Nutzer die Schublade, springt sie auf den eigentlichen Eintrag.
     let viaMenu = null;
@@ -773,6 +819,7 @@ const Tour = (() => {
    * @param {object} step Aktueller Schritt.
    * @param {Element|null} anchor Gefundenes Anker-Element.
    * @param {boolean} missing Anker dauerhaft nicht auffindbar.
+   * @param {boolean} fallback ``anchor`` ist nur der Ersatzanker aus ``also``.
    * @returns {string} Vergleichbare Kennung.
    */
   function paintKey(step, anchor, missing, fallback) {
@@ -823,10 +870,9 @@ const Tour = (() => {
    * einander überdecken, zählen dort **zweimal** -- die Fläche wird wieder
    * gefüllt, und genau dieser Teil der Abdunkelung blockt dann Klicks.
    *
-   * Im Nachtest 2026-09-22 (Mangel 5) war das der Grund, warum die Tour-Schritte
-   * 5 und 7 bei Laptop-Höhe nicht ausführbar waren: Anker ist dort der
-   * Abschnittskopf **innerhalb** der Schritt-Karte, und ``also`` gibt die ganze
-   * Karte zusätzlich frei. Das innere Rechteck lag vollständig im äusseren --
+   * Ohne das waeren Tour-Schritte bei Laptop-Höhe nicht ausführbar, deren
+   * Anker ein Abschnittskopf **innerhalb** der Schritt-Karte ist, während
+   * ``also`` die ganze Karte zusätzlich freigibt. Das innere Rechteck lag vollständig im äusseren --
    * beide hoben sich auf, und der gesamte Bildschirm blieb abgedunkelt und
    * klickdicht, auch im Ring.
    *
@@ -910,7 +956,7 @@ const Tour = (() => {
    * @param {DOMRect|null} rect Ankerrechteck (null = mittiges Popup).
    * @param {boolean} missing true, wenn der Anker nicht gefunden wurde.
    * @param {string|null} [viaMenu] mobil: Beschriftung des Menueeintrags, der
-   *   hinter dem ☰-Knopf liegt -- der Hinweis sagt dann, was zu tippen ist (VAL-32).
+   *   hinter dem ☰-Knopf liegt -- der Hinweis sagt dann, was zu tippen ist.
    * @returns {HTMLElement} Das fertige Popup.
    */
   function popup(step, rect, missing, viaMenu) {
@@ -967,16 +1013,23 @@ const Tour = (() => {
   }
 
   /**
-   * Platziert das Popup am Anker -- bevorzugt darunter, bei Platzmangel
-   * darüber, und immer innerhalb des Fensters.
+   * Vom oberen Rand belegter Platz (die klebende Kopfleiste).
    *
-   * Die Größe steht erst nach dem Einhängen fest, deshalb wird im nächsten
-   * Frame nachgemessen und korrigiert.
+   * ``.topbar`` ist ``position: sticky`` **innerhalb** des rollbaren ``.main``
+   * -- sie bleibt also am oberen Rand stehen, während der Inhalt darunter
+   * durchrollt. Wer bis an die Oberkante rollt, schiebt sein Ziel damit
+   * **unter** die Kopfleiste. Bei Laptop-Höhe rollte die Tour den Knoten
+   * sonst sauber an den oberen Rand -- und dort verdeckte ihn die Kopfleiste.
    *
-   * @param {HTMLElement} box Das Popup.
-   * @param {DOMRect} r Ankerrechteck.
-   * @param {string} [placement] Wunschseite ("top"/"bottom").
+   * @returns {number} Unterkante der Kopfleiste in Bildschirmkoordinaten.
    */
+  function topInset() {
+    const bar = document.querySelector(".topbar");
+    if (!bar) return 0;
+    const r = bar.getBoundingClientRect();
+    return r.height ? Math.max(0, r.bottom) : 0;
+  }
+
   /**
    * Höhe des unten fest stehenden Demo-Banners (0, wenn keiner da ist).
    *
@@ -991,25 +1044,6 @@ const Tour = (() => {
    *
    * @returns {number} Belegte Höhe am unteren Rand in Pixeln, inkl. Abstand.
    */
-  /**
-   * Vom oberen Rand belegter Platz (die klebende Kopfleiste).
-   *
-   * ``.topbar`` ist ``position: sticky`` **innerhalb** des rollbaren ``.main``
-   * -- sie bleibt also am oberen Rand stehen, während der Inhalt darunter
-   * durchrollt. Wer bis an die Oberkante rollt, schiebt sein Ziel damit
-   * **unter** die Kopfleiste. Genau das passierte im Nachtest 2026-09-22
-   * (Mangel 5) bei Laptop-Höhe: Die Tour rollte den Knoten sauber an den
-   * oberen Rand -- und dort verdeckte ihn die Kopfleiste.
-   *
-   * @returns {number} Unterkante der Kopfleiste in Bildschirmkoordinaten.
-   */
-  function topInset() {
-    const bar = document.querySelector(".topbar");
-    if (!bar) return 0;
-    const r = bar.getBoundingClientRect();
-    return r.height ? Math.max(0, r.bottom) : 0;
-  }
-
   function bottomInset() {
     const banner = byId("demo-banner");
     if (!banner) return 0;
@@ -1019,7 +1053,12 @@ const Tour = (() => {
   }
 
   /**
-   * Platziert das Popup am Anker -- bevorzugt darunter, bei Platzmangel darüber.
+   * Platziert das Popup am Anker -- bevorzugt darunter, bei Platzmangel darüber,
+   * bei ``placement: "side"`` daneben (:func:`sidePosition`); immer innerhalb
+   * des Fensters.
+   *
+   * Die Größe steht erst nach dem Einhängen fest, deshalb wird im nächsten
+   * Frame nachgemessen und dann erst gesetzt.
    *
    * Der nutzbare Bereich endet über dem Demo-Banner (siehe :func:`bottomInset`);
    * dieselbe Zahl bekommt auch das Stylesheet als ``--tour-bottom-inset``, damit
@@ -1027,7 +1066,8 @@ const Tour = (() => {
    *
    * @param {HTMLElement} box Das Popup.
    * @param {DOMRect} r Ankerrechteck.
-   * @param {string} placement "top" erzwingt oberhalb, sonst automatisch.
+   * @param {string} placement "top" erzwingt oberhalb, "side" stellt das Popup
+   *   neben das Ziel, sonst automatisch (unter- bzw. oberhalb).
    * @param {boolean} [quiet] true beim reinen Nachführen eines bereits
    *   stehenden Popups: Dann entfällt das Ausblenden bis zur Messung -- sonst
    *   blinkte das Popup in jedem Takt (TICK_MS) einmal auf.
@@ -1040,19 +1080,17 @@ const Tour = (() => {
       document.documentElement.style.setProperty("--tour-bottom-inset", `${inset}px`);
       const usableBottom = window.innerHeight - inset;
       const w = box.offsetWidth, h = box.offsetHeight;
+      let left, top;
       if (placement === "side") {
-        const s = sidePosition(r, w, h, window.innerWidth, usableBottom, pad);
-        box.style.left = `${s.left}px`;
-        box.style.top = `${s.top}px`;
-        box.style.visibility = "visible";
-        return;
+        ({ left, top } = sidePosition(r, w, h, window.innerWidth, usableBottom, pad));
+      } else {
+        const below = usableBottom - r.bottom;
+        const wantTop = placement === "top" || (below < h + pad && r.top > h + pad);
+        top = wantTop ? r.top - h - pad : r.bottom + pad;
+        left = r.left + r.width / 2 - w / 2;
+        left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
+        top = Math.max(pad, Math.min(top, usableBottom - h - pad));
       }
-      const below = usableBottom - r.bottom;
-      const wantTop = placement === "top" || (below < h + pad && r.top > h + pad);
-      let top = wantTop ? r.top - h - pad : r.bottom + pad;
-      let left = r.left + r.width / 2 - w / 2;
-      left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
-      top = Math.max(pad, Math.min(top, usableBottom - h - pad));
       box.style.left = `${left}px`;
       box.style.top = `${top}px`;
       box.style.visibility = "visible";

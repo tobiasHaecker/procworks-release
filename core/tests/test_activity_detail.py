@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""E2: activity detail states (Aktivitaets-Detailzustaende-Konzept).
+"""E2: activity detail states (suspended / failed overlay).
 
 SUSPENDED/FAILED live as an overlay over the untouched base marking (V1-V4):
 only the owner pauses/continues/fails, a suspended step must resume before
@@ -76,7 +76,7 @@ def test_suspend_blocks_completion_until_resume_v1_v2() -> None:
     assert inst.node_details[node] is NodeDetailState.SUSPENDED
     assert inst.claimed_by[node] == ANNA
 
-    with pytest.raises(ExecutionError):  # §4: finish only from RUNNING
+    with pytest.raises(ExecutionError):  # finish only from RUNNING
         complete_activity(inst, schema, node, agent_id=ANNA)
     with pytest.raises(ExecutionError):  # only the owner resumes (V2)
         resume_activity(inst, schema, node, BERT)

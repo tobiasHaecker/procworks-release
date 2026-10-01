@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: BUSL-1.1
 # Self-test a backup by restoring it into a THROWAWAY database and running a few
-# consistency checks, then dropping the throwaway database (concept §7).
+# consistency checks, then dropping the throwaway database.
 #
 # "A backup you cannot restore is worthless." This proves a dump is actually
 # restorable and internally consistent, without touching the live database.
@@ -131,7 +131,7 @@ if [ "$_fail" -ne 0 ]; then
     die "verify FAILED for $(basename "$_dump")"
 fi
 
-# Record a verify success marker for monitoring (§10).
+# Record a verify success marker for monitoring.
 date -u +%Y-%m-%dT%H:%M:%SZ > "${BACKUP_DIR}/.last-verify-success"
 publish_index                 # surface the new verify timestamp to the admin view
 log info verify "OK -- $(basename "$_dump") is restorable and consistent"

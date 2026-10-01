@@ -186,7 +186,7 @@ def test_org_edit_breaking_referencing_schema_is_rejected() -> None:
 
 def test_directory_lists_agents_of_shared_and_local_organisations() -> None:
     """Die persoenliche Arbeitsliste reicht ueber alle Prozesse -- die
-    Namensaufloesung muss es auch (Nachtest 2026-09-22, Mangel 3).
+    Namensaufloesung muss es auch.
 
     Vorher loeste der Client Namen nur im *oben gewaehlten* Schema auf: eine
     Sachbearbeiterin sah interne IDs, sobald ein Prozess mit anderer

@@ -303,7 +303,7 @@ def test_completion_carries_the_ready_stamp_into_the_kpis() -> None:
 
 
 def test_migration_names_the_login_that_triggered_it() -> None:
-    """Der Verlauf zeigte „Instanz migriert - System" (Nachtest 2026-09-22, Mangel 7).
+    """Der Verlauf zeigt nicht „Instanz migriert - System", sondern den Login.
 
     Eine Migration ist eine Entscheidung, kein Maschinenereignis. Ein Login ohne
     Agentenbindung (Modellierer) erscheint deshalb als ``detail.actor``, genau

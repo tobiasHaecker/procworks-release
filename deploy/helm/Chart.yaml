@@ -5,14 +5,14 @@ description: |
   the stateless API server plus the web GUI / reverse proxy. PostgreSQL is
   provided externally and referenced via a DATABASE_URL secret.
 type: application
-version: 1.30.0
-appVersion: "1.30.0"
+version: 1.31.0
+appVersion: "1.31.0"
 keywords:
   - bpm
   - process-engine
   - adept
-home: https://github.com/your-org/procworks
+home: https://github.com/tobiasHaecker/procworks-release
 sources:
-  - https://github.com/your-org/procworks
+  - https://github.com/tobiasHaecker/procworks-release
 maintainers:
   - name: Tobias Haecker

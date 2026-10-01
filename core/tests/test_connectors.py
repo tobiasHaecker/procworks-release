@@ -218,7 +218,7 @@ def test_dal_non_external_element_raises() -> None:
 # the DAL resolves it from the connector. Demanding a prior mandatory write (D1)
 # made such an element impossible to read as a mandatory input, so the whole
 # connector-read feature could only be modelled with optional reads. Its supply
-# guarantee is carried by the lookup key instead (concept 9.2).
+# guarantee is carried by the lookup key instead.
 
 
 def _readable_external(*, write_key: bool) -> tuple[ProcessSchema, str]:

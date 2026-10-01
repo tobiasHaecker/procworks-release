@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""Input checks on mask fields (Validierung 2026-09-25, VAL-22).
+"""Input checks on mask fields.
 
 Masks had no minimum, maximum or pattern; a wrong value was only noticed later,
 if at all. ``FormField`` carries optional ``min_value``/``max_value`` (number

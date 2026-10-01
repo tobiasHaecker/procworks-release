@@ -72,7 +72,7 @@ _BACKOFF_CAP_MS = 300_000
 
 
 def _no_header_break(value: str) -> str:
-    """Strip CR/LF so a value can never inject an extra e-mail header (§8)."""
+    """Strip CR/LF so a value can never inject an extra e-mail header."""
 
     return value.replace("\r", " ").replace("\n", " ")
 
@@ -193,7 +193,7 @@ def create_mail_sender() -> MailSender:
         return NullMailSender()
     return SmtpMailSender(
         host=host,
-        # ``or``: Compose reicht nicht gesetzte Variablen als "" durch (NT-12).
+        # ``or``: Compose reicht nicht gesetzte Variablen als "" durch.
         port=int(os.getenv("PROCWORKS_SMTP_PORT") or "587"),
         sender=sender,
         username=os.getenv("PROCWORKS_SMTP_USER") or None,

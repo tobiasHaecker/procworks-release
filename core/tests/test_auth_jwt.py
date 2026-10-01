@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BUSL-1.1
-"""JwtAuthBackend (Auth-Konzept §3.2): IdP-issued bearer JWTs at the boundary.
+"""JwtAuthBackend: IdP-issued bearer JWTs at the boundary.
 
 HS256 (stdlib shared-secret path) carries the full claim/expiry/issuer/
 audience semantics and runs everywhere; RS256/JWKS adds the OIDC key handling
@@ -244,7 +244,7 @@ def test_auth_config_reports_jwt_and_optional_oidc_login(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """/auth/config meldet den JWT-Modus und -- nur mit Opt-in -- die
-    OIDC-Redirect-Endpunkte (Auth-Konzept §12.4).
+    OIDC-Redirect-Endpunkte.
 
     Ohne die drei Variablen bleibt das Token-Feld der dokumentierte Weg
     (alle oidc_*-Felder null); mit ihnen bietet die SPA den Firmen-Login

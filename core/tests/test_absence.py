@@ -26,6 +26,7 @@ from procworks import (
     create_empty_schema,
     eligible_agents,
     instantiate,
+    open_tasks,
     release,
     serial_insert,
     set_agent_deputy,
@@ -204,3 +205,48 @@ def test_absence_api_rejects_bad_window_and_unknown_agent():
 
         unknown = client.post("/agents/ghost/absences", json=_now_window())
         assert unknown.status_code == 404
+
+
+# --- who a deputy stands in for -------------------------------------------
+
+
+def test_open_task_names_the_absent_agent_a_deputy_covers():
+    """A deputy's task says for whom -- a colleague's task appeared unexplained."""
+
+    rel, act = _build_schema("absvia")
+    instance = instantiate(rel)
+    [task] = open_tasks(rel, instance, absent_agents=frozenset({"a1"}))
+    assert task.deputy_of == {"a2": "a1"}
+    # Negativ: ohne Abwesenheit ist niemand Vertretung -- a1 traegt die Aufgabe selbst.
+    [present] = open_tasks(rel, instance)
+    assert present.deputy_of == {}
+    assert present.eligible_agents == ["a1"]
+
+
+def test_deputy_chain_names_the_agent_directly_covered():
+    """Along a chain (a1 -> a2 -> a3, a1 and a2 absent) each deputy names its predecessor."""
+
+    rel, _ = _build_schema("abschain")
+    org = rel.org_model.model_copy(deep=True)
+    org.agents["a3"] = org.agents["a2"].model_copy(update={"id": "a3", "name": "Z",
+                                                          "deputy_id": None})
+    org.agents["a2"] = org.agents["a2"].model_copy(update={"deputy_id": "a3"})
+    rel = rel.model_copy(update={"org_model": org})
+    [task] = open_tasks(rel, instantiate(rel), absent_agents=frozenset({"a1", "a2"}))
+    assert task.deputy_of == {"a2": "a1", "a3": "a2"}
+
+
+def test_worklist_api_carries_the_covered_agent():
+    _reset_stores()
+    rel, act = _build_schema("absviaapi")
+    api_module._store.put(rel)
+    api_module._instances.put(instantiate(rel))
+
+    with TestClient(app) as client:
+        assert client.get("/agents/a2/tasks").json() == []
+        assert client.post("/agents/a1/absences", json=_now_window()).status_code == 201
+        [task] = client.get("/agents/a2/tasks").json()
+        assert task["deputy_of"] == {"a2": "a1"}
+        # Die eigene Liste der Abwesenden nennt keine Vertretung fuer sie selbst.
+        [own] = client.get("/agents/a1/tasks").json()
+        assert "a1" not in own["deputy_of"]

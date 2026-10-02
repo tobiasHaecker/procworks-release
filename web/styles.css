@@ -24,6 +24,7 @@
   --accent-soft: #21345e;
   --accent-txt: #cfe0ff;      /* Text/Icon auf accent-soft-Flaechen (Chips, Badges) */
   --on-accent: #ffffff;       /* Text auf gefuellter accent-Flaeche (Buttons) */
+  --on-green: #04210f;        /* Text auf gefuellter green-Flaeche (Erledigen-Knopf) */
   --green: #2fbf71;
   --green-soft: #163a2a;
   --amber: #f0a93b;
@@ -46,6 +47,9 @@
 
 /* Helle Variante: ueberschreibt nur die Farb-Variablen (nicht das Layout). */
 :root[data-theme="light"] {
+  /* Text- und Akzentfarben erreichen auf jeder Flaeche dieses Schemas (Hintergrund,
+     Karte, *-soft) mindestens 4,5:1 (WCAG AA) -- Waechter
+     test_light_theme_text_pairs_meet_wcag_aa. */
   --bg: #f4f6fb;
   --bg-elev: #ffffff;
   --bg-elev2: #eceff6;
@@ -53,19 +57,20 @@
   --txt: #1a2233;
   --txt-dim: #5b6678;
   --muted: #5b6678;
-  --accent: #2f6bff;
+  --accent: #0b52ff;
   --accent-soft: #dbe7ff;
   --accent-txt: #1a4bc4;
   --on-accent: #ffffff;
-  --green: #1f9d57;
+  --on-green: #ffffff;
+  --green: #177742;
   --green-soft: #d6f2e2;
-  --amber: #b5760c;
+  --amber: #915f0a;
   --amber-soft: #fbeccb;
-  --red: #d63a4a;
+  --red: #c12838;
   --red-soft: #fbe0e3;
-  --gray: #6b7794;
+  --gray: #5c667f;
   --gray-soft: #e6e9f0;
-  --purple: #7c4dff;
+  --purple: #6933ff;
   --purple-soft: #e7dfff;
   --purple-txt: #5a34c0;
   --topbar-bg: rgba(255, 255, 255, .82);
@@ -198,6 +203,9 @@ body {
   position: sticky; top: 0; z-index: 5; backdrop-filter: blur(8px);
   background: var(--topbar-bg); border-bottom: 1px solid var(--line);
   padding: 14px 26px; display: flex; align-items: center; gap: 14px;
+  /* Bei Laptop-Breite (ca. 1050 px) lief die Kopfzeile ueber: der Import-Knopf
+     lag ausserhalb, und .main verrutschte seitlich. Jetzt bricht sie um. */
+  flex-wrap: wrap; row-gap: 8px;
 }
 /* Hamburger-Knopf der Topbar: oeffnet die mobile Menue-Schublade. Auf dem
    Desktop komplett ausgeblendet (die Sidebar steht dort fest daneben); erst die
@@ -214,12 +222,21 @@ body {
    vorhanden; erst die mobile Media-Query macht ihn zum fixierten Overlay. */
 .nav-scrim { display: none; }
 
-.topbar h1 { font-size: 18px; margin: 0; font-weight: 650; }
-.topbar .sub { color: var(--txt-dim); font-size: 13px; }
+.topbar h1 { font-size: 18px; margin: 0; font-weight: 650; white-space: nowrap; flex: none; }
+/* Untertitel kuerzen statt umbrechen (vorher bis zu sechs Zeilen hoch, die
+   Kopfzeile ueberdeckte den Panelkopf); der volle Text steht im Tooltip. */
+.topbar .sub {
+  color: var(--txt-dim); font-size: 13px;
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Gekuerzt wird nur, wo der Platz knapp ist; auf breiten Bildschirmen steht der
+   volle Untertitel da. */
+@media (max-width: 1400px) { .topbar .sub { max-width: 34ch; } }
 .spacer { flex: 1; }
 .content { padding: 22px 26px 60px; flex: 1; }
 
-.picker { display: flex; align-items: center; gap: 8px; }
+.picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
 .picker select {
   background: var(--bg-elev2); border: 1px solid var(--line); color: var(--txt);
   border-radius: 8px; padding: 7px 10px; font-size: 13px; min-width: 180px;
@@ -234,7 +251,7 @@ body {
 .btn:hover { border-color: var(--accent); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .btn.primary:hover { filter: brightness(1.08); }
-.btn.green { background: var(--green); border-color: var(--green); color: #04210f; }
+.btn.green { background: var(--green); border-color: var(--green); color: var(--on-green); }
 .btn.danger { background: var(--red-soft); border-color: var(--red); color: var(--red); }
 .btn.danger:hover { background: var(--red); color: #fff; border-color: var(--red); }
 .btn.ghost { background: transparent; }
@@ -257,9 +274,20 @@ a:visited { color: var(--accent); }
 .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .row.end { justify-content: flex-end; }
 .grid-2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; }
-@media (max-width: 1100px) { .grid-2 { grid-template-columns: 1fr; } }
+/* ``minmax(0, 1fr)`` statt ``1fr`` (= ``minmax(auto, 1fr)``): Sonst setzte der
+   breiteste nicht umbrechende Inhalt (Knopfreihen der Abteilungshierarchie)
+   die Spaltenbreite, und die Ressourcensicht scrollte am Smartphone seitwaerts. */
+@media (max-width: 1100px) { .grid-2 { grid-template-columns: minmax(0, 1fr); } }
+/* Rasterspalten duerfen schmaler werden als ihre breiteste Tabelle (``minmax(0,
+   …)``-Wirkung): sonst wuchs das Raster auf die Tabellenbreite, und die ganze
+   Seite liess sich seitlich verschieben (Ressourcensicht bei ~1050 px). Eine zu
+   breite Tabelle scrollt stattdessen in ihrem Panel. */
+.grid-2 > * { min-width: 0; }
+.grid-2 .panel-b { overflow-x: auto; }
 
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+/* Hinweis, wenn Liste und Kennzahlen verschiedene Mengen zaehlen. */
+.monitor-scope-note { margin: -8px 0 16px; font-size: 12px; }
 @media (max-width: 1100px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
 .kpi { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
 .kpi .label { color: var(--txt-dim); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; }
@@ -271,15 +299,45 @@ input[type=text], input[type=number], input[type=password], select, textarea {
   background: var(--bg); border: 1px solid var(--line); color: var(--txt);
   border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit;
 }
+/* Nur-Lese-Felder (Anzeige in Masken, gesperrte Eingaben) sahen aus wie
+   Eingabefelder. Eigene Flaeche ohne Rahmen, Text bleibt voll lesbar. */
+input:disabled, select:disabled, textarea:disabled {
+  background: var(--gray-soft); border-color: transparent; color: var(--txt);
+  cursor: default; opacity: 1;
+}
 textarea { resize: vertical; min-height: 90px; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: end; }
+/* Nur Felder teilen sich die Spalten des Rasters. Fliesstext, Hinweise,
+   Ergebnisbereiche und verschachtelte Gruppen belegen die volle Breite --
+   sonst stand ein Bestaetigungstext in zwei schmalen Spalten nebeneinander,
+   und ein Ergebnis landete in einer Mittelspalte. Knoepfe, einzelne
+   Eingaben und Beschriftungen (auch ein Ankreuzfeld wie „Pflichtbindung“
+   neben einem Feld) bleiben in ihrer Spalte.
+   ``min-width: 0`` laesst lange Auswahllisten schrumpfen statt den Dialog
+   seitlich zu sprengen. */
+.form-grid > :not(.field):not(label):not(button):not(.btn):not(input):not(select):not(textarea) { grid-column: 1 / -1; }
+.form-grid > * { min-width: 0; }
+/* Mehrzeilige Eingaben (Begruendung, Beschreibung) brauchen die Breite. */
+.form-grid > .field:has(> textarea) { grid-column: 1 / -1; }
 .field-help { font-size: 11px; color: var(--txt-dim); opacity: .8; }
 /* Fehlerhaftes Feld der Aufgabenmaske: Rahmen und Hinweis am Feld. */
 .field-invalid input, .field-invalid select, .field-invalid textarea { border-color: var(--red); }
 .field-error-msg { font-size: 11px; color: var(--red); }
+/* Einmalig gezeigter Wert (Login, Initialpasswort) mit Kopierknopf. */
+/* Hinweis im Dialogfuss, wenn ein Klick daneben wegen Eingaben nicht schliesst. */
+.modal-keep-hint { flex: 1; font-size: 12px; color: var(--amber); }
+.copy-field { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; font-size: 12px; color: var(--txt-dim); }
+.copy-row { display: flex; gap: 6px; align-items: center; width: 100%; }
+.copy-row input { flex: 1; min-width: 0; font-family: ui-monospace, monospace; }
+/* Live-Aktualisierung wartet wegen ungespeicherter Eingaben: Neuladen anbieten. */
+.live-refresh-hint { display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+  padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); color: var(--txt);
+  position: sticky; top: 0; z-index: 5; }
 /* Benennende Werte unter Aufgabe bzw. Vorgang. */
 .task-context { font-size: 11px; color: var(--txt-dim); }
+/* Vermerk an Aufgaben, die man fuer eine abwesende Person uebernimmt. */
+.task-deputy { font-size: 11px; color: var(--accent); }
 /* Ein Feld ueber die volle Dialogbreite: Tabellennamen und andere lange
    Eingaben waren im halbierten Raster zu schmal, um sie lesen zu koennen. */
 .form-grid .field.wide { grid-column: 1 / -1; }
@@ -391,8 +449,13 @@ tr.hl-row td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 }
 .canvas-more-left { left: 10px; }
 .canvas-more-right { right: 10px; }
+/* Oben links: unten liegen die Randpfeile, oben rechts der Einpassen-Knopf,
+   rechts die Schritt-Karte -- vorher ueberdeckten sich Hinweis, „weiter
+   rechts“ und Karte. */
 .canvas-hint {
-  position: absolute; right: 10px; bottom: 8px; z-index: 2;
+  position: absolute; left: 10px; top: 8px; z-index: 2;
+  /* nie bis unter den Einpassen-Knopf oben rechts */
+  max-width: calc(100% - 130px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 11px; color: var(--txt-dim);
   background: var(--bg-elev2); border: 1px solid var(--line);
   border-radius: 6px; padding: 3px 8px; opacity: .85;
@@ -418,6 +481,10 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .nsub rect { fill: var(--purple-soft); stroke: var(--purple); }
 .s-COMPLETED rect { fill: var(--green-soft); stroke: var(--green); }
 .s-RUNNING rect, .s-ACTIVATED rect { fill: var(--accent-soft); stroke: var(--accent); }
+/* Noch nicht erreicht: aussehen wie im Modellier-Kontrollfluss. Ohne Regel
+   fiel das SVG auf schwarze Fuellung ohne Rand zurueck (in beiden Schemata).
+   Jede NodeState braucht eine .s-<STATE>-Regel (Waechter im Test). */
+.s-NOT_ACTIVATED rect { fill: var(--bg-elev2); stroke: var(--line); }
 .s-SKIPPED rect { fill: var(--gray-soft); stroke: var(--gray); opacity: .6; }
 .gnode.selected rect { stroke: var(--graph-sel-stroke); stroke-width: 2.5px; }
 
@@ -449,6 +516,8 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .finding { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .finding:last-child { border-bottom: 0; }
 .finding .rule { font-weight: 700; color: var(--red); min-width: 34px; }
+/* Modellhinweise (G-Gruppe) sind beratend -- neutral, nicht rot wie Befunde. */
+.finding .rule.rule-hint { color: var(--txt-dim); }
 .ok-banner { color: var(--green); font-size: 13px; display: flex; align-items: center; gap: 8px; }
 .warn-banner { color: var(--amber); background: var(--amber-soft); font-size: 13px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; }
 
@@ -473,7 +542,9 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 /* ---- Org-Baum (Abteilungen) ---- */
 .tree { display: flex; flex-direction: column; gap: 4px; }
 .tree-children { margin-left: 18px; padding-left: 12px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
-.tree-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--hairline); }
+/* ``flex-wrap``: Name, Kennzeichen und vier Knoepfe passen schmal nicht in eine
+   Zeile -- sie brechen um statt die Seite zu verbreitern. */
+.tree-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--hairline); }
 .tree-name { font-size: 13px; font-weight: 600; }
 .tree-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-txt); white-space: nowrap; }
 .tree-badge.muted-badge { background: var(--gray-soft); color: var(--muted); }
@@ -542,6 +613,10 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .modal-f { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 10px; }
 /* Eingabemaske: Gruppen und Spalten (maskLayout in app.js). */
 .mask-layout { display: flex; flex-direction: column; gap: 10px; }
+/* In der Aufgabenmaske liegt das Raster in einem ``form-grid`` mit automatischen
+   150-px-Spalten; ohne volle Breite landete die ganze Maske in einer schmalen
+   Zelle (Felder gequetscht, Vorschau im Designer breit). */
+.form-grid > .mask-layout { grid-column: 1 / -1; }
 .mask-cols { display: grid; gap: 10px 14px; }
 .mask-group { font-weight: 700; font-size: 13px; color: var(--txt); border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-top: 4px; }
 @media (max-width: 720px) {
@@ -583,9 +658,20 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 .tabs button { background: transparent; border: 0; color: var(--txt-dim); padding: 8px 12px; cursor: pointer; font-size: 13px; font-weight: 600; border-bottom: 2px solid transparent; }
 .tabs button.active { color: var(--txt); border-bottom-color: var(--accent); }
 .branch-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
+.branch-row > * { min-width: 0; }
+/* Drei Felder ohne Entfernen-Knopf: gleich breit, bei wenig Platz umbrechen.
+   Mit der ``auto``-Spalte bestimmte die laengste Rollenbezeichnung die Breite
+   und schob „Ziel-Rolle“ ueber den Dialogrand. */
+.branch-row.esc-row { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
+/* Auswahllisten und Eingaben in Feldern nie breiter als ihr Feld. */
+.field select, .field input, .field textarea { max-width: 100%; }
 
 /* ---- Toast ---- */
 .toast-root { position: fixed; right: 18px; bottom: calc(18px + var(--demo-banner-h, 0px)); display: flex; flex-direction: column; gap: 10px; z-index: 60; }
+/* Bei offenem Dialog oben statt unten: Unten rechts lag eine Ablehnung genau
+   ueber „Abbrechen“/„Speichern“ des Dialogs -- wer nach ihrem Ablauf dort
+   klickte, traf den Hintergrund. Der Dialogkopf traegt nur den Titel. */
+body:has(#modal-root .modal-backdrop) .toast-root { top: 18px; bottom: auto; }
 .toast {
   background: var(--bg-elev2); border: 1px solid var(--line); border-left-width: 4px;
   border-radius: 10px; padding: 12px 16px; font-size: 13px; box-shadow: var(--shadow);
@@ -612,7 +698,9 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 }
 .auth-card {
   background: var(--bg-elev); border: 1px solid var(--line); border-radius: 16px;
-  width: min(380px, 94vw); box-shadow: var(--shadow); padding: 28px 26px;
+  /* Breite abzueglich des Overlay-Rands (2 x 24 px): ``94vw`` liess die Karte
+     bei ~390 px Fensterbreite rechts ueberstehen. */
+  width: min(380px, calc(100vw - 48px)); box-shadow: var(--shadow); padding: 28px 26px;
   display: flex; flex-direction: column; gap: 16px;
 }
 .auth-card .auth-brand { display: flex; align-items: center; gap: 12px; }
@@ -716,6 +804,9 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
 /* Der Einpassen-Knopf sitzt oben rechts IM Canvas, also genau dort, wo die
    Karte einfaehrt. Er weicht ihr aus, solange sie sichtbar ist. */
 .model-canvas .graph-body:has(.step-card) .canvas-fit { right: 384px; }
+/* Mit offener Schritt-Karte ist der Canvas schmal; der Bedienhinweis laege
+   unter Knopf und Karte -- die Karte erklaert die Bedienung ohnehin. */
+.model-canvas .graph-body:has(.step-card) .canvas-hint { display: none; }
 .step-card {
   position: absolute; right: 12px; top: 12px; bottom: 12px; width: 360px; z-index: 4;
   display: flex; flex-direction: column;
@@ -876,6 +967,9 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 10px; max-height: 60vh; overflow-y: auto;
 }
+/* Eigene Vorlage: Karte plus Loeschen-Knopf darunter. */
+.tpl-item { display: flex; flex-direction: column; gap: 6px; }
+.tpl-item .tpl-del { align-self: flex-end; }
 .tpl-card {
   display: flex; flex-direction: column; gap: 6px; text-align: left;
   padding: 12px; border-radius: 10px; cursor: pointer;
@@ -1030,29 +1124,32 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   /* Tabellen als gestapelte Karten. Jede Zeile wird zu einer Karte, die Zellen
      stapeln sich; die (visuell entfernte) Kopfzeile wird je Zelle ueber
      `data-label` (in app.js gesetzt) als vorangestellte Feldbeschriftung
-     ersetzt. So ist „Meine Aufgaben" ohne horizontales Scrollen lesbar. */
-  .content table, .content thead, .content tbody, .content tr, .content td { display: block; width: 100%; }
-  .content thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-  .content tr {
+     ersetzt. So ist „Meine Aufgaben" ohne horizontales Scrollen lesbar.
+     ``.mig-table`` steht in einem Dialog (ausserhalb von ``.content``) und
+     bekommt dieselbe Kartenform. */
+  .content table, .content thead, .content tbody, .content tr, .content td,
+  .mig-table, .mig-table thead, .mig-table tbody, .mig-table tr, .mig-table td { display: block; width: 100%; }
+  .content thead, .mig-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .content tr, .mig-table tr {
     border: 1px solid var(--line); border-radius: 10px;
     background: var(--bg-elev2); margin-bottom: 10px;
   }
   /* Zellen block-gestapelt: die Feldbeschriftung (data-label) steht als kleine
      Zeile ueber dem Wert. Robust gegen lange Werte (z. B. Berechtigten-Listen),
      die einfach umbrechen statt seitlich zu ueberlaufen. */
-  .content td {
+  .content td, .mig-table td {
     display: block; padding: 8px 12px; border-bottom: 1px solid var(--line);
     overflow-wrap: anywhere;
   }
-  .content tr td:last-child { border-bottom: 0; }
-  .content td::before {
+  .content tr td:last-child, .mig-table tr td:last-child { border-bottom: 0; }
+  .content td::before, .mig-table td::before {
     content: attr(data-label); display: block; margin-bottom: 2px;
     color: var(--txt-dim); font-size: 11px; font-weight: 700;
     text-transform: uppercase; letter-spacing: .4px;
   }
   /* Zellen ohne Ueberschrift (z. B. die Aktionsspalte mit „Erledigen") tragen
      kein Label; ihr Knopf wird breit und gut tippbar. */
-  .content td:not([data-label])::before { content: none; }
+  .content td:not([data-label])::before, .mig-table td:not([data-label])::before { content: none; }
   .content td:not([data-label]) .btn { width: 100%; justify-content: center; }
   /* Zeilen-Hervorhebung (Sprung aus dem Kontrollfluss) auf der Karte. */
   .content tr.hl-row td:first-child { box-shadow: none; }
@@ -1074,6 +1171,8 @@ svg.graph { display: block; min-width: 100%; user-select: none; transform-origin
   .card-sec-h { padding: 12px; }
   /* Ohne Tastatur ist der Tastenhinweis nur Ballast. */
   .model-status-key { display: none; }
+  /* Am Telefon lag der Bedienhinweis ueber dem „◀“; Wischen erklaert sich. */
+  .canvas-hint { display: none; }
 }
 
 

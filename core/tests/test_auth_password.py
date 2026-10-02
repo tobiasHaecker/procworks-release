@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 import procworks.api as api_module
 from procworks.api import app
-from procworks.auth import AuthError
+from procworks.auth import AuthError, Principal
 from procworks.auth_password import (
     InMemoryCredentialStore,
     PasswordAuthBackend,
@@ -542,3 +542,124 @@ def test_api_provision_login_with_display_name(
     )
     assert login.status_code == 200
 
+
+
+def test_api_delete_own_login_is_refused(password_mode: PasswordAuthBackend) -> None:
+    """Das eigene Login lässt sich nicht löschen -- der Grund steht im Code."""
+    token = _admin_login(password_mode)
+    resp = client.delete("/users/admin", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "USERS.delete-self"
+    assert password_mode.store.get_user("admin") is not None
+
+
+def test_api_delete_other_admin_is_allowed_and_ends_sessions(
+    password_mode: PasswordAuthBackend,
+) -> None:
+    """Positivfall: Ein zweiter Admin darf gelöscht werden; seine Sitzung endet."""
+    token = _admin_login(password_mode)
+    headers = {"Authorization": f"Bearer {token}"}
+    initial = client.post(
+        "/users", json={"roles": ["admin"], "login": "boss"}, headers=headers
+    ).json()["initial_password"]
+    boss_token = client.post(
+        "/auth/login", json={"login": "boss", "password": initial}
+    ).json()["token"]
+    assert client.delete("/users/boss", headers=headers).status_code == 204
+    assert client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {boss_token}"}
+    ).status_code == 401
+
+
+def test_api_delete_last_admin_is_refused(password_mode: PasswordAuthBackend) -> None:
+    """Der letzte Login mit Rolle admin bleibt -- auch wenn eine Admin-Identität
+    ohne eigenen Login (z. B. Firmenkonto) ihn löschen will."""
+    api_module.app.dependency_overrides[api_module.get_principal] = lambda: Principal(
+        subject="sso.admin", roles=frozenset({"admin"})
+    )
+    try:
+        resp = client.delete("/users/admin")
+    finally:
+        api_module.app.dependency_overrides.pop(api_module.get_principal, None)
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "USERS.last-admin"
+    assert password_mode.store.get_user("admin") is not None
+
+
+def test_api_delete_user_by_non_admin_is_forbidden(
+    password_mode: PasswordAuthBackend,
+) -> None:
+    """Negativfall: Ohne Rolle admin 403 ``forbidden`` -- der Login bleibt."""
+    token = _admin_login(password_mode)
+    headers = {"Authorization": f"Bearer {token}"}
+    initial = client.post(
+        "/users", json={"roles": ["operator"], "login": "op1"}, headers=headers
+    ).json()["initial_password"]
+    op_token = client.post(
+        "/auth/login", json={"login": "op1", "password": initial}
+    ).json()["token"]
+    resp = client.delete("/users/admin", headers={"Authorization": f"Bearer {op_token}"})
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "forbidden"
+    assert password_mode.store.get_user("admin") is not None
+
+
+def test_wipe_keeps_admins_when_no_kept_login_is_admin(
+    password_mode: PasswordAuthBackend,
+) -> None:
+    """Grenzfall des Zurücksetzens: Ist unter den behaltenen Logins kein
+    Administrator (mehr), bleiben die Admin-Logins -- nie ein System ohne Admin.
+    Gewöhnliche Logins verschwinden trotzdem."""
+    password_mode.create_user(subject="b", roles=["admin"], login="boss")
+    password_mode.create_user(subject="o", roles=["operator"], login="op9")
+    api_module._wipe_users({"gone.admin"})
+    logins = {u.login for u in password_mode.store.list_users()}
+    assert logins == {"admin", "boss"}
+
+
+def test_wipe_removes_other_admins_when_acting_admin_is_kept(
+    password_mode: PasswordAuthBackend,
+) -> None:
+    """Gewohnter Fall: Der handelnde Admin bleibt, alle anderen Logins gehen."""
+    password_mode.create_user(subject="b", roles=["admin"], login="boss")
+    api_module._wipe_users({"admin"})
+    assert {u.login for u in password_mode.store.list_users()} == {"admin"}
+
+
+# --- the refusal names its concrete reason ----------------------------------
+
+
+def test_change_password_too_short_names_the_minimum(password_mode: PasswordAuthBackend) -> None:
+    token = _admin_login(password_mode)
+    resp = client.post(
+        "/auth/change-password",
+        json={"current_password": "admin-pw1", "new_password": "short"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["code"] == "PW.too-short"
+    assert detail["params"] == {"min": "8"}
+
+
+def test_change_password_unchanged_is_its_own_reason(password_mode: PasswordAuthBackend) -> None:
+    token = _admin_login(password_mode)
+    resp = client.post(
+        "/auth/change-password",
+        json={"current_password": "admin-pw1", "new_password": "admin-pw1"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "PW.unchanged"
+
+
+def test_taken_login_is_named(password_mode: PasswordAuthBackend) -> None:
+    token = _admin_login(password_mode)
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.post("/users", json={"roles": ["viewer"], "login": "doppelt"},
+                       headers=headers).status_code == 201
+    resp = client.post("/users", json={"roles": ["viewer"], "login": "doppelt"},
+                       headers=headers)
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "USERS.login-taken"
+    assert resp.json()["detail"]["params"] == {"login": "doppelt"}

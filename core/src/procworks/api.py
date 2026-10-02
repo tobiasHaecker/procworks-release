@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import secrets
+import threading
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
@@ -1026,6 +1027,9 @@ class TemplateSummary(BaseModel):
 class SerialInsertRequest(BaseModel):
     label: str = Field(..., examples=["Antrag prüfen"])
     after_node_id: str = Field(..., examples=["start"])
+    #: Optional: the target of the edge to splice when the anchor has several
+    #: exits (the start of one branch of a split, also an empty XOR branch).
+    before_node_id: str | None = Field(default=None, examples=[None])
 
 
 class ParallelInsertRequest(BaseModel):
@@ -2225,8 +2229,19 @@ def post_change_password(
     except AuthError as exc:
         raise HTTPException(status_code=401, detail=exc.message) from exc
     except PasswordPolicyError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_policy_detail(exc)) from exc
     return Response(status_code=204)
+
+
+def _policy_detail(exc: PasswordPolicyError) -> dict[str, object]:
+    """400 body of a password/login policy refusal: message, code, params.
+
+    Same shape as the other coded boundary refusals (``USERS.delete-self`` ...),
+    so the web client words it through its one message catalogue and names the
+    concrete reason (too short, unchanged, login taken, unknown role).
+    """
+
+    return {"message": str(exc), "code": exc.code, "params": exc.params}
 
 
 @app.get("/users", response_model=list[UserView], dependencies=[_admin])
@@ -2259,7 +2274,7 @@ def create_user(req: CreateUserRequest) -> CreateUserResponse:
             display_name=display_name,
         )
     except PasswordPolicyError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=_policy_detail(exc)) from exc
     return CreateUserResponse(
         user=user_view(user),
         login=user.login,
@@ -2283,28 +2298,104 @@ def reset_user_password(login: str) -> ResetPasswordResponse:
     return ResetPasswordResponse(login=login, initial_password=initial_password)
 
 
+# Serialises "is this the last admin?" with the deletion itself. Without it two
+# admins deleting each other at the same moment would both see the other one
+# still present and both succeed, leaving no admin. The lock guards one API
+# process. With several replicas (the Helm chart defaults to two) a window of
+# milliseconds remains between processes; accepted, because it needs two admins
+# deleting each other at the same instant, and setting PROCWORKS_ADMIN_LOGIN
+# plus PROCWORKS_ADMIN_PASSWORD re-creates a missing admin on the next start.
+_user_delete_lock = threading.Lock()
+
+
 @app.delete("/users/{login}", status_code=204, dependencies=[_admin])
-def delete_user(login: str) -> Response:
-    """Remove a login user (admin only)."""
+def delete_user(login: str, principal: Principal = Depends(get_principal)) -> Response:
+    """Remove a login user (admin only) and end its sessions.
+
+    Two deletions are refused with 409, because afterwards nobody could repair
+    the result through the application:
+
+    * ``USERS.delete-self`` -- the caller's own login (the admin would lock
+      themselves out mid-session);
+    * ``USERS.last-admin`` -- the last login holding the ``admin`` role (no
+      one could provision or reset logins any more).
+
+    An unknown ``login`` stays a silent 204 (idempotent delete, unchanged API).
+
+    :param login: login to remove.
+    :param principal: the calling admin.
+    :raises HTTPException: 409 with ``code``/``params`` in ``detail``.
+    """
 
     backend = _password_backend()
-    backend.store.delete_user(login)
+    with _user_delete_lock:
+        _delete_user_checked(backend, login, principal)
     backend.revoke_sessions(login)  # sessions persist across restarts -- end them
     return Response(status_code=204)
+
+
+def _delete_user_checked(
+    backend: PasswordAuthBackend, login: str, principal: Principal
+) -> None:
+    """Refuse self/last-admin deletion, otherwise delete (caller holds the lock).
+
+    :raises HTTPException: 409 ``USERS.delete-self`` / ``USERS.last-admin``.
+    """
+
+    target = backend.store.get_user(login)
+    if target is not None and login == principal.subject:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "cannot delete your own login",
+                "code": "USERS.delete-self",
+                "params": {"login": login},
+            },
+        )
+    if target is not None and "admin" in target.roles:
+        other_admins = [
+            u for u in backend.store.list_users()
+            if u.login != login and "admin" in u.roles
+        ]
+        if not other_admins:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "cannot delete the last admin login",
+                    "code": "USERS.last-admin",
+                    "params": {"login": login},
+                },
+            )
+    backend.store.delete_user(login)
 
 
 def _wipe_users(keep_logins: set[str]) -> None:
     """Delete every login except the ones in ``keep_logins`` (password mode).
 
     The acting admin (and any explicitly kept admin) survive a reset so the
-    operator stays logged in and the system remains administrable. In open/token
-    mode there is no credential store, so there is nothing to wipe.
+    operator stays logged in and the system remains administrable. If none of
+    the kept logins is an admin (the acting admin was deleted concurrently, or
+    acts through an identity without a stored login), every admin login is
+    kept as well -- a reset never leaves the system without an administrator.
+    In open/token mode there is no credential store, so there is nothing to
+    wipe.
+
+    :param keep_logins: logins that must survive.
     """
 
     if not isinstance(_auth_backend, PasswordAuthBackend):
         return
-    for user in _auth_backend.store.list_users():
-        if user.login not in keep_logins:
+    # Same lock as DELETE /users: a concurrent deletion of the acting admin
+    # must not interleave with the wipe and leave no admin behind.
+    with _user_delete_lock:
+        users = _auth_backend.store.list_users()
+        # Re-checked under the lock: if no kept login is (still) an admin --
+        # e.g. the acting admin was deleted meanwhile -- admin logins survive
+        # the wipe, so the system never ends up without an administrator.
+        kept_admin = any(u.login in keep_logins and "admin" in u.roles for u in users)
+        for user in users:
+            if user.login in keep_logins or (not kept_admin and "admin" in user.roles):
+                continue
             _auth_backend.store.delete_user(user.login)
             _auth_backend.revoke_sessions(user.login)
 
@@ -2445,6 +2536,8 @@ class MailOutboxStatus(BaseModel):
     failed: int
     dead: int
     sent: int
+    #: Dropped because no mail server is configured (final, never sent).
+    dropped: int = 0
     entries: list[MailOutboxEntryView]
 
 
@@ -2484,6 +2577,7 @@ def _mail_outbox_status() -> MailOutboxStatus:
         failed=counts[MailOutboxState.FAILED],
         dead=counts[MailOutboxState.DEAD],
         sent=counts[MailOutboxState.SENT],
+        dropped=counts[MailOutboxState.DROPPED],
         entries=[_mail_outbox_view(entry) for entry in entries],
     )
 
@@ -2697,7 +2791,9 @@ def get_metrics(schema_id: str) -> ModelReport:
 )
 def post_serial_insert(schema_id: str, req: SerialInsertRequest) -> ProcessSchema:
     schema = _get_or_404(schema_id)
-    return _commit_or_422(lambda: ops.serial_insert(schema, req.label, req.after_node_id))
+    return _commit_or_422(
+        lambda: ops.serial_insert(schema, req.label, req.after_node_id, req.before_node_id)
+    )
 
 
 @app.post(
@@ -4544,6 +4640,12 @@ def _tasks_for_agent(agent_id: str) -> list[OpenTask]:
     Withdrawn view (E1): a task someone *else* has claimed leaves this personal
     list until it is returned or completed; the agent's own claimed tasks stay
     (marked via ``claimed_by``). The instance-wide list stays complete.
+
+    Test instances never appear here (nor for deputies, who see the same
+    list): they are a modeller's dry run, played through in the test-run view
+    via ``/instances/{id}/tasks``. In a real worklist they looked exactly like
+    real tasks and could be claimed and completed unnoticed -- mails and
+    escalations of test instances are silent for the same reason.
     """
 
     _escalation_sweep()  # lazy boundary timer (T3/E9): fire due stages first
@@ -4552,6 +4654,8 @@ def _tasks_for_agent(agent_id: str) -> list[OpenTask]:
     for instance_id in _instances.list_ids():
         instance = _instances.get(instance_id)
         if instance is None or instance.state is not InstanceState.RUNNING:
+            continue
+        if instance.is_test:
             continue
         schema = _effective_schema_for(instance)
         ctx = _time_context(instance, schema)
@@ -5448,6 +5552,9 @@ class MigrationCandidate(BaseModel):
     #: Mandatory elements the instance lacks and the target can no longer
     #: produce (M4) -- the assistant asks for start values for exactly these.
     missing_data: list[str]
+    #: When the instance started -- the assistant names it by that when it has
+    #: no naming values yet, instead of showing the bare id.
+    started_at: datetime | None = None
 
 
 class MigrationAssistantReport(BaseModel):
@@ -5589,6 +5696,7 @@ def get_migration_report(
                 migratable=not findings,
                 findings=findings,
                 missing_data=missing,
+                started_at=inst.started_at,
             )
         )
     return MigrationAssistantReport(
@@ -5740,13 +5848,16 @@ def get_unstaffed_steps(
 ) -> list[assignment.UnstaffedStep]:
     """Open human steps across all running instances that nobody may work.
 
-    The monitoring's "Niemand zuständig" figure and filter. Test instances are
+    The monitoring's "Niemand zuständig" figure and filter (reasons
+    ``no_rule``/``nobody``/``no_login``) and the weaker "Nur Abwesende
+    zuständig" (``only_absent``). Test instances are
     left out (throw-away, not operations). Without it a stalled instance would
     show "overdue 0, escalated 0" and be visible only in its own detail view.
     See :func:`assignment.unstaffed_steps`.
     """
 
     absent = _current_absent_agents()
+    with_login = _agents_with_login()
     own = _involved_instance_ids(principal) if _reads_only_own_instances(principal) else None
     found: list[assignment.UnstaffedStep] = []
     for instance_id in _instances.list_ids():
@@ -5756,9 +5867,25 @@ def get_unstaffed_steps(
         if instance is None or instance.is_test:
             continue
         found += assignment.unstaffed_steps(
-            _effective_schema_for(instance), instance, absent_agents=absent
+            _effective_schema_for(instance),
+            instance,
+            absent_agents=absent,
+            agents_with_login=with_login,
         )
     return found
+
+
+def _agents_with_login() -> frozenset[str] | None:
+    """Agent ids bound to a stored login, or ``None`` when that is unknowable.
+
+    Only password mode keeps every login in a credential store. In token and
+    JWT mode people sign in without a stored record, so "has no login" cannot
+    be decided there -- reporting it would raise false alarms.
+    """
+
+    if not isinstance(_auth_backend, PasswordAuthBackend):
+        return None
+    return frozenset(u.agent_id for u in _auth_backend.store.list_users() if u.agent_id)
 
 
 @app.get("/monitoring/process-map", response_model=ProcessMap, dependencies=[_read])

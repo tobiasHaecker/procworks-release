@@ -1084,12 +1084,8 @@ const Tour = (() => {
       if (placement === "side") {
         ({ left, top } = sidePosition(r, w, h, window.innerWidth, usableBottom, pad));
       } else {
-        const below = usableBottom - r.bottom;
-        const wantTop = placement === "top" || (below < h + pad && r.top > h + pad);
-        top = wantTop ? r.top - h - pad : r.bottom + pad;
-        left = r.left + r.width / 2 - w / 2;
-        left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
-        top = Math.max(pad, Math.min(top, usableBottom - h - pad));
+        ({ left, top } = autoPosition(r, w, h, window.innerWidth, usableBottom, pad,
+          placement === "top"));
       }
       box.style.left = `${left}px`;
       box.style.top = `${top}px`;
@@ -1128,6 +1124,45 @@ const Tour = (() => {
     return { left, top };
   }
 
+  /**
+   * Automatische Platzierung: unter dem Ziel, sonst darüber, sonst daneben,
+   * sonst an den Fensterrand, der das Ziel am wenigsten verdeckt.
+   *
+   * Früher wurde das Popup, wenn es weder darunter noch darüber passte, per
+   * Klemmung ans Fenster *in* das Ziel geschoben -- bei breiten, hohen Zielen
+   * (Aufgabenliste, Abwesenheits-Panel, Sicherungen) lag es dann genau auf der
+   * Zeile, um die es ging. Reine Rechnung (kein DOM), prüfbar ohne Browser.
+   *
+   * @param {{left:number,right:number,top:number,bottom:number,width:number}} r Zielrechteck.
+   * @param {number} w Popup-Breite.
+   * @param {number} h Popup-Höhe.
+   * @param {number} viewW Fensterbreite.
+   * @param {number} usableBottom Unterkante des nutzbaren Bereichs (über dem Demo-Banner).
+   * @param {number} pad Randabstand.
+   * @param {boolean} [preferTop] oberhalb bevorzugen (``placement: "top"``)
+   * @returns {{left:number, top:number}} immer innerhalb des Fensters
+   */
+  function autoPosition(r, w, h, viewW, usableBottom, pad, preferTop) {
+    const clampX = (x) => Math.max(pad, Math.min(x, viewW - w - pad));
+    // Auch ein Ziel ausserhalb des Bilds (noch nicht hineingerollt) ergibt
+    // eine Position im Fenster.
+    const clampY = (y) => Math.max(pad, Math.min(y, usableBottom - h - pad));
+    const centred = clampX(r.left + r.width / 2 - w / 2);
+    const fitsBelow = usableBottom - r.bottom >= h + 2 * pad;
+    const fitsAbove = r.top >= h + 2 * pad;
+    if (preferTop && fitsAbove) return { left: centred, top: clampY(r.top - h - pad) };
+    if (fitsBelow) return { left: centred, top: clampY(r.bottom + pad) };
+    if (fitsAbove) return { left: centred, top: clampY(r.top - h - pad) };
+    const sideRoom = r.left - pad >= w + pad || viewW - r.right - pad >= w + pad;
+    if (sideRoom) return sidePosition(r, w, h, viewW, usableBottom, pad);
+    // Kein freier Platz: an den Rand, der weniger vom Ziel verdeckt. Bei
+    // Gleichstand unten -- oben stehen Überschrift und erste Zeile.
+    const atTop = pad, atBottom = Math.max(pad, usableBottom - h - pad);
+    const cover = (y) => Math.max(0, Math.min(r.bottom, y + h) - Math.max(r.top, y));
+    const top = cover(atTop) < cover(atBottom) ? atTop : atBottom;
+    return { left: centred, top };
+  }
+
   // --- Öffentliche Schnittstelle ------------------------------------------
 
   return {
@@ -1141,6 +1176,8 @@ const Tour = (() => {
     savedProgress,
     /** Nur für Prüfungen: die reine Platzierungsrechnung (siehe sidePosition). */
     _sidePosition: sidePosition,
+    /** Nur für Prüfungen: die automatische Platzierung (siehe autoPosition). */
+    _autoPosition: autoPosition,
     /** @returns {boolean} true, solange eine Tour läuft. */
     get running() { return !!t.tour; },
     /** @returns {boolean} true im schreibfreien Modus (für das GUI-Abzeichen). */

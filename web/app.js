@@ -140,6 +140,10 @@ const state = {
   testStarter: localStorage.getItem("testStarter") || null,
   testAgentA: localStorage.getItem("testAgentA") || null,
   testAgentB: localStorage.getItem("testAgentB") || null,
+  // Simulation der Pruefinstanz-Sicht: { key: Schema-id, values: {elemId:
+  // Eingabe}, result: letztes Ergebnis | null }. Haelt beides ueber das
+  // automatische Neuzeichnen hinweg; nicht persistiert.
+  simulation: null,
   // Licensing (dormant unless the backend is enforced). `license` is the last
   // /license/status snapshot, `licenseAgents` maps agent_id -> AgentLicenseView.
   // Both stay null (and the whole license UI stays hidden) while the backend
@@ -266,18 +270,58 @@ const DATA_TYPES = ["INTEGER", "FLOAT", "DECIMAL", "STRING", "DATE", "BOOLEAN", 
 function isNumericType(t) { return t === "INTEGER" || t === "FLOAT" || t === "DECIMAL"; }
 
 /**
+ * Zahl in deutscher Schreibweise mit fester Stellenzahl („7,6“, „1.234,5“).
+ * Statt ``toFixed`` (Dezimalpunkt, kein Tausendertrennzeichen).
+ * @param {number} x Zahl
+ * @param {number} [digits=0] Nachkommastellen
+ * @returns {string}
+ */
+function fmtNumber(x, digits) {
+  const d = digits || 0;
+  return Number(x).toLocaleString("de-DE", { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+/**
+ * Anzahl mit passendem Wort: „1 Eintrag“, „2 Einträge“, „0 Einträge“.
+ * @param {number} n Anzahl
+ * @param {string} one Einzahl
+ * @param {string} many Mehrzahl
+ * @returns {string}
+ */
+function countLabel(n, one, many) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/**
+ * Datum (ohne Uhrzeit) deutsch: „30.09.2026“. Ungueltiges bleibt, wie es ist.
+ * @param {string} iso ISO-Zeitpunkt oder -Datum
+ * @returns {string}
+ */
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", timeZone: "UTC" });
+}
+
+/**
  * Anzeigewert eines Datenelements: Betraege immer mit zwei Nachkommastellen
- * und deutschem Trennzeichen („1.234,50“), Ja/Nein ausgeschrieben,
- * alles andere unveraendert. Nur Anzeige -- Eingabefelder erhalten den Rohwert.
- * @param {object|undefined} elem Datenelement
+ * und deutschem Trennzeichen („1.234,50“), Kommazahlen deutsch („8.880,5“),
+ * Ganzzahlen ohne Tausenderpunkt (oft Kennnummern wie Kunden- oder
+ * Lieferantennummer), Ja/Nein ausgeschrieben, alles andere unveraendert. Nur
+ * Anzeige -- Eingabefelder erhalten den Rohwert.
+ * @param {object|undefined} elem Datenelement (nur ``data_type`` wird gelesen)
  * @param {*} v Wert
  * @returns {string}
  */
 function formatValue(elem, v) {
   if (v === null || v === undefined) return "\u2013";
-  if (elem && elem.data_type === "DECIMAL" && typeof v === "number") {
+  const t = elem && elem.data_type;
+  if (t === "DECIMAL" && typeof v === "number") {
     return v.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
+  if (t === "FLOAT" && typeof v === "number") return v.toLocaleString("de-DE");
+  if (t === "INTEGER" && typeof v === "number") return String(v);
   if (v === true) return "Ja";
   if (v === false) return "Nein";
   return String(v);
@@ -307,6 +351,53 @@ const SQL_CARDINALITIES = [["KEY_UNIQUE", "Eindeutiger Schl\u00FCssel"], ["AGGRE
 const WEBHOOK_EVENT_TYPES = [
   "instance.started", "instance.completed", "task.ready", "task.completed", "task.incident",
 ];
+
+// --------------------------------------------------------------------------
+// Deutsche Bezeichnungen der Aufzaehlungen des Kerns
+// --------------------------------------------------------------------------
+// Der Kern liefert Aufzaehlungswerte roh (COMPLETED, READ_WRITE, RELEASED …);
+// angezeigt wird nur, was hier steht. Ein Waechter
+// (test_every_core_enum_value_has_a_german_label) verlangt fuer jeden Wert des
+// Kerns einen Eintrag -- eine neue Auspraegung faellt also im Test auf, nicht
+// als englischer Rohtext beim Kunden. Unbekanntes faellt auf den Rohwert zurueck.
+
+/** Knotentypen (``NodeType``). */
+const NODE_TYPE_LABELS = {
+  START: "Start", END: "Ende", ACTIVITY: "Schritt",
+  AND_SPLIT: "UND-Verzweigung", AND_JOIN: "UND-Zusammenf\u00FChrung",
+  XOR_SPLIT: "Entscheidung", XOR_JOIN: "Entscheidung zusammengef\u00FChrt",
+  SUBPROCESS: "Teilprozess", LOOP_START: "Schleifenbeginn", LOOP_END: "Schleifenende",
+};
+/** Zugriffsart einer Datenbindung (``AccessMode``). */
+const ACCESS_MODE_LABELS = { READ: "liest", WRITE: "schreibt", READ_WRITE: "liest und schreibt" };
+/** Herkunft eines Datenelements (``DataSourceKind``). */
+const DATA_SOURCE_LABELS = { INSTANCE: "im Vorgang", EXTERNAL: "extern (Connector)" };
+/** Lebenszyklus eines Schemas (``LifecycleState``). */
+const LIFECYCLE_LABELS = {
+  ENTWURF: "Entwurf", REVIEW: "in Pr\u00FCfung", RELEASED: "freigegeben",
+  DEPRECATED: "abgel\u00F6st", ARCHIVED: "archiviert",
+};
+/** Webhook-Ereignisse (``outbox.WEBHOOK_EVENTS``); der technische Name bleibt daneben sichtbar. */
+const WEBHOOK_EVENT_LABELS = {
+  "instance.started": "Vorgang gestartet",
+  "instance.completed": "Vorgang abgeschlossen",
+  "task.ready": "Aufgabe bereit",
+  "task.completed": "Aufgabe erledigt",
+  "task.incident": "St\u00F6rung einer externen Aufgabe",
+};
+
+/** @param {string} t Knotentyp @returns {string} deutsche Bezeichnung */
+function nodeTypeLabel(t) { return NODE_TYPE_LABELS[t] || t; }
+/** @param {string} m Zugriffsart @returns {string} deutsche Bezeichnung */
+function accessModeLabel(m) { return ACCESS_MODE_LABELS[m] || m; }
+/** @param {string} s Lebenszyklus @returns {string} deutsche Bezeichnung */
+function lifecycleLabel(s) { return LIFECYCLE_LABELS[s] || s; }
+/**
+ * @param {string} ev technischer Ereignisname (z. B. „task.ready“)
+ * @returns {string} „Aufgabe bereit (task.ready)“ -- der technische Name
+ *   bleibt sichtbar, weil Empfaenger ihn im Webhook-Inhalt wiederfinden.
+ */
+function webhookEventLabel(ev) { return WEBHOOK_EVENT_LABELS[ev] ? `${WEBHOOK_EVENT_LABELS[ev]} (${ev})` : ev; }
 
 // --------------------------------------------------------------------------
 // DOM-Helfer
@@ -471,7 +562,7 @@ const FINDING_TEXTS = {
   "K2.start-count": (p) => ({ text: `Ein Prozess braucht genau einen Start, hier sind es ${p.count}.` }),
   "K2.end-count": (p) => ({ text: `Ein Prozess braucht genau ein Ende, hier sind es ${p.count}.` }),
   "K1.unbalanced": (p) => ({
-    text: `Die Verzweigungen sind nicht vollständig: ${p.splits}× ${p.kind}, aber ${p.joins} passende Zusammenführung(en).`,
+    text: `Die Verzweigungen sind nicht vollständig: ${p.splits}× ${p.kind}, aber ${countLabel(Number(p.joins), "passende Zusammenführung", "passende Zusammenführungen")}.`,
     hint: "Jede Verzweigung braucht genau eine Zusammenführung derselben Art. Beim BPMN-Import zählt auch ein Schritt mit mehreren ausgehenden bzw. eingehenden Pfeilen als Verzweigung bzw. Zusammenführung.",
   }),
   "K1.wrong-join": (p) => ({
@@ -653,6 +744,24 @@ const FINDING_TEXTS = {
     hint: "Das verhindert, dass ein Modell nach innen telefoniert (SSRF-Schutz).",
   }),
 
+  // --- Benutzerverwaltung -------------------------------------------------
+  "USERS.delete-self": () => ({
+    text: "Den eigenen Login kann man nicht löschen – sonst wäre man ausgesperrt.",
+    hint: "Von einem anderen Administrator-Login aus löschen.",
+  }),
+  "USERS.last-admin": (p) => ({
+    text: `„${p.login}“ ist der letzte Login mit der Rolle Administrator und bleibt deshalb bestehen.`,
+    hint: "Erst einen weiteren Administrator-Login anlegen.",
+  }),
+  "USERS.login-taken": (p) => ({
+    text: `Den Login „${p.login}“ gibt es schon.`,
+    hint: "Einen anderen Login-Namen w\u00E4hlen oder den vorhandenen Login in der Benutzerverwaltung zur\u00FCcksetzen.",
+  }),
+  "USERS.unknown-role": (p) => ({ text: `Diese Rolle gibt es nicht: ${p.roles}.` }),
+  // Passwortregeln: je Grund ein eigener Satz statt einer Sammelmeldung.
+  "PW.too-short": (p) => ({ text: `Das neue Passwort ist zu kurz \u2013 mindestens ${p.min} Zeichen.` }),
+  "PW.unchanged": () => ({ text: "Das neue Passwort muss sich vom bisherigen unterscheiden." }),
+
   // --- Vorbedingungen der Operationen (Regel OP) -------------------------
   "OP.not-found": (p) => ({
     text: `${OP_KIND_NAMES[p.kind] || "Das Element"} „${nm(p.name)}“ gibt es nicht (mehr).`,
@@ -661,6 +770,10 @@ const FINDING_TEXTS = {
   "OP.already-exists": (p) => ({
     text: `${OP_KIND_NAMES[p.kind] || "Ein Element"} mit der Kennung „${p.name}“ gibt es schon.`,
     hint: "Eine andere Kennung wählen oder das vorhandene Element verwenden.",
+  }),
+  "OP.no-edge": (p) => ({
+    text: `Zwischen „${p.source}“ und „${p.target}“ gibt es keine Verbindung, auf der sich einfügen ließe.`,
+    hint: "Ansicht neu laden – vermutlich wurde das Modell inzwischen geändert.",
   }),
   "OP.after-end": () => ({ text: "Hinter dem Ende lässt sich nichts einfügen.", hint: "Am „+“ vor dem Ende einfügen." }),
   "OP.anchor-not-serial": () => ({
@@ -752,7 +865,7 @@ const FINDING_TEXTS = {
   // Code. IDs in den Parametern loest ``nm()`` gegen das gezeigte Modell auf,
   // ``p.step`` ergaenzt ``findingText`` aus ``node_id``.
   "K2.degree": (p) => ({
-    text: `${stepOf(p)} hat ${p.in} eingehende und ${p.out} ausgehende Verbindung(en); erwartet ist ${degreeText(p.expected)}.`,
+    text: `${stepOf(p)} hat ${p.in} ${Number(p.in) === 1 ? "Eingang" : "Eingänge"} und ${p.out} ${Number(p.out) === 1 ? "Ausgang" : "Ausgänge"}; erwartet ist ${degreeText(p.expected)}.`,
     hint: "Typisch bei importiertem BPMN: Verbindungen fehlen oder ein Schritt hat mehrere Ein- oder Ausgänge.",
   }),
   "K4.unknown-node": () => ({ text: "Eine Warte-Beziehung verweist auf einen Schritt, den es nicht gibt." }),
@@ -772,8 +885,14 @@ const FINDING_TEXTS = {
   "K6.discriminator-not-instance": (p) => ({ text: `Das Merkmal „${nm(p.element)}“ muss ein Vorgangsdatum sein, kein externes Datum.` }),
   "K6.discriminator-not-boolean": (p) => ({ text: `Das Merkmal „${nm(p.element)}“ muss Ja/Nein sein (ist ${typeName(p.type)}).` }),
   "K6.cells-need-boolean": () => ({ text: "Eine Wiederholungsbedingung ohne Wertbereiche braucht ein Ja/Nein-Merkmal." }),
-  "K6.discriminator-type": (p) => ({ text: `Ein Merkmal vom Typ ${typeName(p.type)} kann über keine Wiederholung entscheiden.` }),
-  "K6.kind-mismatch": (p) => ({ text: `Die Art der Wiederholungsbedingung passt nicht zum Typ ${typeName(p.type)} des Merkmals.` }),
+  "K6.discriminator-type": (p) => ({
+    text: `${merkmalOf(p)} vom Typ ${typeName(p.type)} kann über keine Wiederholung entscheiden.`,
+    hint: "Erst die Wiederholungsbedingung auf ein anderes Merkmal umstellen.",
+  }),
+  "K6.kind-mismatch": (p) => ({
+    text: `Die Wiederholungsbedingung passt nicht zum Typ ${typeName(p.type)} von ${merkmalOf(p, "ihrem Merkmal")}.`,
+    hint: "Erst die Wiederholungsbedingung anpassen, dann den Typ ändern.",
+  }),
   "K6.no-exit-cell": () => ({ text: "Die Wiederholungsbedingung hat keinen Wert, bei dem die Schleife endet – sie liefe endlos." }),
   "K6.no-repeat-cell": () => ({ text: "Die Wiederholungsbedingung hat keinen Wert, bei dem wiederholt wird." }),
   "K6.max-iterations": (p) => ({ text: `Die Höchstzahl der Durchläufe muss mindestens 2 sein (ist ${p.value}).` }),
@@ -790,10 +909,24 @@ const FINDING_TEXTS = {
   "K7.targets-mismatch": () => ({ text: "Die Zweige der Bedingung passen nicht zu den Ausgängen der Entscheidung." }),
   "K7.too-few-branches": () => ({ text: "Eine Entscheidung braucht mindestens zwei Zweige." }),
   "K7.two-empty-branches": () => ({ text: "Eine Entscheidung darf höchstens einen leeren Zweig haben." }),
-  "K7.discriminator-missing": () => ({ text: "Das Entscheidungsmerkmal gibt es nicht." }),
-  "K7.discriminator-not-instance": () => ({ text: "Das Entscheidungsmerkmal muss ein Vorgangsdatum sein, kein externes Datum." }),
-  "K7.discriminator-type": (p) => ({ text: `Ein Merkmal vom Typ ${typeName(p.type)} kann keine Entscheidung steuern.` }),
-  "K7.kind-mismatch": (p) => ({ text: `Die Art der Bedingung passt nicht zum Typ ${typeName(p.type)} des Merkmals.` }),
+  // Diese Befunde kommen meist aus einer abgelehnten Aenderung am Merkmal
+  // (Loeschen, Typwechsel): Sie nennen deshalb Merkmal *und* Verzweigung und
+  // sagen, was zuerst zu tun ist -- nicht den hypothetischen Folgezustand.
+  "K7.discriminator-missing": (p) => ({
+    text: `${merkmalOf(p, "Das Merkmal")} steuert ${branchOf(p)} – ohne dieses Merkmal kann dort nicht entschieden werden.`,
+    hint: "Erst die Entscheidung auf ein anderes Merkmal umstellen oder die Verzweigung entfernen.",
+  }),
+  "K7.discriminator-not-instance": (p) => ({
+    text: `${merkmalOf(p, "Das Merkmal")} steuert ${branchOf(p)} und muss deshalb ein Vorgangsdatum sein, kein externes Datum.`,
+  }),
+  "K7.discriminator-type": (p) => ({
+    text: `${merkmalOf(p, "Das Merkmal")} steuert ${branchOf(p)}, kann das als ${typeName(p.type)} aber nicht.`,
+    hint: "Erst die Entscheidung auf ein anderes Merkmal umstellen.",
+  }),
+  "K7.kind-mismatch": (p) => ({
+    text: `${merkmalOf(p, "Das Merkmal")} steuert ${branchOf(p)}; deren Bedingung passt nicht zum Typ ${typeName(p.type)}.`,
+    hint: "Erst die Bedingung der Entscheidung anpassen, dann den Typ ändern.",
+  }),
   "K7.discriminator-unset": (p) => ({
     text: `Das Merkmal von ${stepOf(p, "der Entscheidung")} ist nicht auf jedem Weg gesetzt, wenn entschieden wird.`,
     hint: "Das Merkmal vorher in einem Schritt schreiben lassen (Pflichtbindung).",
@@ -817,7 +950,10 @@ const FINDING_TEXTS = {
   "U2.duplicate-field": () => ({ text: "Zwei Felder der Maske haben dieselbe Kennung." }),
   "U2.element-twice": (p) => ({ text: `„${nm(p.element)}“ steht zweimal in derselben Maske.` }),
   "U2.empty-label": () => ({ text: "Ein Maskenfeld hat keine Beschriftung." }),
-  "U2.widget-type": (p) => ({ text: `Dieses Bedienelement kann „${nm(p.element)}“ (${typeName(p.type)}) nicht darstellen.` }),
+  "U2.widget-type": (p) => ({
+    text: `In der Maske von ${stepOf(p, "einem Schritt")} kann das Bedienelement „${nm(p.element)}“ (${typeName(p.type)}) nicht darstellen.`,
+    hint: "Das Feld in der Maske auf ein passendes Bedienelement umstellen oder entfernen.",
+  }),
   "U2.dropdown-options": () => ({ text: "Eine Auswahlliste braucht mindestens zwei Einträge." }),
   "U2.duplicate-options": () => ({ text: "Eine Auswahlliste enthält einen Eintrag doppelt." }),
   "U2.options-not-dropdown": () => ({ text: "Nur eine Auswahlliste trägt Einträge." }),
@@ -841,8 +977,8 @@ const FINDING_TEXTS = {
   "C5.empty-column": (p) => ({ text: `Für die Abfrage von „${nm(p.element)}“ fehlt die Spalte.` }),
   "C5.operator-type": (p) => ({ text: `Der Vergleich ${p.operator} passt nicht zu einer Spalte vom Typ ${typeName(p.column_type)} (${nm(p.element)}).` }),
   "C5.unknown-source": (p) => ({ text: `Ein Filter von „${nm(p.element)}“ verweist auf das unbekannte Datenelement „${nm(p.source)}“.` }),
-  "C5.source-not-instance": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ muss ein Vorgangsdatum sein.` }),
-  "C5.source-type": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ (${typeName(p.source_type)}) passt nicht zur Spalte (${typeName(p.column_type)}).` }),
+  "C5.source-not-instance": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ für „${nm(p.element)}“ muss ein Vorgangsdatum sein.` }),
+  "C5.source-type": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ (${typeName(p.source_type)}) für „${nm(p.element)}“ passt nicht zur Spalte (${typeName(p.column_type)}).` }),
   "C5.source-unset": (p) => ({
     text: `Der Filterwert „${nm(p.source)}“ für „${nm(p.element)}“ ist nicht auf jedem Weg gesetzt, bevor gelesen wird.`,
     hint: "Den Filterwert vorher in einem Schritt schreiben lassen (Pflichtbindung).",
@@ -857,8 +993,8 @@ const FINDING_TEXTS = {
   "C8.empty-column": (p) => ({ text: `Für das Zurückschreiben von „${nm(p.element)}“ fehlt die Zielspalte.` }),
   "C8.operator-type": (p) => ({ text: `Der Vergleich ${p.operator} passt nicht zu einer Spalte vom Typ ${typeName(p.column_type)} (${nm(p.element)}).` }),
   "C8.unknown-source": (p) => ({ text: `Ein Filter beim Zurückschreiben von „${nm(p.element)}“ verweist auf das unbekannte Datenelement „${nm(p.source)}“.` }),
-  "C8.source-not-instance": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ muss ein Vorgangsdatum sein.` }),
-  "C8.source-type": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ (${typeName(p.source_type)}) passt nicht zur Spalte (${typeName(p.column_type)}).` }),
+  "C8.source-not-instance": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ für „${nm(p.element)}“ muss ein Vorgangsdatum sein.` }),
+  "C8.source-type": (p) => ({ text: `Der Filterwert „${nm(p.source)}“ (${typeName(p.source_type)}) für „${nm(p.element)}“ passt nicht zur Spalte (${typeName(p.column_type)}).` }),
   "C8.source-unset": (p) => ({
     text: `Der Filterwert „${nm(p.source)}“ ist nicht auf jedem Weg gesetzt, bevor „${nm(p.element)}“ zurückgeschrieben wird.`,
     hint: "Den Filterwert vorher in einem Schritt schreiben lassen (Pflichtbindung).",
@@ -874,7 +1010,7 @@ const FINDING_TEXTS = {
   "Z1.no-operands-allowed": () => ({ text: "Diese Art von Bearbeiterregel darf keine Teilregeln enthalten." }),
   "Z1.reference-missing": () => ({ text: "Der Bearbeiterregel fehlt die Angabe, wer gemeint ist." }),
   "Z1.except-two": () => ({ text: "„außer“ braucht genau zwei Teilregeln: wer, und wer davon nicht." }),
-  "Z1.too-few-operands": (p) => ({ text: `Diese Kombination braucht mindestens ${p.count} Teilregel(n).` }),
+  "Z1.too-few-operands": (p) => ({ text: `Diese Kombination braucht mindestens ${countLabel(Number(p.count), "Teilregel", "Teilregeln")}.` }),
   "Z1.agent-unknown-role": (p) => ({ text: `„${nm(p.agent)}“ hat die unbekannte Rolle „${nm(p.role)}“.` }),
   "Z1.agent-unknown-unit": (p) => ({ text: `„${nm(p.agent)}“ gehört zur unbekannten Abteilung „${nm(p.unit_ref)}“.` }),
   "Z1.own-deputy": (p) => ({ text: `„${nm(p.agent)}“ kann nicht die eigene Vertretung sein.` }),
@@ -993,7 +1129,8 @@ const FINDING_TEXTS = {
  * Viele Befunde des Kerns nennen IDs (Datenelement, Rolle, Person, Schritt),
  * weil der Kern an der Stelle nur die ID kennt. Aufgeloest wird gegen das
  * gezeigte Modell: Schritte (auch im Ad-hoc-Wandel des Vorgangs),
- * Datenelemente, Rollen, Abteilungen, Personen. Unbekanntes bleibt, wie es
+ * Datenelemente, Rollen, Abteilungen, Personen. Unbenannte Knoten heissen
+ * nach ihrem Zusammenhang (``nodeCaptionInContext``). Unbekanntes bleibt, wie es
  * ist -- ein Name aus dem Kern loest sich so auf sich selbst auf.
  * @param {string|undefined} id ID oder bereits ein Name
  * @returns {string}
@@ -1003,7 +1140,9 @@ function nm(id) {
   const models = [state.schema, state.instance && state.instance.ad_hoc_schema].filter(Boolean);
   for (const m of models) {
     const n = (m.nodes || {})[id];
-    if (n) return nodeCaption(n);
+    // Unbenannte Verzweigungen hiessen sonst alle „XOR ▶“ -- im Befund
+    // unbrauchbar; mit Zusammenhang „Entscheidung nach „Betrag erfassen““.
+    if (n) return nodeCaptionInContext(m, n);
     const d = (m.data_elements || {})[id];
     if (d) return d.name || id;
     const org = m.org_model || {};
@@ -1028,32 +1167,108 @@ function typeName(t) { return DATA_TYPE_LABELS[t] || t || "?"; }
 
 /**
  * Titel eines Vorgangs aus seinen benennenden Werten (``display_fields``):
- * „4711 · Müller GmbH“ statt ``instance_14``. Leere Werte fallen weg;
- * ohne Werte ist der Titel leer und die Aufrufer zeigen die ID.
- * @param {{name: string, value: *}[]|undefined} values ``context`` einer Aufgabe
- *   bzw. ein Eintrag aus ``GET /instance-titles``
+ * „Müller GmbH · Auftragswert: 8.880,00“ statt ``instance_14``. Texte stehen
+ * pur; Zahlen und Ja/Nein tragen den Feldnamen davor, sonst sagt eine nackte
+ * „8“ nichts. Formatiert wird nach Datentyp (``formatValue``): Betrag mit zwei
+ * Stellen, Ganzzahl ohne Tausenderpunkt (Kennnummern). Leere Werte fallen
+ * weg; ohne Werte ist der Titel leer und die Aufrufer fallen auf
+ * ``instanceName`` (Startzeit) zurueck.
+ * @param {{name: string, value: *, data_type?: string}[]|undefined} values
+ *   ``context`` einer Aufgabe bzw. ein Eintrag aus ``GET /instance-titles``
  * @returns {string}
  */
 function contextTitle(values) {
   return (values || [])
     .filter((v) => v.value !== null && v.value !== undefined && v.value !== "")
-    .map((v) => (v.value === true ? "Ja" : v.value === false ? "Nein" : String(v.value)))
+    .map((v) => {
+      if (typeof v.value === "string") return v.value;
+      const shown = formatValue({ data_type: v.data_type }, v.value);
+      return v.name ? `${v.name}: ${shown}` : shown;
+    })
     .join(" \u00B7 ");
 }
 
 /**
- * Anzeigename eines Vorgangs in seiner Detailansicht: benennende Werte plus ID
- *, ohne Werte nur die ID.
+ * Text eines Modellhinweises (G-Gruppe) ohne interne Kennung.
+ *
+ * Der Kern formuliert Hinweise schon deutsch, nennt den Knoten darin aber per
+ * Kennung („Das Gateway 'split_482' …“). Hier wird sie durch den lesbaren Namen
+ * ersetzt -- bei unbenannten Verzweigungen „Entscheidung nach „Betrag
+ * erfassen““ (``nodeCaptionInContext``). Hinweise sind beratend; die
+ * Darstellung bleibt neutral (Klasse ``rule-hint``), nie rot wie ein Befund.
+ *
+ * @param {{code: string, message: string, node_id?: string|null}} h Hinweis
+ * @param {object} schema Schema, auf das er sich bezieht
+ * @returns {string}
+ */
+function hintText(h, schema) {
+  const msg = (h && h.message) || "";
+  const node = h && h.node_id && schema && (schema.nodes || {})[h.node_id];
+  if (!node) return msg;
+  return msg.split(`'${h.node_id}'`).join(`\u201E${nodeCaptionInContext(schema, node)}\u201C`);
+}
+
+/**
+ * Lesbarer Name eines Vorgangs -- nie die interne Kennung allein.
+ *
+ * Reihenfolge: die benennenden Werte (``display_fields``, z. B. „Müller GmbH
+ * · A-4711“); fehlen sie (noch -- beim ersten Schritt sind sie meist leer),
+ * „Vorgang vom 01.10., 14:03“ aus der Startzeit; ohne Startzeit (Altbestand)
+ * schlicht „Vorgang“. Die Kennung zeigt ``instanceNameCell`` klein darunter.
+ *
+ * @param {string|null|undefined} startedAt ISO-Zeitpunkt des Starts
+ * @param {{name: string, value: *}[]|undefined} values benennende Werte
+ * @returns {string}
+ */
+function instanceName(startedAt, values) {
+  const title = contextTitle(values);
+  if (title) return title;
+  const d = startedAt ? new Date(startedAt) : null;
+  if (d && !isNaN(d.getTime())) {
+    const when = d.toLocaleString("de-DE",
+      { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    return `Vorgang vom ${when}`;
+  }
+  return "Vorgang";
+}
+
+/**
+ * Tabellenzelle bzw. Kopfzeile fuer einen Vorgang: Name gross, Kennung klein
+ * darunter (fuer Rueckfragen und den Bezug zum Audit-Log), Kennung auch im
+ * Tooltip.
+ * @param {string} id Kennung des Vorgangs
+ * @param {string|null|undefined} startedAt Startzeit (ISO)
+ * @param {{name: string, value: *}[]|undefined} values benennende Werte
+ * @returns {HTMLElement}
+ */
+function instanceNameCell(id, startedAt, values) {
+  return el("div", { title: `Kennung: ${id}` }, instanceName(startedAt, values),
+    el("div", { class: "task-context" }, id));
+}
+
+/**
+ * Benennende Werte eines geladenen Vorgangs gemaess seinem Schema.
+ * @param {object} inst Vorgang (mit ``data_values``)
+ * @param {object} schema Schema, gegen das er laeuft
+ * @returns {{name: string, value: *}[]}
+ */
+function instanceValues(inst, schema) {
+  const elems = (schema && schema.data_elements) || {};
+  return ((schema && schema.display_fields) || []).map((eid) => ({
+    name: (elems[eid] && elems[eid].name) || eid, value: (inst.data_values || {})[eid],
+    data_type: elems[eid] && elems[eid].data_type,
+  }));
+}
+
+/**
+ * Anzeigename eines Vorgangs in seiner Detailansicht (ohne Kennung -- die
+ * steht im Tooltip der Aufrufer).
  * @param {object} inst Vorgang
  * @param {object} schema Schema, gegen das er laeuft
  * @returns {string}
  */
 function instanceCaption(inst, schema) {
-  const values = ((schema && schema.display_fields) || []).map((eid) => ({
-    name: eid, value: (inst.data_values || {})[eid],
-  }));
-  const title = contextTitle(values);
-  return title ? `${title} (${inst.id})` : inst.id;
+  return instanceName(inst.started_at, instanceValues(inst, schema));
 }
 
 /** Name eines Schemas (Teilprozess, Folgeprozess) aus seiner ID, ohne Version. */
@@ -1085,12 +1300,43 @@ function bpmnElementName(element) {
 
 function stepOf(p, fallback) { return p.step ? `„${p.step}“` : (fallback || "Dieser Schritt"); }
 
+/**
+ * Das Merkmal eines Entscheidungs- oder Schleifenbefunds als Satzteil.
+ *
+ * Der Kern liefert die Element-ID in ``p.element``; ``nm`` loest sie gegen das
+ * gezeigte Modell auf. Nach einer abgelehnten Loeschung steht das Element dort
+ * noch -- so erscheint der Name, nicht der hypothetische Folgezustand.
+ * @param {object} p Befund-Parameter
+ * @param {string} [fallback] Satzteil, wenn der Kern kein Element nennt
+ *   (aeltere Befunde); Standard „Das Merkmal“
+ * @returns {string} z. B. „Betrag“ in deutschen Anfuehrungszeichen
+ */
+function merkmalOf(p, fallback) { return p.element ? `„${nm(p.element)}“` : (fallback || "Das Merkmal"); }
+
+/**
+ * Die betroffene Verzweigung eines K7-Befunds als Satzteil.
+ *
+ * Benannt: „die Verzweigung „Betrag hoch?““. Unbenannt traegt ``p.step`` schon
+ * den Zusammenhang („Entscheidung nach „Betrag erfassen““, siehe ``nm``) und
+ * wird nur mit Artikel versehen -- sonst stuende das Wort doppelt und die
+ * Anfuehrungszeichen geschachtelt. ``p.step``/``p._nodeId`` ergaenzt
+ * ``findingText`` aus ``node_id``.
+ * @param {object} p Befund-Parameter
+ * @returns {string} Satzteil ohne Satzzeichen; ohne Schritt „eine Verzweigung“
+ */
+function branchOf(p) {
+  if (!p.step) return "eine Verzweigung";
+  const node = p._nodeId && state.schema && (state.schema.nodes || {})[p._nodeId];
+  if (node && !(node.label || "").trim()) return `die ${p.step}`;
+  return `die Verzweigung „${p.step}“`;
+}
+
 /** „in=1, out>=2“ aus K2 als Satzteil. */
 function degreeText(expected) {
   const m = /in(>=|=)(\d+), out(>=|=)(\d+)/.exec(expected || "");
   if (!m) return expected || "?";
-  const q = (op, n, what) => `${op === ">=" ? "mindestens " : "genau "}${n} ${what}`;
-  return `${q(m[1], m[2], "eingehende")} und ${q(m[3], m[4], "ausgehende")}`;
+  const q = (op, n, one, many) => `${op === ">=" ? "mindestens " : "genau "}${countLabel(Number(n), one, many)}`;
+  return `${q(m[1], m[2], "Eingang", "Eingänge")} und ${q(m[3], m[4], "Ausgang", "Ausgänge")}`;
 }
 
 function findingText(f, opts) {
@@ -1099,6 +1345,8 @@ function findingText(f, opts) {
     // ``step`` ergaenzen, wo der Kern nur ``node_id`` mitgibt.
     const params = Object.assign({}, f.params || {});
     if (!params.step && f.node_id) params.step = nm(f.node_id);
+    // Fuer Satzteile, die die Knotenart brauchen (``branchOf``).
+    if (f.node_id) params._nodeId = f.node_id;
     const t = entry(params);
     return opts && opts.withHint && t.hint ? `${t.text} ${t.hint}` : t.text;
   }
@@ -1129,7 +1377,9 @@ function describeError(err) {
     // Titel ohne Fachjargon; die Regel steht als Kuerzel vor jeder Zeile.
     return {
       title: d.findings.length === 1 ? "Diese Änderung ist nicht zulässig" : "Diese Änderung ist nicht zulässig – mehrere Gründe",
-      lines: d.findings.map((f) => findingLine(f, { withHint: true })),
+      // Gleich lautende Zeilen nur einmal: Mehrere Befunde koennen fachlich
+      // identisch formuliert sein (gleiche Regel, gleicher Bezug).
+      lines: [...new Set(d.findings.map((f) => findingLine(f, { withHint: true })))],
     };
   }
   // Ein Boundary-Befund mit Code (z. B. die SSRF-Pruefung der Webhooks) wird im
@@ -1294,7 +1544,34 @@ function showVersion(version) {
 // Modal
 // --------------------------------------------------------------------------
 
-function openModal(title, bodyNode, onConfirm, confirmLabel) {
+/**
+ * Oeffnet den einen Dialog der App (``#modal-root``) und ersetzt dabei einen
+ * offenen.
+ *
+ * @param {string} title Ueberschrift
+ * @param {Node} bodyNode Inhalt
+ * @param {() => (boolean|undefined|Promise<boolean|undefined>)} onConfirm
+ *   Rueckruf des Bestaetigen-Knopfs. Alles ausser ``false`` schliesst danach
+ *   den Dialog. **Oeffnet der Rueckruf selbst einen Folgedialog, muss er
+ *   ``false`` zurueckgeben** – sonst schliesst dieser Aufruf den Container und
+ *   nimmt den Folgedialog mit (so verschwanden die Zugangsdaten eines neuen
+ *   Logins ungesehen). Ein Waechter prueft das fuer alle Aufrufer.
+ * @param {string} [confirmLabel] Beschriftung des Bestaetigen-Knopfs
+ * @param {{cancel?: boolean, danger?: boolean}} [opts]
+ *   ``cancel: false`` – Ergebnisdialog: kein „Abbrechen“ (es gibt nichts
+ *   abzubrechen) und kein Schliessen per Klick neben den Dialog, damit ein
+ *   einmalig gezeigtes Ergebnis (Passwort) nicht versehentlich verschwindet;
+ *   Escape und der eine Knopf schliessen weiterhin.
+ *   Unabhaengig davon schliesst ein Klick daneben nie einen Dialog, in dem
+ *   schon etwas eingegeben wurde (input/change); er zeigt dann einen Hinweis.
+ *   ``danger: true`` – zerstoerende Aktion: Knopf als Gefahr gestaltet; ohne
+ *   Eingabefelder startet der Fokus auf „Abbrechen“, damit Enter nichts
+ *   unwiderruflich ausloest (mit Feldern im ersten Feld).
+ * @returns {{modal: HTMLElement, confirmBtn: HTMLElement, close: () => void}}
+ */
+function openModal(title, bodyNode, onConfirm, confirmLabel, opts) {
+  const o = opts || {};
+  const withCancel = o.cancel !== false;
   const root = byId("modal-root");
   // Wer den Dialog oeffnete, bekommt den Fokus danach zurueck. Kommt
   // der Aufruf aus einem schon offenen Dialog (Dialog ersetzt Dialog), zaehlt
@@ -1313,19 +1590,41 @@ function openModal(title, bodyNode, onConfirm, confirmLabel) {
     }
   };
   const confirmBtn = el("button", {
-    class: "btn primary",
+    class: o.danger ? "btn danger" : "btn primary",
     onClick: async () => {
       const ok = await onConfirm();
       if (ok !== false) close();
     },
   }, confirmLabel || "Anwenden");
-  const modal = el("div", { class: "modal-backdrop", onClick: (e) => { if (e.target === e.currentTarget) close(); } },
+  const cancelBtn = withCancel ? el("button", { class: "btn ghost", onClick: close }, "Abbrechen") : null;
+  // Ein Klick neben den Dialog schliesst ihn nur, solange nichts eingegeben
+  // wurde. Vorher verwarf er still einen halb gestalteten Maskenentwurf; jetzt
+  // bleibt der Dialog stehen und sagt, wie man bewusst verwirft (Abbrechen/Esc).
+  let edited = false;
+  const keepHint = el("span", { class: "modal-keep-hint", role: "status" });
+  const modal = el("div", { class: "modal-backdrop",
+      onClick: (e) => {
+        if (!withCancel || e.target !== e.currentTarget) return;
+        if (edited) {
+          keepHint.textContent = "Ungespeicherte Eingaben \u2013 zum Verwerfen \u201EAbbrechen\u201C oder Esc.";
+          // Der Klick hat den Fokus aus dem Dialog genommen; ohne ihn erreichte
+          // Esc den Dialog nicht mehr (sein Tastenweg haengt am Dialog).
+          const back = lastFocus && modal.contains(lastFocus) ? lastFocus
+            : modal.querySelector("input, select, textarea, button");
+          if (back && typeof back.focus === "function") back.focus();
+          return;
+        }
+        close();
+      } },
     el("div", { class: "modal" },
       el("div", { class: "modal-h" }, el("h3", null, title)),
       el("div", { class: "modal-b" }, bodyNode),
-      el("div", { class: "modal-f" },
-        el("button", { class: "btn ghost", onClick: close }, "Abbrechen"),
-        confirmBtn)));
+      el("div", { class: "modal-f" }, keepHint, cancelBtn, confirmBtn)));
+  const markEdited = () => { edited = true; };
+  modal.addEventListener("input", markEdited);
+  modal.addEventListener("change", markEdited);
+  let lastFocus = null;
+  modal.addEventListener("focusin", (e) => { lastFocus = e.target; });
   // Enter bestaetigt den Dialog -- einmal hier fuer alle Aufrufer statt je
   // Dialog.
   // Ausnahmen: mehrzeilige Felder (Enter = Zeilenumbruch), fokussierte Knoepfe
@@ -1360,8 +1659,13 @@ function openModal(title, bodyNode, onConfirm, confirmLabel) {
   // Feld blieb er auf dem Knopf hinter dem Dialog; Tab lief dann nur durch die
   // Seite und erreichte „Abschliessen“ nie. Die Seite dahinter ist waehrend
   // des Dialogs ``inert`` (siehe watchInert), Tab bleibt also im Dialog.
-  const firstInput = modal.querySelector("input, select, textarea");
-  (firstInput || confirmBtn).focus();
+  // Zerstoerende Aktion: Fokus auf „Abbrechen“ – Enter auf einem Knopf loest
+  // dessen eigene Aktion aus, also bricht Enter hier ab statt zu loeschen.
+  const firstInput = modal.querySelector("input:not([readonly]), select, textarea");
+  // Mit Eingabefeldern (etwa Pflicht-Anlass) beginnt man dort; ohne Felder
+  // landet der Fokus auf „Abbrechen“.
+  if (o.danger && cancelBtn && !firstInput) cancelBtn.focus();
+  else (firstInput || confirmBtn).focus();
   // Rueckgabe fuer Dialoge, die ihren Bestaetigen-Knopf je nach Eingabe
   // sperren (z. B. der Einfuege-Dialog ohne Diskriminator). Bisherige Aufrufer
   // ignorieren sie.
@@ -1395,14 +1699,14 @@ function nodeChipModels(schema, node) {
       chips.push({
         kind: "data",
         label: sym(a.mode) + " " + truncate(name, 16),
-        title: name + " (" + a.mode + (a.mandatory ? ", Pflicht" : ", optional") + ")",
+        title: name + " (" + accessModeLabel(a.mode) + (a.mandatory ? ", Pflicht" : ", optional") + ")",
       });
     });
     const rest = accesses.length - named.length;
     if (rest > 0) {
       const detail = accesses.slice(named.length).map((a) => {
         const e = schema.data_elements[a.element_id];
-        return (e ? e.name : a.element_id) + " (" + a.mode + ")";
+        return (e ? e.name : a.element_id) + " (" + accessModeLabel(a.mode) + ")";
       }).join(", ");
       chips.push({ kind: "data", label: "+" + rest + " Daten", title: "Weitere Datenbindungen: " + detail });
     }
@@ -1549,7 +1853,7 @@ function layoutSchemaSpine(schema) {
 
   // Sequenz [start .. stop) auf Mittellinie ``center`` platzieren; Splits fanen
   // ihre Aeste symmetrisch um ``center`` aus (Block als Ganzes zentriert).
-  const lane = {}, placed = new Set();
+  const lane = {}, placed = new Set(), emptyLane = {};
   function place(start, center, stop) {
     let node = start, guard = 0;
     while (node !== stop && node != null) {
@@ -1564,6 +1868,10 @@ function layoutSchemaSpine(schema) {
         const total = heights.reduce((a, b) => a + b, 0) + LAYOUT_BRANCH_GAP * (succ.length - 1);
         let cursor = center - total / 2;
         succ.forEach((c, i) => {
+          // Leerer Zweig (direkte Kante Split -> Join): die reservierte Bahn
+          // merken, sonst zeichnete renderGraph die Kante gerade auf der
+          // Mittellinie -- quer durch den Knoten eines anderen Zweigs.
+          if (c === j) emptyLane[`${node}->${j}`] = cursor + heights[i] / 2;
           place(c, cursor + heights[i] / 2, j);
           cursor += heights[i] + LAYOUT_BRANCH_GAP;
         });
@@ -1586,8 +1894,11 @@ function layoutSchemaSpine(schema) {
   const rowPitch = LAYOUT_NH + maxBadge + LAYOUT_VGAP;
 
   // Vertikalen Ursprung so waehlen, dass der oberste Knoten PAD Abstand hat.
+  // Auch die Bahnen leerer Zweige zaehlen: liegt eine ganz oben oder unten,
+  // muss die Zeichenflaeche sie noch enthalten.
   let minCenter = Infinity;
   ids.forEach((id) => { minCenter = Math.min(minCenter, lane[id] * rowPitch); });
+  Object.values(emptyLane).forEach((ln) => { minCenter = Math.min(minCenter, ln * rowPitch); });
   const originY = LAYOUT_PAD + LAYOUT_NH / 2 - minCenter;
 
   const pos = {};
@@ -1603,9 +1914,17 @@ function layoutSchemaSpine(schema) {
   // Stapel), lieber das robuste gestapelte Layout nehmen.
   if (layoutHasOverlap(pos, schema)) throw new Error("overlap");
 
+  // Bahn-Mitte (Pixel) je leerem Zweig, Schluessel "split->join".
+  const edgeLanes = {};
+  Object.entries(emptyLane).forEach(([key, ln]) => {
+    edgeLanes[key] = originY + ln * rowPitch;
+    // Platz fuer Bedingung oben und „+“ unten an der Bahn.
+    maxBottom = Math.max(maxBottom, edgeLanes[key] + LAYOUT_NH / 2);
+  });
   const width = LAYOUT_PAD * 2 + (maxCol + 1) * LAYOUT_NW + maxCol * LAYOUT_HGAP;
   const height = maxBottom + LAYOUT_PAD;
-  return { pos, edges: controlEdges(schema), width: Math.max(width, 560), height: Math.max(height, 160) };
+  return { pos, edges: controlEdges(schema), edgeLanes,
+    width: Math.max(width, 560), height: Math.max(height, 160) };
 }
 
 // Prueft, ob sich zwei Knoten-Kaesten (Rechteck inkl. darunter haengendem
@@ -1685,11 +2004,78 @@ function nodeClass(node, instance) {
   return "gnode ndefault";
 }
 
+/** Benennung unbenannter Verzweigungsknoten (fuer nodeCaptionInContext). */
+const GATEWAY_KIND_NAMES = {
+  XOR_SPLIT: "Entscheidung", XOR_JOIN: "Ende der Entscheidung",
+  AND_SPLIT: "Parallele Zweige", AND_JOIN: "Ende der parallelen Zweige",
+};
+
+/**
+ * Beschriftung eines Knotens mit Zusammenhang, wo die Kurzform nicht
+ * unterscheidet: Mehrere unbenannte Verzweigungen hiessen alle „XOR ▶“ bzw.
+ * „▶ UND“ (Ad-hoc-Auswahl, Simulation). Hier heissen sie nach dem Schritt
+ * davor: „Entscheidung nach „Betrag erfassen““. Benannte Knoten bleiben, wie
+ * sie sind.
+ * @param {object} schema Schema
+ * @param {object} node Knoten
+ * @returns {string}
+ */
+function nodeCaptionInContext(schema, node) {
+  const unnamedStep = node && !node.label && (node.type === NODE_TYPE.ACTIVITY || node.type === NODE_TYPE.SUBPROCESS);
+  if (!node || node.label || (!GATEWAYS.has(node.type) && !unnamedStep)) return node ? nodeCaption(node) : "";
+  const predsOf = (id) => controlEdges(schema).filter((e) => e.target === id).map((e) => schema.nodes[e.source]);
+  // Nach dem naechsten benannten Vorgaenger benennen und die unbenannten
+  // Knoten dazwischen zaehlen („2. Schritt ohne Bezeichnung nach …“) -- ohne
+  // Rekursion, sonst verschachtelten sich Ketten unbenannter Knoten.
+  const kindKey = (x) => (x.type === NODE_TYPE.SUBPROCESS ? NODE_TYPE.ACTIVITY : x.type);
+  let steps = 1, before = null, cur = node;
+  for (let guard = 0; guard < 200; guard++) {
+    const preds = predsOf(cur.id).filter(Boolean);
+    if (!preds.length) break;
+    const named = preds.find((p) => p.label);
+    if (named) { before = nodeCaption(named); break; }
+    if (preds.length > 1) {
+      // Mehrere unbenannte Vorgaenger: Steht der Lauf schon an einem anderen
+      // Knoten (Ende einer Verzweigung), ist dieser der Bezug; am Ausgangsknoten
+      // selbst gibt es keinen („Ende der Entscheidung“ ohne „nach …“).
+      if (cur !== node) before = GATEWAY_KIND_NAMES[cur.type] || nodeCaption(cur);
+      break;
+    }
+    const p = preds[0];
+    if (p.type === NODE_TYPE.START) { before = nodeCaption(p); break; }
+    // Gleiche Bezeichnung = gleiche Zaehlung: Aktivitaet und Teilprozess
+    // heissen beide „Schritt ohne Bezeichnung“.
+    if (kindKey(p) === kindKey(node)) steps++;
+    cur = p;
+  }
+  const kind = (steps > 1 ? `${steps}. ` : "")
+    + (unnamedStep ? "Schritt ohne Bezeichnung" : GATEWAY_KIND_NAMES[node.type] || nodeCaption(node));
+  return before ? `${kind} nach \u201E${before}\u201C` : kind;
+}
+
+/**
+ * Beschriftung eines Zweigs (Kante Split -> erster Knoten): der erste Schritt,
+ * bei einem leeren Zweig (Kante direkt zum Join) „leerer Zweig“ -- jeweils mit
+ * Bedingung, falls vorhanden.
+ * @param {object} schema Schema
+ * @param {string} splitId Split
+ * @param {string} targetId erster Knoten bzw. Join
+ * @returns {string}
+ */
+function branchCaption(schema, splitId, targetId) {
+  const edge = controlEdges(schema).find((e) => e.source === splitId && e.target === targetId);
+  const target = schema.nodes[targetId];
+  const empty = target && (target.type === NODE_TYPE.XOR_JOIN || target.type === NODE_TYPE.AND_JOIN);
+  const name = empty ? "leerer Zweig" : nodeCaption(target || { type: "", label: targetId });
+  const cond = edge && edge.condition ? conditionCaption(edge.condition) : "";
+  return cond ? `${name} (${cond})` : name;
+}
+
 function nodeCaption(node) {
   if (node.label) return node.label;
   return { START: "Start", END: "Ende", AND_SPLIT: "UND \u25B6", AND_JOIN: "\u25B6 UND",
     XOR_SPLIT: "XOR \u25B6", XOR_JOIN: "\u25B6 XOR", SUBPROCESS: "Teilprozess",
-    LOOP_START: "\u21BB Wiederholen", LOOP_END: "Bis erf\u00FCllt \u21BB" }[node.type] || node.type;
+    LOOP_START: "\u21BB Wiederholen", LOOP_END: "Bis erf\u00FCllt \u21BB" }[node.type] || nodeTypeLabel(node.type);
 }
 
 // Berechnet die Datenherkunft-Linien (Schreib- -> Lese-Knoten) fuer die
@@ -1822,25 +2208,49 @@ function renderGraph(schema, opts) {
     if (!a || !b) return;
     const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2;
     const mx = (x1 + x2) / 2;
+    // Leerer Zweig: ueber seine eigene Bahn fuehren (aus dem Layout), mit
+    // Bedingung und „+“ auf der Bahn statt in einem fremden Knoten.
+    const laneY = L.edgeLanes && L.edgeLanes[`${e.source}->${e.target}`];
+    const emptyBranch = laneY !== undefined && Math.abs(laneY - y1) > 1;
+    const ly = emptyBranch ? laneY : (y1 + y2) / 2;
     let cls = "gedge";
     if (opts.instance && opts.instance.edge_states) {
       const st = opts.instance.edge_states[`${e.source}->${e.target}`];
       if (st === "TRUE_SIGNALED") cls += " gedge-true";
       else if (st === "FALSE_SIGNALED") cls += " gedge-false";
     }
-    root.appendChild(svg("path", { class: cls, "marker-end": "url(#arrow)",
-      d: `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}` }));
-    if (e.condition) {
-      root.appendChild(svg("text", { class: "gcond", x: mx, y: (y1 + y2) / 2 - 6, "text-anchor": "middle" }, document.createTextNode(conditionCaption(e.condition))));
+    const k = Math.min(40, (x2 - x1) / 4);
+    const d = emptyBranch
+      ? `M ${x1} ${y1} C ${x1 + k} ${y1}, ${x1 + k} ${ly}, ${x1 + 2 * k} ${ly} L ${x2 - 2 * k} ${ly} C ${x2 - k} ${ly}, ${x2 - k} ${y2}, ${x2} ${y2}`
+      : `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`;
+    root.appendChild(svg("path", { class: cls, "marker-end": "url(#arrow)", d,
+      "data-edge": `${e.source}->${e.target}` }));
+    if (e.condition || emptyBranch) {
+      const caption = (emptyBranch ? "leerer Zweig" : "")
+        + (e.condition ? (emptyBranch ? ": " : "") + conditionCaption(e.condition) : "");
+      // Volle Beschriftung, solange sie keinen Knoten (samt Badges) schneidet
+      // -- bei schraegen Zweigkanten liegt sie zwischen den Bahnen im Freien.
+      // Sonst in die Luecke zwischen den Knoten einpassen: bis zu zwei Zeilen,
+      // danach gekuerzt; der volle Text steht im Tooltip.
+      const fullW = caption.length * 5.5;
+      const fullBox = { x0: mx - fullW / 2, x1: mx + fullW / 2, y0: ly - 16, y1: ly - 4 };
+      const lines = labelHitsNode(L, schema, fullBox) ? fitCaption(caption, x2 - x1 - 8) : [caption];
+      const t = svg("text", { class: "gcond", x: mx, y: ly - 6 - (lines.length - 1) * 11, "text-anchor": "middle" });
+      lines.forEach((line, i) => t.appendChild(
+        svg("tspan", { x: mx, dy: i ? 11 : 0 }, document.createTextNode(line))));
+      if (lines.join(" ") !== caption) t.appendChild(svg("title", null, document.createTextNode(caption)));
+      root.appendChild(t);
     }
     if (opts.onPlus) {
       // data-tour/-src: Anker der gefuehrten Tour. Sie zeigt gezielt auf das
-      // "+" EINER bestimmten Kante, deshalb reist die Quellknoten-Id mit.
+      // "+" EINER bestimmten Kante, deshalb reist die Quellknoten-Id mit; das
+      // Ziel braucht der Einfuegedialog, wenn die Quelle mehrere Ausgaenge hat
+      // (Anfang eines Zweigs).
       const g = svg("g", { class: "gplus-wrap", style: "cursor:pointer",
         "data-tour": "model.plus", "data-tour-src": e.source,
-        onClick: () => opts.onPlus(e.source) });
-      g.appendChild(svg("circle", { class: "gplus", cx: mx, cy: (y1 + y2) / 2 + 10, r: 10 }));
-      g.appendChild(svg("text", { class: "gplus-txt", x: mx, y: (y1 + y2) / 2 + 14, "text-anchor": "middle" }, document.createTextNode("+")));
+        onClick: () => opts.onPlus(e.source, e.target) });
+      g.appendChild(svg("circle", { class: "gplus", cx: mx, cy: ly + 10, r: 10 }));
+      g.appendChild(svg("text", { class: "gplus-txt", x: mx, y: ly + 14, "text-anchor": "middle" }, document.createTextNode("+")));
       root.appendChild(g);
     }
   });
@@ -1869,10 +2279,13 @@ function renderGraph(schema, opts) {
   loopPairsOf(schema).forEach(({ start, end, body }) => {
     const ps = L.pos[start], pe = L.pos[end];
     if (!ps || !pe) return;
-    let low = ps.y + ps.h;
-    body.forEach((id) => { const p = L.pos[id]; if (p) low = Math.max(low, p.y + p.h); });
-    low = Math.max(low, pe.y + pe.h);
-    const dip = low + 46;
+    // Unterkante inklusive der Badge-Stapel unter den Knoten: sonst lag die
+    // Bogenbeschriftung („↻ solange …“) auf Daten-/Bearbeiter-Badges.
+    const bottomOf = (id, p) => p.y + p.h + nodeBadgeStackHeight(schema, schema.nodes[id]);
+    let low = bottomOf(start, ps);
+    body.forEach((id) => { const p = L.pos[id]; if (p) low = Math.max(low, bottomOf(id, p)); });
+    low = Math.max(low, bottomOf(end, pe));
+    const dip = low + 30;
     const xe = pe.x + pe.w / 2, ye = pe.y + pe.h;
     const xs = ps.x + ps.w / 2, ys = ps.y + ps.h;
     root.appendChild(svg("path", { class: "gloop", "marker-end": "url(#arrow)",
@@ -2006,7 +2419,8 @@ function renderGraph(schema, opts) {
     // nicht erst in der Aufgabenliste -- Statustext + Randfarbe am Knoten.
     const detail = opts.instance && opts.instance.node_details
       ? opts.instance.node_details[id] : null;
-    let sub = opts.instance && opts.instance.node_states ? (opts.instance.node_states[id] || "") : node.type;
+    let sub = opts.instance && opts.instance.node_states
+      ? nodeStateLabel(opts.instance.node_states[id] || "") : nodeTypeLabel(node.type);
     // Soll-Ist-Sicht (opts.observed, aus /schemas/{id}/conformance): Haeufigkeit
     // und mittlere Dauer am Schritt; nie ausgefuehrte Schritte blass.
     const obs = opts.observed && opts.observed[id];
@@ -2056,8 +2470,76 @@ function renderGraph(schema, opts) {
   wrap._provBounds = provBounds;
   attachPanZoom(wrap, root);
   if (opts.fitOnShow) fitWhenVisible(wrap);
+  else if (opts.instance) fitWhenVisible(wrap, activeRegion(L, opts.instance));
   return wrap;
 }
+
+/**
+ * Schneidet ein Beschriftungsrechteck (Modellkoordinaten) einen Knoten samt
+ * darunter haengendem Badge-Stapel?
+ * @param {{pos: Object<string, {x:number,y:number,w:number,h:number}>}} L Layout
+ * @param {object} schema Schema (fuer die Badge-Hoehe)
+ * @param {{x0:number,x1:number,y0:number,y1:number}} box Rechteck
+ * @returns {boolean}
+ */
+function labelHitsNode(L, schema, box) {
+  return Object.entries(L.pos).some(([id, p]) => {
+    const bottom = p.y + p.h + nodeBadgeStackHeight(schema, (schema.nodes || {})[id] || {});
+    return box.x0 < p.x + p.w && box.x1 > p.x && box.y0 < bottom && box.y1 > p.y;
+  });
+}
+
+/**
+ * Bricht eine Kantenbeschriftung auf hoechstens zwei Zeilen um, die in eine
+ * Breite in Pixeln passen (Schaetzung ~5,5 px je Zeichen bei 10 px Schrift);
+ * was dann noch uebersteht, endet mit „…“. Umbrochen wird an Leerzeichen.
+ * @param {string} text Beschriftung
+ * @param {number} px verfuegbare Breite
+ * @returns {string[]} eine oder zwei Zeilen (eine, wenn sie passt)
+ */
+function fitCaption(text, px) {
+  const max = Math.max(4, Math.floor(px / 5.5));
+  if (text.length <= max) return [text];
+  const words = text.split(" ");
+  const lines = [""];
+  for (const w of words) {
+    const cur = lines[lines.length - 1];
+    if (!cur || (cur + " " + w).length <= max) lines[lines.length - 1] = cur ? cur + " " + w : w;
+    else lines.push(w);
+  }
+  const cut = (l) => (l.length <= max ? l : l.slice(0, max - 1) + "\u2026");
+  if (lines.length <= 2) return lines.map(cut);
+  return [cut(lines[0]), cut(lines.slice(1).join(" "))];
+}
+
+/**
+ * Bereich (Modellkoordinaten) um die gerade aktiven Schritte eines Vorgangs.
+ *
+ * Eine Live-Landkarte startete oben links im Bild; bei einem grossen Prozess
+ * (Order-to-Cash) lag dort nichts, und man sah eine leere Flaeche, bis man
+ * „Einpassen“ drueckte. Jetzt rueckt die Karte die bereiten bzw. laufenden
+ * Schritte ins Bild -- auch nach jedem Neuaufbau.
+ *
+ * @param {{pos: Object<string, {x:number,y:number,w:number,h:number}>}} L Layout
+ * @param {{node_states?: Object<string, string>}} instance Vorgang bzw. Simulation
+ * @returns {{x0:number,y0:number,x1:number,y1:number}|null} Bereich, oder null
+ *   ohne aktiven Schritt (dann wird das ganze Modell eingepasst)
+ */
+function activeRegion(L, instance) {
+  const states = (instance && instance.node_states) || {};
+  const ids = Object.keys(L.pos).filter((id) => states[id] === "ACTIVATED" || states[id] === "RUNNING");
+  if (!ids.length) return null;
+  const r = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+  ids.forEach((id) => {
+    const p = L.pos[id];
+    r.x0 = Math.min(r.x0, p.x); r.y0 = Math.min(r.y0, p.y);
+    r.x1 = Math.max(r.x1, p.x + p.w); r.y1 = Math.max(r.y1, p.y + p.h);
+  });
+  return r;
+}
+
+/** Hoechstzahl Bilder, die fitWhenVisible auf das Einhaengen wartet (~3 s). */
+const FIT_WAIT_FRAMES = 180;
 
 /**
  * Passt eine Zeichenflaeche ein, sobald sie im Dokument haengt und Groesse hat.
@@ -2068,20 +2550,26 @@ function renderGraph(schema, opts) {
  * ersten Oeffnen leer da: das Modell lag ausserhalb des Ausschnitts, und man
  * musste selbst "Einpassen" druecken.
  *
- * Wartet hoechstens ein halbe Sekunde (30 Bilder) -- danach ist die Flaeche
+ * Wartet hoechstens etwa drei Sekunden (180 Bilder) -- danach ist die Flaeche
  * entweder da oder die Sicht wurde laengst wieder verlassen; ein ewiger
- * Ruecksprung waere ein Leck.
+ * Ruecksprung waere ein Leck. Eine halbe Sekunde reichte nicht: Die
+ * Vorgangsansicht haengt ihre Karte erst nach weiteren API-Aufrufen ein (Audit,
+ * Aufgaben), und die Landkarte blieb dann doch oben links stehen.
  *
  * @param {HTMLElement} wrap die Zeichenflaeche aus renderGraph
+ * @param {{x0:number,y0:number,x1:number,y1:number}|null} [focus] statt ganz
+ *   einzupassen diesen Bereich ins Bild ruecken (aktive Schritte eines Vorgangs)
  */
-function fitWhenVisible(wrap) {
+function fitWhenVisible(wrap, focus) {
   let tries = 0;
   const attempt = () => {
     if (!wrap.isConnected || !wrap.clientWidth || !wrap.clientHeight) {
-      if (++tries < 30) requestAnimationFrame(attempt);
+      if (++tries < FIT_WAIT_FRAMES) requestAnimationFrame(attempt);
       return;
     }
-    if (wrap._panzoom) wrap._panzoom.fitToView();
+    if (!wrap._panzoom) return;
+    if (focus) wrap._panzoom.centerOn(null, focus);
+    else wrap._panzoom.fitToView();
   };
   requestAnimationFrame(attempt);
 }
@@ -2836,7 +3324,7 @@ function isDraft(schema) { return schema && schema.lifecycle_state === "ENTWURF"
 function lifecyclePill(schema) {
   const s = schema.lifecycle_state;
   const cls = s === "RELEASED" ? "pill-green" : s === "ENTWURF" ? "pill-amber" : "pill-gray";
-  return el("span", { class: "pill " + cls }, s);
+  return el("span", { class: "pill " + cls, title: s }, lifecycleLabel(s));
 }
 
 // --------------------------------------------------------------------------
@@ -2956,7 +3444,8 @@ async function newFromTemplate() {
       : el("span", { class: "pill pill-green" }, "Eigene");
     const card = el("button", { class: "tpl-card", "data-id": t.id, onClick: () => {
       selection.id = t.id; selection.name = t.name;
-      [...card.parentElement.children].forEach((c) => c.classList.toggle("selected", c === card));
+      // Ueber die ganze Galerie: eigene Vorlagen stecken in einer Huelle (.tpl-item).
+      [...gallery.querySelectorAll(".tpl-card")].forEach((c) => c.classList.toggle("selected", c === card));
     } },
       el("div", { class: "tpl-card-h" },
         el("strong", null, t.name),
@@ -2969,7 +3458,13 @@ async function newFromTemplate() {
         ? el("ul", { class: "tpl-roles" }, ...t.roles.map((r) =>
             el("li", null, el("strong", null, r.name), ": " + r.steps.join(", "))))
         : null);
-    return card;
+    // Eigene Vorlagen lassen sich wieder loeschen (Modellierer-Anleitung §1a);
+    // eingebaute gehoeren zum Produkt. Eigener Knopf unter der Karte -- die
+    // Karte selbst ist schon ein Knopf (Auswahl).
+    if (t.origin === "BUILTIN" || !hasRole("modeler", "admin")) return card;
+    return el("div", { class: "tpl-item" }, card,
+      el("button", { class: "btn small ghost tpl-del", type: "button",
+        title: "Eigene Vorlage löschen", onClick: () => confirmTemplateDelete(t) }, "Löschen"));
   });
   const gallery = el("div", { class: "tpl-gallery" }, ...cards);
 
@@ -2983,6 +3478,29 @@ async function newFromTemplate() {
       toast("ok", "Aus Vorlage erstellt", [schema.name]);
     } catch (err) { toastError(err); return false; }
   }, "Erstellen");
+}
+
+/**
+ * Rueckfrage und Loeschen einer eigenen Vorlage, danach wieder die Galerie.
+ *
+ * Der Kern lehnt eingebaute Vorlagen ab (422) und verlangt Modellierer/Admin;
+ * Prozesse, die schon aus der Vorlage entstanden sind, bleiben unberuehrt.
+ *
+ * @param {{id: string, name: string}} t die Vorlage
+ */
+function confirmTemplateDelete(t) {
+  openModal(`Vorlage l\u00F6schen: ${t.name}`,
+    el("p", { class: "muted" },
+      "Die Vorlage verschwindet aus der Galerie. Prozesse, die schon aus ihr erstellt wurden, bleiben unver\u00E4ndert."),
+    async () => {
+      try {
+        await api.del(`/templates/${encodeURIComponent(t.id)}`);
+        toast("ok", "Vorlage gel\u00F6scht", [t.name]);
+        // Galerie ersetzt diesen Dialog; false, sonst schloesse openModal sie.
+        newFromTemplate();
+        return false;
+      } catch (err) { toastError(err); return false; }
+    }, "L\u00F6schen", { danger: true });
 }
 
 // Capture the current schema as a reusable *user* template. The server stores a
@@ -3091,7 +3609,7 @@ function modelHeader(schema, draft) {
       // steht deshalb daneben (dieselbe Operation wie im Panel unten).
       !draft && hasRole("modeler", "admin")
         ? el("button", { class: "btn small ghost", onClick: newRevision,
-            title: "Bearbeitbares ENTWURF-Duplikat dieser Revision anlegen" }, "Neue Revision")
+            title: "Bearbeitbare Entwurfskopie dieser Revision anlegen" }, "Neue Revision")
         : null,
       migrationHeaderButton(schema, draft),
       draft
@@ -3100,7 +3618,9 @@ function modelHeader(schema, draft) {
         ? el("button", {
             class: "btn small" + (isReleasable(schema) ? " green" : ""),
             title: isReleasable(schema) ? "Schema freigeben (danach unver\u00E4nderlich)"
-              : "Noch nicht freigabereif \u2013 siehe Statusleiste",
+              : modelUx() === "classic"
+                ? "Noch nicht freigabereif \u2013 siehe Panel \u201EKorrektheit\u201C"
+                : "Noch nicht freigabereif \u2013 siehe Statusleiste",
             "data-tour": "model.release", onClick: releaseSchema }, "Freigeben")
         : el("button", { class: "btn small primary", onClick: () => { state.view = "run"; setActiveNav(); render(); } }, "Zur Ausf\u00FChrung"),
       draft && hasRole("modeler", "admin")
@@ -3231,7 +3751,7 @@ function modelStatusBar(schema, draft) {
   const bar = el("div", { class: "model-status", "data-tour": "model.findings" });
   bar.appendChild(v && v.correct
     ? el("span", { class: "pill pill-green" }, "✓ korrekt")
-    : el("span", { class: "pill pill-red" }, `${v ? v.findings.length : 0} Befund(e)`));
+    : el("span", { class: "pill pill-red" }, countLabel(v ? v.findings.length : 0, "Befund", "Befunde")));
   // Stufe B getrennt von Stufe A: „korrekt" ist eine Invariante, „freigabereif"
   // ein Reifegrad. Ein Entwurf darf unfertig sein -- er soll es nur sehen, bevor
   // er freigibt und der Vorgang spaeter beim Sachbearbeiter stillsteht.
@@ -3240,7 +3760,7 @@ function modelStatusBar(schema, draft) {
     bar.appendChild(el("span", {
       class: "pill pill-amber",
       title: notReady.map((f) => findingText(f)).join("\n"),
-    }, `${notReady.length} Schritt(e) ohne Bearbeiter`));
+    }, `${countLabel(notReady.length, "Schritt", "Schritte")} ohne Bearbeiter`));
   }
   // Modellhinweise (G-Gruppe): rein beratend, dritter Zustand neben „korrekt"
   // und „freigabereif" – bewusst neutral (grau), nie rot/amber, damit ein
@@ -3250,8 +3770,8 @@ function modelStatusBar(schema, draft) {
   if (hints.length) {
     bar.appendChild(el("span", {
       class: "pill pill-gray",
-      title: hints.map((h) => `${h.code}: ${h.message}`).join("\n"),
-    }, `${hints.length} Hinweis(e)`));
+      title: hints.map((h) => `${h.code}: ${hintText(h, schema)}`).join("\n"),
+    }, countLabel(hints.length, "Hinweis", "Hinweise")));
   }
   const focusElem = state.dataElemFocus && schema.data_elements[state.dataElemFocus];
   const text = focusElem
@@ -3340,7 +3860,7 @@ function viewModelClassic() {
           el("a", { href: "#", onClick: (e) => { e.preventDefault(); state.dataElemFocus = null; render(); } }, "Hervorhebung löschen"))
       : draft
         ? "Geführtes Modellieren: „+“ an einer Kante fügt einen Schritt ein. Einen Schritt anklicken, dann rechts unter „Binden“ ein Datenelement/eine Ressource mit ⊕ zuweisen. Ein angeklickter Schritt zeigt außerdem gestrichelt, woher seine gelesenen Daten stammen. Unzulässiges weist der Kern ab."
-        : "Schema ist freigegeben und damit unveränderlich. Einen Schritt anklicken zeigt gestrichelt, woher seine gelesenen Daten stammen; ein Klick auf ein Datenelement rechts zeigt alle seine Lesestellen. Erzeuge eine Revision über die Ausführungs-/Monitoring-Sicht oder starte Instanzen.");
+        : "Schema ist freigegeben und damit unveränderlich. Einen Schritt anklicken zeigt gestrichelt, woher seine gelesenen Daten stammen; ein Klick auf ein Datenelement rechts zeigt alle seine Lesestellen. Zum Bearbeiten über „Neue Revision“ eine Entwurfskopie anlegen oder Instanzen starten.");
 
   // Kontrollfluss-Panel mit Maximieren-Knopf oben rechts. Im Vollbild wird das
   // Panel per CSS-Klasse ``graph-max`` zu einem bildschirmfuellenden Overlay
@@ -3466,7 +3986,7 @@ function dataPaletteTab(schema, draft, target) {
   const box = el("div");
   box.appendChild(el("div", { class: "pal-group-h" },
     el("span", null, "Datenelemente"),
-    el("button", { class: "btn small", disabled: !draft, onClick: addDataElement }, "+ Datenelement")));
+    el("button", { class: "btn small", onClick: addDataElement, ...lockedBy([!draft, DRAFT_ONLY_REASON]) }, "+ Datenelement")));
   if (!elems.length) {
     box.appendChild(el("div", { class: "muted", style: "font-size:12px" },
       "Noch keine Datenelemente – mit „+ Datenelement“ eines mit sprechendem Namen anlegen."));
@@ -3729,9 +4249,11 @@ function moveSelection(dir) {
  * @returns {boolean} true, wenn ein Element den Fokus bekommen hat.
  */
 function focusStepCard() {
-  const card = document.querySelector(".step-card");
+  // Karte (Karten-Sicht) bzw. Knoten-Inspektor (klassische Sicht): Enter fuehrt
+  // in beiden Oberflaechen in das Bearbeitungsfeld des gewaehlten Schritts.
+  const card = document.querySelector(".step-card") || document.querySelector(".node-inspector");
   if (!card) return false;
-  const name = byId("card-name-input");
+  const name = byId("card-name-input") || byId("insp-name-input");
   if (name && name.focus) { name.focus(); if (name.select) name.select(); return true; }
   const first = card.querySelector("button, input, select, textarea, a[href]");
   if (first && first.focus) { first.focus(); return true; }
@@ -3845,7 +4367,7 @@ function cardSection(id, title, summary, fill, anchor) {
  */
 function stepReadiness(schema, node, findings) {
   if (node.type !== NODE_TYPE.ACTIVITY && node.type !== NODE_TYPE.SUBPROCESS) return null;
-  if (findings.length) return { cls: "red", text: findings.length + " Befund(e) des Kerns an diesem Schritt" };
+  if (findings.length) return { cls: "red", text: countLabel(findings.length, "Befund", "Befunde") + " des Kerns an diesem Schritt" };
   const missing = [];
   if (node.type === NODE_TYPE.ACTIVITY) {
     const sb = (schema.service_bindings || {})[node.id];
@@ -3926,7 +4448,7 @@ function stepCard(schema, draft) {
 /** Kopf der Schritt-Karte: Typ, Bezeichnung (bearbeitbar), Ampel, Schliessen. */
 function stepCardHead(schema, node, draft, findings) {
   const head = el("div", { class: "step-card-h" });
-  head.appendChild(el("span", { class: "pill pill-gray" }, node.type));
+  head.appendChild(el("span", { class: "pill pill-gray", title: node.type }, nodeTypeLabel(node.type)));
   const renamable = draft && (node.type === NODE_TYPE.ACTIVITY || node.type === NODE_TYPE.SUBPROCESS);
   if (renamable) {
     const input = el("input", { type: "text", id: "card-name-input", value: node.label || "",
@@ -3981,7 +4503,7 @@ function cardDataSection(body, schema, node, draft) {
       list.appendChild(el("div", { class: "insp-bind" },
         el("button", { class: "insp-bind-name link-like", title: "Herkunft dieses Elements im Kontrollfluss zeigen",
           onClick: () => { state.dataElemFocus = state.dataElemFocus === a.element_id ? null : a.element_id; render(); } }, name),
-        el("span", { class: "insp-bind-mode mode-" + a.mode }, a.mode),
+        el("span", { class: "insp-bind-mode mode-" + a.mode, title: a.mode }, accessModeLabel(a.mode)),
         a.mandatory ? null : el("span", { class: "muted", style: "font-size:11px" }, "optional"),
         el("span", { class: "spacer", style: "flex:1" }),
         draft
@@ -4066,7 +4588,7 @@ function cardFormSection(body, schema, node, draft) {
   const form = schema.forms && schema.forms[node.id];
   body.appendChild(el("div", { class: form ? "" : "card-hint", style: "font-size:13px" },
     form
-      ? `${form.fields.length} Feld(er)${form.title ? " – „" + form.title + "“" : ""}.`
+      ? `${countLabel(form.fields.length, "Feld", "Felder")}${form.title ? " – „" + form.title + "“" : ""}.`
       : "Noch keine Eingabemaske – Felder per Auswahl zusammenstellen."));
   if (!draft) return;
   const row = el("div", { class: "row", style: "gap:8px;margin-top:8px" },
@@ -4267,6 +4789,28 @@ function pickList(items, onPick, initial) {
 }
 
 /**
+ * Legt eine Datenbindung im Kern an -- der **einzige** Aufruf von
+ * ``POST /schemas/{id}/data-access`` im Client.
+ *
+ * Alle Bindungswege (Schritt-Karte, Palette der klassischen Sicht, Datensicht,
+ * das Merkmal einer neuen Verzweigung) laufen hierueber; der Kern prueft D1-D4.
+ * Ein Waechter (test_every_data_binding_goes_through_one_function) haelt das so,
+ * damit kein Weg wieder still auf „immer Pflicht“ oder englische Modi faellt.
+ *
+ * @param {string} schemaId Schema
+ * @param {string} nodeId Schritt
+ * @param {string} elementId Datenelement
+ * @param {"READ"|"WRITE"|"READ_WRITE"} mode Richtung
+ * @param {boolean} mandatory Pflichtbindung
+ * @returns {Promise<object>} das geaenderte Schema (Fehler als Ausnahme)
+ */
+function createDataAccess(schemaId, nodeId, elementId, mode, mandatory) {
+  return api.post(`/schemas/${schemaId}/data-access`, {
+    node_id: nodeId, element_id: elementId, mode, mandatory,
+  });
+}
+
+/**
  * Bindet ein Datenelement an einen Schritt -- Auswahl, Richtung und Pflicht in
  * einem Dialog, direkt am gewaehlten Schritt.
  *
@@ -4329,11 +4873,9 @@ function bindDataDialog(nodeId, preselect) {
       if (!id) { toast("err", "Kein Datenelement gewählt"); return false; }
       const elem = schema.data_elements[id];
       try {
-        await api.post(`/schemas/${state.schemaId}/data-access`, {
-          node_id: nodeId, element_id: id, mode: modeSel.value, mandatory: mandBox.checked,
-        });
+        await createDataAccess(state.schemaId, nodeId, id, modeSel.value, mandBox.checked);
         await refreshSchema(); render();
-        toast("ok", "Datenbindung gesetzt", [`${elem ? elem.name : id} (${modeSel.value})`]);
+        toast("ok", "Datenbindung gesetzt", [`${elem ? elem.name : id} (${accessModeLabel(modeSel.value)})`]);
       } catch (err) { toastError(err); return false; }
     }, "Binden");
 }
@@ -4426,7 +4968,7 @@ async function applyStaffRuleTo(nodeId, extra, rule) {
   }
   await refreshSchema(); render();
   const done = 1 + extra.length - failed.length;
-  if (failed.length) toast("err", `${done} Schritt(e) zugeordnet, ${failed.length} nicht`, failed);
+  if (failed.length) toast("err", `${countLabel(done, "Schritt", "Schritte")} zugeordnet, ${failed.length} nicht`, failed);
   else toast("ok", done > 1 ? `${done} Schritten zugeordnet` : "Bearbeiter zugeordnet", [describeRule(rule)]);
 }
 
@@ -4466,31 +5008,11 @@ function otherStepsBox(schema, nodeId) {
   return { node, selected: () => boxes.filter((b) => b.box.checked).map((b) => b.box.value) };
 }
 
-// Bindet ein Datenelement an den gewaehlten Schritt (⊕ in der Palette): fragt
-// Richtung (Lesen/Schreiben) und Bindungsart (Pflicht/optional) ab und legt die
-// Datenbindung ueber den Kern an (POST /data-access; D1-D4 werden dort geprueft,
-// z. B. ein Pflichtlesen ohne vorherige Schreibquelle wird abgewiesen).
+// Bindet ein Datenelement an den gewaehlten Schritt (⊕ in der Palette der
+// klassischen Sicht): derselbe Dialog wie an der Schritt-Karte, mit dem Element
+// vorgewaehlt -- Richtung (Lesen/Schreiben) und Pflicht/optional inklusive.
 function dropDataElementOnNode(nodeId, payload) {
-  const node = state.schema.nodes[nodeId];
-  const existing = (state.schema.data_accesses || [])
-    .some((a) => a.node_id === nodeId && a.element_id === payload.element_id);
-  const modeSel = el("select", null,
-    el("option", { value: "READ" }, "Lesen (liest den Wert)"),
-    el("option", { value: "WRITE" }, "Schreiben (setzt den Wert)"),
-    el("option", { value: "READ_WRITE" }, "Lesen und Schreiben"));
-  const mandBox = el("input", { type: "checkbox" });
-  mandBox.checked = true;
-  openModal(`„${payload.name}" an „${nodeCaption(node)}" binden`,
-    el("div", { class: "form-grid" },
-      existing ? el("div", { class: "muted", style: "font-size:12px" },
-        "Für diesen Schritt besteht bereits eine Bindung dieses Elements – eine weitere wird ergänzt.") : null,
-      el("label", { class: "field" }, "Richtung", modeSel),
-      el("label", { class: "row", style: "gap:8px;align-items:center" }, mandBox, "Pflichtbindung")),
-    async () => {
-      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/data-access`, {
-        node_id: nodeId, element_id: payload.element_id, mode: modeSel.value, mandatory: mandBox.checked,
-      }), "Datenbindung gesetzt", [`${payload.name} (${modeSel.value})`]);
-    }, "Binden");
+  bindDataDialog(nodeId, payload.element_id);
 }
 
 // Bindet eine Rolle/Abteilung an den gewaehlten Schritt (⊕ in der Palette):
@@ -4503,16 +5025,24 @@ function dropResourceOnNode(nodeId, payload) {
   const recField = el("label", { class: "row", style: "gap:8px;align-items:center" },
     recBox, "Abteilung und alle Bereiche darunter");
   const label = payload.rkind === "ROLE" ? "Rolle" : payload.rkind === "AGENT" ? "Agent" : "Abteilung";
+  // Wie der Bearbeiter-Dialog der Schritt-Karte: weitere Schritte und die
+  // erweiterte Regel ueber dieselben Funktionen (otherStepsBox, addStaffRule,
+  // applyStaffRuleTo).
+  const others = otherStepsBox(state.schema, nodeId);
   openModal(`Bearbeiter für „${nodeCaption(node)}"`,
     el("div", { class: "form-grid" },
       el("div", { class: "field" }, `${label}: `, el("strong", null, payload.name)),
       current ? el("div", { class: "muted", style: "font-size:12px" },
         `Ersetzt die bestehende Zuordnung: ${describeRule(current)}.`) : null,
-      payload.rkind === "ORG_UNIT" ? recField : null),
+      payload.rkind === "ORG_UNIT" ? recField : null,
+      others.node,
+      el("div", null,
+        el("button", { class: "btn small ghost", type: "button", onClick: () => addStaffRule(nodeId) },
+          "Erweiterte Regel (UND/ODER/AUSSER, Bearbeiter eines früheren Schritts) …"))),
     async () => {
       const rule = { kind: payload.rkind, ref: payload.ref };
       if (payload.rkind === "ORG_UNIT") rule.recursive = recBox.checked;
-      return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/staff-rule`, { node_id: nodeId, rule }), "Bearbeiter zugeordnet", [describeRule(rule)]);
+      return applyStaffRuleTo(nodeId, others.selected(), rule);
     }, "Zuordnen");
 }
 
@@ -4546,7 +5076,7 @@ const AUTOMATION_LABELS = { EXTERNAL_TASK: "External-Task", HTTP_PUSH: "HTTP-Pus
 // Dauer (Sekunden) menschenlesbar in der groebsten glatt teilenden Einheit.
 function formatDuration(sec) {
   if (sec == null) return "–";
-  if (sec % 86400 === 0) return sec / 86400 + " Tag(e)";
+  if (sec % 86400 === 0) return countLabel(sec / 86400, "Tag", "Tage");
   if (sec % 3600 === 0) return sec / 3600 + " Std.";
   if (sec % 60 === 0) return sec / 60 + " Min.";
   return sec + " Sek.";
@@ -4992,7 +5522,9 @@ function escalationBlock(body, schema, node, draft) {
 function setEscalationFor(nodeId, current) {
   const roles = Object.values((state.schema.org_model || {}).roles || {});
   if (!roles.length) { toast("err", "Erst Rollen in der Organisation anlegen"); return; }
-  const rows = el("div", { class: "row", style: "flex-direction:column;align-items:stretch;gap:8px" });
+  // Schlichte Spalte statt ``.row``: Dessen Umbruch (flex-wrap) mass das
+  // Stufenraster bei Minimalbreite und liess darueber eine grosse Luecke.
+  const rows = el("div", { style: "display:flex;flex-direction:column;gap:8px" });
   function addRow(stage) {
     const after = el("input", { type: "number", class: "esc-after", min: "0",
       value: stage ? String(Math.round(stage.after_seconds / 60)) : "0" });
@@ -5100,7 +5632,7 @@ function emptyBranchJoin(schema, splitId) {
 }
 
 /**
- * Knopf „Neue Revision erstellen" fuer ein freigegebenes Schema.
+ * Knopf „Neue Revision" fuer ein freigegebenes Schema (ueberall gleich benannt).
  *
  * Steht dort, wo der Nutzer auf die Wand laeuft (Knoten-Inspektor), nicht nur
  * im Panel „Schema-Evolution" ganz unten in der rechten Spalte: Der Hinweis
@@ -5119,8 +5651,8 @@ function newRevisionAction() {
   return el("div", { class: "row", style: "gap:8px;margin-top:10px" },
     el("button", {
       class: "btn small primary", onClick: newRevision,
-      title: "Bearbeitbares ENTWURF-Duplikat dieser Revision anlegen",
-    }, "Neue Revision erstellen"));
+      title: "Bearbeitbare Entwurfskopie dieser Revision anlegen",
+    }, "Neue Revision"));
 }
 
 function nodeInspectorPanel() {
@@ -5140,7 +5672,7 @@ function nodeInspectorPanel() {
   }
 
   body.appendChild(el("div", { class: "row", style: "gap:8px;align-items:center;margin-bottom:10px" },
-    el("span", { class: "pill pill-gray" }, node.type),
+    el("span", { class: "pill pill-gray", title: node.type }, nodeTypeLabel(node.type)),
     el("strong", null, nodeCaption(node))));
 
   const renamable = node.type === NODE_TYPE.ACTIVITY || node.type === NODE_TYPE.SUBPROCESS;
@@ -5149,7 +5681,8 @@ function nodeInspectorPanel() {
       "Schema ist freigegeben \u2013 zum Bearbeiten eine neue Revision anlegen (Knoten-IDs bleiben erhalten)."));
     body.appendChild(newRevisionAction());
   } else if (renamable) {
-    const input = el("input", { type: "text", value: node.label || "" });
+    const input = el("input", { type: "text", id: "insp-name-input", value: node.label || "" });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") renameNode(node.id, input.value); });
     body.appendChild(el("label", { class: "field" }, "Bezeichnung", input));
     body.appendChild(el("div", { class: "row", style: "gap:8px" },
       el("button", { class: "btn small primary", onClick: () => renameNode(node.id, input.value) }, "Umbenennen"),
@@ -5167,7 +5700,7 @@ function nodeInspectorPanel() {
           const e = schema.data_elements[a.element_id];
           list.appendChild(el("div", { class: "insp-bind" },
             el("span", { class: "insp-bind-name" }, e ? e.name : a.element_id),
-            el("span", { class: "insp-bind-mode mode-" + a.mode }, a.mode),
+            el("span", { class: "insp-bind-mode mode-" + a.mode, title: a.mode }, accessModeLabel(a.mode)),
             a.mandatory ? null : el("span", { class: "muted", style: "font-size:11px" }, "optional"),
             el("span", { class: "spacer", style: "flex:1" }),
             el("button", { class: "insp-bind-del", title: "Bindung lösen",
@@ -5186,13 +5719,14 @@ function nodeInspectorPanel() {
       body.appendChild(el("div", { class: "hr" }));
       body.appendChild(el("div", { class: "insp-h" }, "Bearbeiter (BZR)"));
       body.appendChild(el("div", { class: rule ? "" : "muted", style: "font-size:12px" },
-        rule ? describeRule(rule) : "Keine Zuordnung – rechts unter „Binden“ eine Rolle/Abteilung mit ⊕ an diesen Schritt zuweisen."));
-      // Zuweisen/Ändern über die Binden-Palette (⊕); hier nur Lösen einer
-      // bestehenden Zuordnung.
-      if (rule) {
-        body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
-          el("button", { class: "btn small danger", onClick: () => removeStaffRule(node.id) }, "Entfernen")));
-      }
+        rule ? describeRule(rule) : "Keine Zuordnung – hier zuordnen oder rechts unter „Binden“ eine Rolle/Abteilung mit ⊕ an diesen Schritt ziehen."));
+      // Derselbe Dialog wie in der Schritt-Karte (bindStaffDialog: Auswahl,
+      // „Erweiterte Regel“, „Auch weiteren Schritten zuordnen“) -- beide
+      // Oberflaechen bleiben gleichwertig.
+      body.appendChild(el("div", { class: "row", style: "gap:8px;margin-top:6px" },
+        el("button", { class: "btn small", onClick: () => bindStaffDialog(node.id) },
+          rule ? "Ändern …" : "Zuordnen …"),
+        rule ? el("button", { class: "btn small danger", onClick: () => removeStaffRule(node.id) }, "Entfernen") : null));
 
       // Weitere Standardaktivitäten am Schritt: Dienst, Frist, Priorität, Wertklasse.
       nodePerformSections(body, schema, node);
@@ -5201,7 +5735,7 @@ function nodeInspectorPanel() {
       body.appendChild(el("div", { class: "hr" }));
       body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:6px" },
         form
-          ? `Eingabemaske: ${form.fields.length} Feld(er)${form.title ? " \u2013 \u201E" + form.title + "\u201C" : ""}.`
+          ? `Eingabemaske: ${countLabel(form.fields.length, "Feld", "Felder")}${form.title ? " \u2013 \u201E" + form.title + "\u201C" : ""}.`
           : "Noch keine Eingabemaske \u2013 Felder per Auswahl zusammenstellen."));
       const row = el("div", { class: "row", style: "gap:8px" },
         el("button", { class: "btn small", onClick: () => openFormDesigner(node.id) },
@@ -5256,7 +5790,7 @@ function nodeInspectorPanel() {
         ? "Join-Knoten werden \u00FCber ihren \u00F6ffnenden Split entfernt."
         : "Start und Ende sind fester Bestandteil des Modells."));
   }
-  return el("div", { class: "panel" },
+  return el("div", { class: "panel node-inspector" },
     el("div", { class: "panel-h" }, el("h2", null, "Knoten"),
       el("span", { class: "spacer", style: "flex:1" }),
       el("button", { class: "btn small ghost", onClick: () => { state.selectedNode = null; render(); } }, "Abw\u00E4hlen")),
@@ -5290,7 +5824,7 @@ function deleteNode(nodeId) {
       render();
       toast("ok", "Element entfernt");
     } catch (err) { toastError(err); return false; }
-  }, "Entfernen");
+  }, "Entfernen", { danger: true });
 }
 
 // --- Schritt verschieben (moveNode) ---------------------------------------
@@ -5389,7 +5923,7 @@ function removeEmptyBranch(splitId) {
         render();
         toast("ok", "Leerer Zweig entfernt");
       } catch (err) { toastError(err); return false; }
-    }, "Entfernen");
+    }, "Entfernen", { danger: true });
 }
 
 async function deleteForm(nodeId) {
@@ -5403,7 +5937,7 @@ async function deleteForm(nodeId) {
         render();
         toast("ok", "Eingabemaske entfernt");
       } catch (err) { toastError(err); return false; }
-    }, "Entfernen");
+    }, "Entfernen", { danger: true });
 }
 
 // --------------------------------------------------------------------------
@@ -5552,6 +6086,21 @@ function coerceTypedInput(dtype, raw) {
     return raw;
   }
   return raw;
+}
+
+/**
+ * Zeigt ein Maskenfeld den Pflicht-Stern „*“?
+ *
+ * Ein Ankreuzfeld hat immer einen Wert (angehakt = ja, leer = nein); der Stern
+ * versprach dort „muss angehakt sein“, ein Abschluss ohne Haken ging aber
+ * durch. Deshalb gibt es bei Ankreuzfeldern keinen Stern, und der
+ * Maskendesigner bietet „Pflicht“ dort nicht an. Gemeinsam fuer Vorschau des
+ * Designers und Aufgabenmaske.
+ * @param {{required?: boolean, widget?: string}} f Maskenfeld
+ * @returns {boolean}
+ */
+function showsRequiredMark(f) {
+  return !!f.required && f.widget !== "CHECKBOX";
 }
 
 /**
@@ -5752,7 +6301,7 @@ function openFormDesigner(nodeId) {
       const { control } = maskControl(elem, f.widget, f.options, null);
       control.setAttribute("disabled", "disabled");
       return { group: f.group, node: el("label", { class: "field" },
-        (f.label || (elem ? elem.name : f.element_id)) + (f.required ? " *" : ""), control) };
+        (f.label || (elem ? elem.name : f.element_id)) + (showsRequiredMark(f) ? " *" : ""), control) };
     }), columns);
   }
 
@@ -5791,7 +6340,12 @@ function openFormDesigner(nodeId) {
     reqBox.checked = f.required;
     reqBox.addEventListener("change", () => { f.required = reqBox.checked; });
     const groupInput = el("input", { type: "text", value: f.group || "", placeholder: "optional" });
-    groupInput.addEventListener("change", () => { f.group = groupInput.value.trim(); renderDesigner(); });
+    // Nur die Vorschau erneuern: ``change`` feuert beim Verlassen des Felds --
+    // also schon beim Druecken auf „+ Feld hinzufuegen“. Ein Neuaufbau des
+    // ganzen Designers ersetzte den Knopf dann vor dem Loslassen, und der
+    // erste Klick ging verloren.
+    groupInput.addEventListener("input", () => { f.group = groupInput.value.trim(); });
+    groupInput.addEventListener("change", () => { f.group = groupInput.value.trim(); refreshPreview(); });
 
     const cells = [
       el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Datenelement"), elemSel),
@@ -5799,8 +6353,13 @@ function openFormDesigner(nodeId) {
       el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Beschriftung"), labelInput),
       el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Richtung"), modeSel),
       el("div", { class: "fd-cell" }, el("span", { class: "fd-cap" }, "Gruppe"), groupInput),
-      el("div", { class: "fd-cell fd-req" },
-        el("label", { class: "row", style: "gap:6px;align-items:center" }, reqBox, "Pflicht")),
+      // Ein Ankreuzfeld hat immer einen Wert -- „Pflicht“ waere wirkungslos
+      // (siehe ``showsRequiredMark``) und wird deshalb nicht angeboten.
+      f.widget === "CHECKBOX"
+        ? el("div", { class: "fd-cell fd-req muted", style: "font-size:12px" },
+            "Ja/Nein hat immer einen Wert")
+        : el("div", { class: "fd-cell fd-req" },
+            el("label", { class: "row", style: "gap:6px;align-items:center" }, reqBox, "Pflicht")),
     ];
     if (f.widget === "DROPDOWN") {
       const optInput = el("input", {
@@ -5836,9 +6395,20 @@ function openFormDesigner(nodeId) {
       class: "btn small", onClick: () => { fields.push(defaultField()); renderDesigner(); },
     }, "+ Feld hinzuf\u00FCgen"));
 
-    container.appendChild(el("div", { class: "fd-preview" },
+    previewBox = el("div", { class: "fd-preview" },
       el("div", { class: "fd-preview-h" }, "Vorschau"),
-      previewMask()));
+      previewMask());
+    container.appendChild(previewBox);
+  }
+
+  // Erneuert nur die Vorschau -- die Eingabefelder (und Knoepfe) bleiben, wo
+  // sie sind; siehe Gruppe in fieldRow.
+  let previewBox = null;
+  function refreshPreview() {
+    if (!previewBox) return;
+    clear(previewBox);
+    previewBox.appendChild(el("div", { class: "fd-preview-h" }, "Vorschau"));
+    previewBox.appendChild(previewMask());
   }
 
   renderDesigner();
@@ -5868,7 +6438,7 @@ function openFormDesigner(nodeId) {
 function validationBadge() {
   if (!state.validation) return el("span", null, "");
   if (state.validation.correct) return el("span", { class: "pill pill-green" }, "korrekt");
-  return el("span", { class: "pill pill-red" }, `${state.validation.findings.length} Befund(e)`);
+  return el("span", { class: "pill pill-red" }, countLabel(state.validation.findings.length, "Befund", "Befunde"));
 }
 
 function findingsPanel() {
@@ -5881,6 +6451,17 @@ function findingsPanel() {
       el("span", { class: "rule" }, f.rule),
       el("span", null, findingText(f, { withHint: true })))));
   }
+  // Freigabereife (Stufe B) wie in der Statusleiste der Karten-Sicht: ein
+  // Entwurf darf unfertig sein, soll es aber vor der Freigabe sehen. Dieselbe
+  // Quelle (releaseFindings) -- beide Oberflaechen zeigen dasselbe.
+  const notReady = isDraft(state.schema) ? releaseFindings() : [];
+  if (notReady.length) {
+    body.appendChild(el("div", { class: "warn-banner", style: "margin-top:8px" },
+      `${countLabel(notReady.length, "Schritt", "Schritte")} ohne Bearbeiter \u2013 erst danach l\u00E4sst sich freigeben.`));
+    notReady.forEach((f) => body.appendChild(el("div", { class: "finding" },
+      el("span", { class: "rule" }, f.rule),
+      el("span", null, findingText(f, { withHint: true })))));
+  }
   // Modellhinweise (G-Gruppe, /metrics): beratend, kein Korrektheitsurteil.
   // Bewusst im selben Panel, aber klar abgesetzt \u2013 ein Hinweis ist kein Befund.
   const hints = state.hints || [];
@@ -5889,11 +6470,36 @@ function findingsPanel() {
     body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-bottom:6px" },
       "Hinweise (beratend, blockieren nichts):"));
     hints.forEach((h) => body.appendChild(el("div", { class: "finding" },
-      el("span", { class: "rule" }, h.code),
-      el("span", null, h.message + (h.node_id ? ` [${h.node_id}]` : "")))));
+      el("span", { class: "rule rule-hint" }, h.code),
+      // Anklickbar: waehlt den betroffenen Schritt im Kontrollfluss aus --
+      // so findet man auch gleichartige, unbenannte Knoten.
+      h.node_id && state.schema && state.schema.nodes[h.node_id]
+        ? el("a", { href: "#", title: "Im Kontrollfluss zeigen",
+            onClick: (e) => { e.preventDefault(); state.selectedNode = h.node_id; render(); } },
+            hintText(h, state.schema))
+        : el("span", null, hintText(h, state.schema)))));
   }
   return el("div", { class: "panel", "data-tour": "model.findings" },
     el("div", { class: "panel-h" }, el("h2", null, "Korrektheit"), el("span", { class: "sub" }, "live vom Kern")), body);
+}
+
+/** Grund fuer jede Sperre, die nur ein Entwurf aufhebt (siehe ``lockedBy``). */
+const DRAFT_ONLY_REASON = "Freigegeben \u2013 \u00E4nderbar nur in einer neuen Revision (Modellieren \u2192 \u201ENeue Revision\u201C).";
+
+/**
+ * Sperre eines Knopfs **mit Grund**: liefert ``disabled`` und den Grund als
+ * ``title`` (Tooltip) fuer ``el()``.
+ *
+ * Gesperrte Knoepfe ohne Grund (freigegebenes Schema, fehlender Connector)
+ * liessen raten, warum nichts geht. Jede Sperre nennt jetzt die erste
+ * zutreffende Bedingung.
+ * @param {...Array} reasons Paare ``[Bedingung, Grund]`` in Prioritaetsfolge
+ * @returns {{disabled?: boolean, title?: string}} leeres Objekt, wenn nichts
+ *   sperrt -- zum Einspreizen in die Attribute (``...lockedBy(...)``)
+ */
+function lockedBy(...reasons) {
+  const hit = reasons.find(([cond]) => cond);
+  return hit ? { disabled: true, title: hit[1] } : {};
 }
 
 function revisionPanel() {
@@ -5902,15 +6508,111 @@ function revisionPanel() {
   return el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "Schema-Evolution")),
     el("div", { class: "panel-b row" },
-      el("span", { class: "muted", style: "font-size:12px;flex:1" }, "Eine neue Revision erzeugt ein bearbeitbares ENTWURF-Duplikat unter neuer Schema-ID; die Knoten-IDs bleiben erhalten, damit laufende Instanzen migrierbar bleiben."),
+      el("span", { class: "muted", style: "font-size:12px;flex:1" }, "Eine neue Revision erzeugt eine bearbeitbare Entwurfskopie als neue Version; die Schritte behalten ihre Kennungen, damit laufende Vorgänge sich übernehmen lassen."),
       el("button", { class: "btn small", onClick: newRevision }, "Neue Revision")));
 }
 
 /** Vorbelegte Hoechstzahl der Schleifen-Durchlaeufe im Einfuege-Dialog. */
 const LOOP_MAX_DEFAULT = 10;
 
-function openInsertModal(afterNodeId) {
+/** Wert der Auswahl „Neues Merkmal anlegen …“ in ``discriminatorPicker``. */
+const NEW_DISCRIMINATOR = "__new__";
+
+/**
+ * Auswahl des steuernden Merkmals mit „＋ Neues Merkmal anlegen …“.
+ *
+ * Gemeinsam fuer die Entscheidung (XOR) und die Schleife im Einfuegedialog --
+ * beide Modellier-Oberflaechen oeffnen denselben Dialog. Frueher bot nur die
+ * Entscheidung die Neuanlage; wer eine Schleife ueber ein noch nicht
+ * vorhandenes Ja/Nein-Merkmal bauen wollte, musste den Dialog abbrechen.
+ * Angelegt wird erst beim Bestaetigen (``withDiscriminator``); ob das Merkmal
+ * passt, entscheidet der Kern.
+ *
+ * @param {object[]} elements waehlbare vorhandene Datenelemente
+ * @param {Array<[string, string]>} newTypes Typen fuer ein neues Merkmal als
+ *   [Datentyp, Beschriftung]; der erste ist vorgeschlagen
+ * @param {string} cls CSS-Klasse der Auswahl (Tests, Tour)
+ * @param {string} placeholder Beispielname im Namensfeld
+ * @returns {{select: object, box: object, nameInput: object, typeSelect: object,
+ *   isNew: function(): boolean, dataType: function(): (string|undefined),
+ *   choice: function(): {existing: (string|null), newName: string, newType: string}}}
+ *   ``box`` (Name und Art) ist nur bei „Neues Merkmal“ sichtbar. Ohne
+ *   vorhandene Elemente ist „Neues Merkmal“ vorgewaehlt. ``dataType`` liefert
+ *   den Typ der aktuellen Wahl (bei Neuanlage den gewaehlten Typ).
+ */
+function discriminatorPicker(elements, newTypes, cls, placeholder) {
+  const select = el("select", { class: cls },
+    ...elements.map((d) => el("option", { value: d.id }, `${d.name} (${typeName(d.data_type)})`)),
+    el("option", { value: NEW_DISCRIMINATOR }, "\uFF0B Neues Merkmal anlegen \u2026"));
+  const nameInput = el("input", { type: "text", placeholder });
+  const typeSelect = el("select", null, ...newTypes.map(([v, label]) => el("option", { value: v }, label)));
+  const box = el("div", { class: "form-grid new-disc" },
+    el("label", { class: "field" }, "Name des Merkmals", nameInput),
+    el("label", { class: "field" }, "Art", typeSelect));
+  if (!elements.length) select.value = NEW_DISCRIMINATOR;
+  const isNew = () => select.value === NEW_DISCRIMINATOR;
+  const sync = () => { box.style.display = isNew() ? "" : "none"; };
+  select.addEventListener("change", sync);
+  sync();
+  return {
+    select, box, nameInput, typeSelect, isNew,
+    dataType: () => (isNew() ? typeSelect.value : (state.schema.data_elements[select.value] || {}).data_type),
+    choice: () => ({ existing: isNew() ? null : select.value, newName: nameInput.value.trim(), newType: typeSelect.value }),
+  };
+}
+
+/**
+ * Fuehrt eine Einfuege-Operation mit ihrem Merkmal aus und legt es bei Bedarf
+ * vorher an.
+ *
+ * Neuanlage ist eine eigene Kern-Operation (``POST …/data-elements``), danach
+ * laeuft ``run`` mit der Kennung. Scheitert ``run``, wird das hier angelegte
+ * Element wieder geloescht -- kein halbes Merkmal bleibt im Modell; die
+ * Meldung des Kerns wird weitergereicht.
+ *
+ * @param {string} sid Schema
+ * @param {{existing: (string|null), newName: string, newType: string}} opt
+ *   ``existing`` = vorhandenes Element; sonst Name und Typ des neuen
+ * @param {function(string): Promise<*>} run Operation mit der Merkmal-Kennung
+ * @returns {Promise<*>} Ergebnis von ``run``
+ * @throws {{detail: string}} ohne Namen fuer ein neues Merkmal; sonst den
+ *   Fehler der Anlage bzw. von ``run``
+ */
+async function withDiscriminator(sid, opt, run) {
+  let created = null;
+  try {
+    let disc = opt.existing;
+    if (!disc) {
+      if (!opt.newName) throw { detail: "Bitte einen Namen f\u00FCr das neue Merkmal angeben." };
+      const before = new Set(Object.keys(state.schema.data_elements || {}));
+      const schema = await api.post(`/schemas/${sid}/data-elements`, { name: opt.newName, data_type: opt.newType });
+      created = Object.values(schema.data_elements || {}).find((d) => !before.has(d.id)) || null;
+      if (!created) throw { detail: "Das neue Merkmal wurde nicht angelegt." };
+      disc = created.id;
+    }
+    return await run(disc);
+  } catch (err) {
+    // Aufraeumen; ein Fehler dabei wird verschluckt, die eigentliche Ursache
+    // ist die Meldung von oben.
+    if (created) { try { await api.del(`/schemas/${sid}/data-elements/${created.id}`); } catch (e) { /* egal */ } }
+    throw err;
+  }
+}
+
+/**
+ * Einfuegedialog hinter einem Knoten bzw. auf einer Kante.
+ *
+ * @param {string} afterNodeId Quelle der Kante (Anker)
+ * @param {string} [beforeNodeId] Ziel der Kante. Nur noetig, wenn der Anker
+ *   mehrere Ausgaenge hat (Anfang eines Zweigs, auch eines leeren): dann wird
+ *   genau auf dieser Kante eingefuegt, und angeboten wird nur ein einzelner
+ *   Schritt -- Verzweigung oder Schleife direkt am Zweiganfang kann der Kern
+ *   (noch) nicht.
+ */
+function openInsertModal(afterNodeId, beforeNodeId) {
   const node = state.schema.nodes[afterNodeId];
+  const exits = controlEdges(state.schema).filter((e) => e.source === afterNodeId);
+  const branchStart = exits.length > 1 && typeof beforeNodeId === "string" ? beforeNodeId : null;
   let active = "serial";
   const serialBody = el("label", { class: "field" }, "Bezeichnung",
     el("input", { type: "text", id: "ins-label", placeholder: "z. B. Antrag pr\u00FCfen" }));
@@ -5926,20 +6628,14 @@ function openInsertModal(afterNodeId) {
   // „Neues Merkmal …“ legt es hier an, und der Schritt vor der Einfuegestelle
   // bekommt die Schreibbindung gleich mit (``writerStep``). Ob das alles
   // zusammen korrekt ist (D1, D2, K7), entscheidet weiterhin der Kern.
-  const NEW_DISC = "__new__";
   const writerStep = node && node.type === "ACTIVITY" ? node : null;
-  const condDisc = el("select", { class: "cond-disc" },
-    ...partitionable.map((d) => el("option", { value: d.id }, `${d.name} (${typeName(d.data_type)})`)),
-    el("option", { value: NEW_DISC }, "\uFF0B Neues Merkmal anlegen \u2026"));
-  const newDiscName = el("input", { type: "text", placeholder: "z. B. Betrag" });
-  const newDiscType = el("select", null,
-    el("option", { value: "FLOAT" }, "Zahl (Stufen nach Grenzwerten)"),
-    el("option", { value: "DECIMAL" }, "Betrag (Stufen nach Grenzwerten)"),
-    el("option", { value: "BOOLEAN" }, "Ja/Nein"),
-    el("option", { value: "STRING" }, "Text (Zweige nach Werten)"));
-  const newDiscBox = el("div", { class: "form-grid new-disc" },
-    el("label", { class: "field" }, "Name des Merkmals", newDiscName),
-    el("label", { class: "field" }, "Art", newDiscType));
+  const condPick = discriminatorPicker(partitionable, [
+    ["FLOAT", "Zahl (Stufen nach Grenzwerten)"],
+    ["DECIMAL", "Betrag (Stufen nach Grenzwerten)"],
+    ["BOOLEAN", "Ja/Nein"],
+    ["STRING", "Text (Zweige nach Werten)"],
+  ], "cond-disc", "z. B. Betrag");
+  const condDisc = condPick.select;
   const bindBox = el("input", { type: "checkbox" });
   const bindRow = writerStep
     ? el("label", { class: "row", style: "gap:8px;align-items:center;font-size:12px" }, bindBox,
@@ -5951,17 +6647,14 @@ function openInsertModal(afterNodeId) {
       a.node_id === writerStep.id && a.element_id === eid && (a.mode === "WRITE" || a.mode === "READ_WRITE"));
   }
   function syncDiscChoice() {
-    const isNew = condDisc.value === NEW_DISC;
-    newDiscBox.style.display = isNew ? "" : "none";
+    const isNew = condPick.isNew();
     // Vorbelegung: binden, wenn der Schritt davor das Merkmal noch nicht schreibt.
     bindBox.checked = isNew || !writesAlready(condDisc.value);
     bindBox.disabled = isNew;  // ein neues Merkmal braucht einen Schreiber
   }
   const condRows = el("div", { class: "row", style: "flex-direction:column;align-items:stretch;gap:8px" });
   function discKind() {
-    const type = condDisc.value === NEW_DISC
-      ? newDiscType.value
-      : (state.schema.data_elements[condDisc.value] || {}).data_type;
+    const type = condPick.dataType();
     if (isNumericType(type)) return "THRESHOLD";
     if (type === "BOOLEAN") return "BOOLEAN";
     if (type === "STRING") return "ENUM";
@@ -5983,10 +6676,10 @@ function openInsertModal(afterNodeId) {
     if (kind === "THRESHOLD") { addThresholdRow(false); addThresholdRow(true); }
     else if (kind === "BOOLEAN") {
       condRows.appendChild(el("div", { class: "branch-row bool-row" },
-        el("span", { class: "muted" }, "wahr (true)"),
+        el("span", { class: "muted" }, "wahr"),
         el("input", { type: "text", class: "cond-label", "data-bool": "true", placeholder: "Bezeichnung" })));
       condRows.appendChild(el("div", { class: "branch-row bool-row" },
-        el("span", { class: "muted" }, "falsch (false)"),
+        el("span", { class: "muted" }, "falsch"),
         el("input", { type: "text", class: "cond-label", "data-bool": "false", placeholder: "Bezeichnung" })));
     } else if (kind === "ENUM") {
       addEnumRow(); addEnumRow();
@@ -6008,12 +6701,11 @@ function openInsertModal(afterNodeId) {
     }
   }
   condDisc.addEventListener("change", () => { syncDiscChoice(); rebuildCondRows(); });
-  newDiscType.addEventListener("change", rebuildCondRows);
-  if (!partitionable.length) condDisc.value = NEW_DISC;
+  condPick.typeSelect.addEventListener("change", rebuildCondRows);
   addParRow(); addParRow(); syncDiscChoice(); rebuildCondRows();
   const condPanel = el("div", null,
     el("label", { class: "field" }, "Entscheiden nach (Merkmal)", condDisc),
-    newDiscBox,
+    condPick.box,
     bindRow,
     el("div", { class: "muted", style: "font-size:12px;margin:4px 0" }, "Die Engine w\u00E4hlt den Zweig automatisch anhand des Werts \u2013 vollst\u00E4ndig und \u00FCberschneidungsfrei (K7)."),
     condRows, el("button", { class: "btn small ghost", onClick: () => addCondRow() }, "+ Zweig"));
@@ -6024,11 +6716,17 @@ function openInsertModal(afterNodeId) {
   // auf das Merkmal (K6c: jede Iteration entscheidet auf frischen Daten).
   const loopable = Object.values(state.schema.data_elements).filter(
     (d) => d.source === "INSTANCE" && ["BOOLEAN", "INTEGER", "FLOAT", "DECIMAL", "STRING"].includes(d.data_type));
-  const loopDisc = el("select", { class: "loop-disc" },
-    ...loopable.map((d) => el("option", { value: d.id }, `${d.name} (${typeName(d.data_type)})`)));
+  // Neues Merkmal wie bei der Entscheidung (gemeinsame Auswahl); Ja/Nein ist
+  // vorgeschlagen, wie die Anleitung es empfiehlt.
+  const loopPick = discriminatorPicker(loopable, [
+    ["BOOLEAN", "Ja/Nein (empfohlen)"],
+    ["INTEGER", "Zahl (Wiederholen ab/unter einer Grenze)"],
+    ["STRING", "Text (Wiederholen bei bestimmten Werten)"],
+  ], "loop-disc", "z. B. Nacharbeit n\u00F6tig");
+  const loopDisc = loopPick.select;
   const loopRepeat = el("select", null,
-    el("option", { value: "true" }, "wahr (true)"),
-    el("option", { value: "false" }, "falsch (false)"));
+    el("option", { value: "true" }, "wahr"),
+    el("option", { value: "false" }, "falsch"));
   const loopCmp = el("select", { class: "loop-cmp" },
     el("option", { value: "gte" }, "größer/gleich der Grenze ist (≥)"),
     el("option", { value: "lt" }, "unter der Grenze liegt (<)"));
@@ -6036,10 +6734,10 @@ function openInsertModal(afterNodeId) {
   const loopValues = el("input", { type: "text", class: "loop-values", placeholder: "Werte, kommagetrennt – z. B. nacharbeit" });
   const loopRows = el("div", { class: "row", style: "flex-direction:column;align-items:stretch;gap:8px" });
   function loopKind() {
-    const elem = state.schema.data_elements[loopDisc.value];
-    if (!elem) return null;
-    if (elem.data_type === "BOOLEAN") return "BOOLEAN";
-    if (elem.data_type === "STRING") return "ENUM";
+    const type = loopPick.dataType();
+    if (!type) return null;
+    if (type === "BOOLEAN") return "BOOLEAN";
+    if (type === "STRING") return "ENUM";
     return "THRESHOLD";
   }
   function rebuildLoopRows() {
@@ -6056,6 +6754,7 @@ function openInsertModal(afterNodeId) {
     }
   }
   loopDisc.addEventListener("change", rebuildLoopRows);
+  loopPick.typeSelect.addEventListener("change", rebuildLoopRows);
   rebuildLoopRows();
   // Optionale Notbremse (S3): Höchstzahl der Durchläufe. Deterministisch –
   // am Limit wird verlassen, auch wenn die Daten „wiederholen“ sagen; die
@@ -6066,17 +6765,15 @@ function openInsertModal(afterNodeId) {
   // Verschaerfung von K6b fuer den gesamten Bestand.
   const loopMax = el("input", { type: "number", class: "loop-max", min: "2",
     value: String(LOOP_MAX_DEFAULT), placeholder: "leer = unbegrenzt" });
-  const loopPanel = loopable.length
-    ? el("div", null,
-        el("label", { class: "field" }, "Bezeichnung des Wiederhol-Schritts",
-          el("input", { type: "text", id: "loop-label", placeholder: "z. B. Nacharbeit erledigen" })),
-        el("label", { class: "field" }, "Wiederholen-Merkmal (Datenelement)", loopDisc),
-        loopRows,
-        el("label", { class: "field" }, "Höchstzahl Durchläufe (Notbremse, mind. 2 – leeren nur, wenn die Schleife wirklich unbegrenzt laufen darf)", loopMax),
-        el("div", { class: "muted", style: "font-size:12px;margin:4px 0" },
-          "Der Schritt läuft mindestens einmal; am Ende jeder Runde entscheidet das Merkmal automatisch, ob wiederholt wird (K6). Der Schritt schreibt das Merkmal verbindlich – jede Runde entscheidet auf frischen Daten."))
-    : el("div", { class: "warn-banner insert-blocked" },
-        "Für eine Schleife fehlt ein Datenelement (Ja/Nein, Zahl oder Text), das am Rundenende entscheidet, ob wiederholt wird. Legen Sie es in der Datensicht an – dann lässt sich hier einfügen.");
+  const loopPanel = el("div", null,
+    el("label", { class: "field" }, "Bezeichnung des Wiederhol-Schritts",
+      el("input", { type: "text", id: "loop-label", placeholder: "z. B. Nacharbeit erledigen" })),
+    el("label", { class: "field" }, "Wiederholen-Merkmal (Datenelement)", loopDisc),
+    loopPick.box,
+    loopRows,
+    el("label", { class: "field" }, "Höchstzahl Durchläufe (Notbremse, mind. 2 – leeren nur, wenn die Schleife wirklich unbegrenzt laufen darf)", loopMax),
+    el("div", { class: "muted", style: "font-size:12px;margin:4px 0" },
+      "Der Schritt läuft mindestens einmal; am Ende jeder Runde entscheidet das Merkmal automatisch, ob wiederholt wird (K6). Der Schritt schreibt das Merkmal verbindlich – jede Runde entscheidet auf frischen Daten."));
   const panels = {
     serial: serialBody,
     parallel: el("div", null, parBox, el("button", { class: "btn small ghost", onClick: () => addParRow() }, "+ Zweig")),
@@ -6084,38 +6781,35 @@ function openInsertModal(afterNodeId) {
     loop: loopPanel,
   };
   const slot = el("div", null, panels.serial);
-  const tabs = el("div", { class: "tabs" },
-    tabBtn("Seriell", "serial", true), tabBtn("Parallel (UND)", "parallel"), tabBtn("Bedingt (XOR)", "conditional"), tabBtn("Schleife", "loop"));
+  const tabs = branchStart
+    ? el("div", { class: "tabs" }, tabBtn("Seriell", "serial", true))
+    : el("div", { class: "tabs" },
+        tabBtn("Seriell", "serial", true), tabBtn("Parallel (UND)", "parallel"), tabBtn("Bedingt (XOR)", "conditional"), tabBtn("Schleife", "loop"));
   function tabBtn(label, key, isActive) {
     return el("button", { class: isActive ? "active" : "", onClick: (e) => {
       active = key;
       [...tabs.children].forEach((c) => c.classList.remove("active"));
       e.target.classList.add("active");
       clear(slot); slot.appendChild(panels[key]);
-      syncInsertEnabled();
     } }, label);
   }
-  // "Einfügen" nur, wenn die gewaehlte Variante ueberhaupt moeglich ist. Frueher
-  // blieb der Knopf aktiv und meldete per kurzlebigem Toast "Kein gültiger
-  // Diskriminator gewählt" -- Fachjargon, und der Dialog wirkte unveraendert
-  // Der Grund steht jetzt als Hinweis im Panel.
-  let dialog = null;
-  function syncInsertEnabled() {
-    if (!dialog) return;
-    const blocked = (active === "loop" && !loopable.length);
-    dialog.confirmBtn.disabled = blocked;
-    dialog.confirmBtn.title = blocked ? "Voraussetzung fehlt – siehe Hinweis im Dialog" : "";
-  }
+  // Keine Variante ist mehr gesperrt: Entscheidung und Schleife legen ein
+  // fehlendes Merkmal selbst an (``discriminatorPicker``), statt den Nutzer
+  // aus dem Dialog in die Datensicht zu schicken.
   const body = el("div", null,
-    el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" }, `Einf\u00FCgen nach: ${nodeCaption(node)}`),
+    el("div", { class: "muted", style: "font-size:12px;margin-bottom:8px" }, branchStart
+      ? `Einf\u00FCgen am Anfang des Zweigs: ${branchCaption(state.schema, afterNodeId, branchStart)}`
+      : `Einf\u00FCgen nach: ${nodeCaption(node)}`),
     tabs, slot);
 
-  dialog = openModal("Schritt einf\u00FCgen", body, async () => {
+  openModal("Schritt einf\u00FCgen", body, async () => {
     try {
       if (active === "serial") {
         const label = byId("ins-label").value.trim();
         if (!label) return false;
-        await api.post(`/schemas/${state.schemaId}/serial-insert`, { label, after_node_id: afterNodeId });
+        const req = { label, after_node_id: afterNodeId };
+        if (branchStart) req.before_node_id = branchStart;
+        await api.post(`/schemas/${state.schemaId}/serial-insert`, req);
       } else if (active === "parallel") {
         const labels = [...parBox.querySelectorAll(".par-branch")].map((i) => i.value.trim()).filter(Boolean);
         if (labels.length < 2) { toast("err", "Mindestens zwei Zweige n\u00F6tig"); return false; }
@@ -6123,9 +6817,8 @@ function openInsertModal(afterNodeId) {
       } else if (active === "loop") {
         const label = byId("loop-label") ? byId("loop-label").value.trim() : "";
         if (!label) { toast("err", "Bezeichnung des Wiederhol-Schritts fehlt"); return false; }
-        if (!loopDisc.value) { toast("err", "Kein Wiederholen-Merkmal gew\u00E4hlt"); return false; }
         const kind = loopKind();
-        const payload = { label, after_node_id: afterNodeId, discriminator: loopDisc.value };
+        const payload = { label, after_node_id: afterNodeId };
         if (kind === "BOOLEAN") {
           payload.repeat_value = loopRepeat.value === "true";
         } else if (kind === "THRESHOLD") {
@@ -6149,7 +6842,9 @@ function openInsertModal(afterNodeId) {
           if (!Number.isInteger(m) || m < 2) { toast("err", "H\u00F6chstzahl Durchl\u00E4ufe: mindestens 2"); return false; }
           payload.max_iterations = m;
         }
-        await api.post(`/schemas/${state.schemaId}/loop-insert`, payload);
+        const sid = state.schemaId;
+        await withDiscriminator(sid, loopPick.choice(),
+          (disc) => api.post(`/schemas/${sid}/loop-insert`, { ...payload, discriminator: disc }));
       } else {
         const kind = discKind();
         if (!kind) { toast("err", "Kein Entscheidungs-Datenelement gew\u00E4hlt", ["Bitte oben ein Datenelement ausw\u00E4hlen, nach dem verzweigt wird."]); return false; }
@@ -6191,9 +6886,7 @@ function openInsertModal(afterNodeId) {
           if (branches.length < 2) { toast("err", "Mindestens ein Wertzweig plus Sonst-Zweig n\u00F6tig"); return false; }
         }
         await insertConditionalWithDiscriminator(afterNodeId, branches, {
-          existing: condDisc.value === NEW_DISC ? null : condDisc.value,
-          newName: newDiscName.value.trim(),
-          newType: newDiscType.value,
+          ...condPick.choice(),
           bindAt: writerStep && bindBox.checked ? writerStep.id : null,
         });
       }
@@ -6202,7 +6895,6 @@ function openInsertModal(afterNodeId) {
       toast("ok", "Schritt eingef\u00FCgt");
     } catch (err) { toastError(err); return false; }
   }, "Einf\u00FCgen");
-  syncInsertEnabled();
 }
 
 /**
@@ -6222,35 +6914,27 @@ function openInsertModal(afterNodeId) {
  */
 async function insertConditionalWithDiscriminator(afterNodeId, branches, opt) {
   const sid = state.schemaId;
-  let created = null;
-  let bound = false;
-  let disc = opt.existing;
-  try {
-    if (!disc) {
-      if (!opt.newName) throw { detail: "Bitte einen Namen f\u00FCr das neue Merkmal angeben." };
-      if (!opt.bindAt) throw { detail: "Ein neues Merkmal braucht einen Schritt davor, der es setzt." };
-      const before = new Set(Object.keys(state.schema.data_elements || {}));
-      const schema = await api.post(`/schemas/${sid}/data-elements`, { name: opt.newName, data_type: opt.newType });
-      created = Object.values(schema.data_elements || {}).find((d) => !before.has(d.id)) || null;
-      if (!created) throw { detail: "Das neue Merkmal wurde nicht angelegt." };
-      disc = created.id;
-    }
-    if (opt.bindAt) {
-      const already = (state.schema.data_accesses || []).some((a) => a.node_id === opt.bindAt
-        && a.element_id === disc && (a.mode === "WRITE" || a.mode === "READ_WRITE"));
-      if (!already) {
-        await api.post(`/schemas/${sid}/data-access`, { node_id: opt.bindAt, element_id: disc, mode: "WRITE", mandatory: true });
-        bound = true;
-      }
-    }
-    await api.post(`/schemas/${sid}/conditional-insert`, { after_node_id: afterNodeId, discriminator: disc, branches });
-  } catch (err) {
-    // Aufraeumen in umgekehrter Reihenfolge; Fehler dabei verschlucken, die
-    // eigentliche Ursache ist die Meldung von oben.
-    if (bound) { try { await api.del(`/schemas/${sid}/data-access/${opt.bindAt}/${disc}?mode=WRITE`); } catch (e) { /* egal */ } }
-    if (created) { try { await api.del(`/schemas/${sid}/data-elements/${created.id}`); } catch (e) { /* egal */ } }
-    throw err;
+  if (!opt.existing && opt.newName && !opt.bindAt) {
+    throw { detail: "Ein neues Merkmal braucht einen Schritt davor, der es setzt." };
   }
+  // (1) Anlegen und dessen Aufraeumen uebernimmt ``withDiscriminator``.
+  await withDiscriminator(sid, opt, async (disc) => {
+    let bound = false;
+    try {
+      if (opt.bindAt) {
+        const already = (state.schema.data_accesses || []).some((a) => a.node_id === opt.bindAt
+          && a.element_id === disc && (a.mode === "WRITE" || a.mode === "READ_WRITE"));
+        if (!already) {
+          await createDataAccess(sid, opt.bindAt, disc, "WRITE", true);  // (2)
+          bound = true;
+        }
+      }
+      await api.post(`/schemas/${sid}/conditional-insert`, { after_node_id: afterNodeId, discriminator: disc, branches });  // (3)
+    } catch (err) {
+      if (bound) { try { await api.del(`/schemas/${sid}/data-access/${opt.bindAt}/${disc}?mode=WRITE`); } catch (e) { /* egal */ } }
+      throw err;
+    }
+  });
 }
 
 /**
@@ -6287,7 +6971,8 @@ async function releaseSchema() {
     // Die Meldung ist bereits eine Aufzaehlung (<ul>) -- kein eigenes „•“
     // davor, sonst standen zwei Zeichen vor jedem Namen.
     toast("err", "Freigabe noch nicht möglich", [
-      `${missing.length} Schritt(e) brauchen noch eine Bearbeiterzuordnung:`,
+      missing.length === 1 ? "1 Schritt braucht noch eine Bearbeiterzuordnung:"
+        : `${missing.length} Schritte brauchen noch eine Bearbeiterzuordnung:`,
       ...names,
       "Sie würden sonst in keiner Arbeitsliste erscheinen.",
     ]);
@@ -6356,7 +7041,7 @@ function migrationHeaderButton(schema, draft) {
   const ok = report.candidates.filter((c) => c.migratable).length;
   return el("button", {
     class: "btn small primary", "data-tour": "model.migrate",
-    title: `${report.candidates.length} laufende Instanz(en) früherer Versionen, ${ok} davon sofort migrierbar`,
+    title: `${countLabel(report.candidates.length, "laufende Instanz", "laufende Instanzen")} früherer Versionen, ${ok} davon sofort migrierbar`,
     onClick: () => openMigrationAssistant(schema.id, null),
   }, `Laufende Instanzen migrieren (${report.candidates.length})`);
 }
@@ -6425,6 +7110,10 @@ async function openMigrationAssistant(targetId, onlyIds) {
     toast("info", "Nichts zu migrieren", ["Es laufen keine Instanzen früherer Versionen."]);
     return;
   }
+  // Benennende Werte statt nackter Kennungen (best effort; ohne sie steht
+  // „Vorgang“ mit der Kennung darunter).
+  let migTitles = {};
+  try { migTitles = await api.get("/instance-titles"); } catch (_e) { migTitles = {}; }
 
   // Startwerte fuer fehlende Pflichtdaten (Vereinigung ueber alle Kandidaten).
   const inputs = {};
@@ -6450,17 +7139,16 @@ async function openMigrationAssistant(targetId, onlyIds) {
   const checks = {};
   const statusCells = {};
   const rowsById = {};
-  const tbody = el("tbody");
-  cands.forEach((c) => {
+  const migRows = cands.map((c) => {
     const box = el("input", { type: "checkbox" });
     box.checked = c.migratable;
     checks[c.instance_id] = box;
-    statusCells[c.instance_id] = el("td", { class: "mig-status" });
-    rowsById[c.instance_id] = el("tr", null,
-      el("td", null, box), el("td", null, c.instance_id), el("td", null, `v${c.schema_version}`),
-      statusCells[c.instance_id]);
-    tbody.appendChild(rowsById[c.instance_id]);
+    statusCells[c.instance_id] = el("div", { class: "mig-status" });
+    return [box, instanceNameCell(c.instance_id, c.started_at, migTitles[c.instance_id]),
+      `v${c.schema_version}`, statusCells[c.instance_id]];
   });
+  const migTable = table(["Auswahl", "Instanz", "Version", "Ergebnis"], migRows, null, { class: "mig-table" });
+  migTable.querySelectorAll("tbody tr").forEach((tr, i) => { rowsById[cands[i].instance_id] = tr; });
   const showStatus = (iid, findings) => {
     const cell = statusCells[iid];
     clear(cell);
@@ -6486,9 +7174,7 @@ async function openMigrationAssistant(targetId, onlyIds) {
           el("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, "Startwerte für neue Pflichtdaten"),
           valueBox, recheck)
       : null,
-    el("table", { class: "mig-table" },
-      el("thead", null, el("tr", null, ...["", "Instanz", "Version", "Ergebnis"].map((h) => el("th", null, h)))),
-      tbody));
+    migTable);
 
   openModal(`Instanzen auf v${target.version} migrieren`, body, async () => {
     const ids = cands.map((c) => c.instance_id).filter((iid) => checks[iid].checked);
@@ -6507,7 +7193,7 @@ async function openMigrationAssistant(targetId, onlyIds) {
         if (i >= 0) cands.splice(i, 1);
       });
       state.migrationTargetCache = {};
-      toast(kept.length ? "err" : "ok", `${moved.length} Instanz(en) migriert` + (kept.length ? `, ${kept.length} nicht` : ""),
+      toast(kept.length ? "err" : "ok", `${countLabel(moved.length, "Instanz", "Instanzen")} migriert` + (kept.length ? `, ${kept.length} nicht` : ""),
         kept.map((r) => `${r.instance_id}: ${r.findings.map((f) => findingText(f)).join(" ")}`));
       if (state.instance && moved.some((r) => r.instance_id === state.instance.id)) await loadInstance(state.instance.id);
       if (state.schemaId) await refreshSchema();
@@ -6560,7 +7246,7 @@ function viewData() {
   const elemHeaders = draft ? ["Name", "Typ", "Quelle", "Aktionen"] : ["Name", "Typ", "Quelle"];
   const elemTable = elemRows.length
     ? table(elemHeaders, elemRows.map((d) => {
-        const cells = [d.name, typeName(d.data_type), d.source];
+        const cells = [d.name, typeName(d.data_type), DATA_SOURCE_LABELS[d.source] || d.source];
         if (draft) {
           // Benennt den Vorgang in Listen; hoechstens zwei, nur
           // Vorgangsdaten -- das prueft der Kern (U5).
@@ -6581,7 +7267,7 @@ function viewData() {
       }))
     : emptyState("Noch keine Datenelemente.");
 
-  const addElemBtn = el("button", { class: "btn small", onClick: addDataElement, disabled: !draft }, "+ Datenelement");
+  const addElemBtn = el("button", { class: "btn small", onClick: addDataElement, ...lockedBy([!draft, DRAFT_ONLY_REASON]) }, "+ Datenelement");
   const elemPanel = el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "Datenelemente"), el("span", { class: "spacer", style: "flex:1" }), addElemBtn),
     el("div", { class: "panel-b" }, elemTable));
@@ -6591,13 +7277,15 @@ function viewData() {
   const accRows = accList.map((a) => {
     const node = schema.nodes[a.node_id];
     const elem = schema.data_elements[a.element_id];
-    return [node ? nodeCaption(node) : a.node_id, elem ? elem.name : a.element_id, a.mode, a.mandatory ? "Pflicht" : "optional"];
+    return [node ? nodeCaption(node) : a.node_id, elem ? elem.name : a.element_id, accessModeLabel(a.mode), a.mandatory ? "Pflicht" : "optional"];
   });
   const accTable = accRows.length
     ? table(["Schritt", "Element", "Modus", "Bindung"], accRows,
         (i) => accList[i].node_id === state.dataFocusNode ? "hl-row" : "")
     : emptyState("Noch keine Datenbindungen.");
-  const addAccBtn = el("button", { class: "btn small", onClick: addDataAccess, disabled: !draft || activitiesOf(schema).length === 0 || elemRows.length === 0 }, "+ Datenbindung");
+  const addAccBtn = el("button", { class: "btn small", onClick: addDataAccess, ...lockedBy([!draft, DRAFT_ONLY_REASON],
+    [activitiesOf(schema).length === 0, "Erst einen Schritt modellieren."],
+    [elemRows.length === 0, "Erst ein Datenelement anlegen."]) }, "+ Datenbindung");
   const accPanel = el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "Lese-/Schreibbindungen"), el("span", { class: "sub" }, "D1-D4 live gepr\u00FCft"), el("span", { class: "spacer", style: "flex:1" }), addAccBtn),
     el("div", { class: "panel-b" }, accTable));
@@ -6652,25 +7340,25 @@ function addDataElement(onCreated) {
   }, "Anlegen");
 }
 
-// Datenbindung anlegen. ``fixedNodeId`` (optional) fixiert den Schritt – so kann
-// der Knoten-Inspektor der Modellieren-Seite direkt „an diesem Schritt binden",
-// ohne den Schritt erneut auswaehlen zu lassen.
+/**
+ * „+ Datenbindung“ der Datensicht: erst den Schritt waehlen, dann derselbe
+ * Bindungsdialog wie an der Schritt-Karte (``bindDataDialog``: Element,
+ * Richtung, Pflicht/optional). Frueher eine eigene, schwaechere Fassung, die
+ * immer als Pflicht band -- die D1-Abhilfe „nicht als Pflicht setzen“ war dort
+ * nicht moeglich.
+ *
+ * @param {string} [fixedNodeId] Schritt vorgeben (dann direkt der Bindungsdialog)
+ */
 function addDataAccess(fixedNodeId) {
   const schema = state.schema;
-  const nodeId = typeof fixedNodeId === "string" ? fixedNodeId : null;
-  const nodeSel = nodeId
-    ? null
-    : el("select", null, ...activitiesOf(schema).map((n) => el("option", { value: n.id }, nodeCaption(n))));
-  const elemSel = el("select", null, ...Object.values(schema.data_elements).map((d) => el("option", { value: d.id }, d.name)));
-  const modeSel = el("select", null, ...["READ", "WRITE", "READ_WRITE"].map((m) => el("option", { value: m }, m)));
-  openModal("Datenbindung", el("div", { class: "form-grid" },
-    nodeId
-      ? el("div", { class: "field" }, "Schritt: ", el("strong", null, nodeCaption(schema.nodes[nodeId])))
-      : el("label", { class: "field" }, "Schritt", nodeSel),
-    el("label", { class: "field" }, "Element", elemSel),
-    el("label", { class: "field" }, "Modus", modeSel)), async () => {
-    return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/data-access`, { node_id: nodeId || nodeSel.value, element_id: elemSel.value, mode: modeSel.value }), "Datenbindung gesetzt");
-  }, "Binden");
+  if (typeof fixedNodeId === "string") { bindDataDialog(fixedNodeId); return; }
+  const nodeSel = el("select", null, ...activitiesOf(schema).map((n) => el("option", { value: n.id }, nodeCaption(n))));
+  openModal("Datenbindung – Schritt wählen", el("div", { class: "form-grid" },
+    el("label", { class: "field" }, "Schritt", nodeSel)), async () => {
+    // Der Bindungsdialog ersetzt diesen; false, sonst schloesse openModal ihn.
+    bindDataDialog(nodeSel.value);
+    return false;
+  }, "Weiter");
 }
 
 function editDataElement(elem) {
@@ -6689,7 +7377,7 @@ function resetDataElementSource(elem) {
     el("p", null, `Externe Bindung von \u201E${elem.name}\u201C entfernen und wieder als Instanz-Datenelement f\u00FChren?`),
     async () => {
       return commitSchemaChange(() => api.post(`/schemas/${state.schemaId}/data-elements/${elem.id}/reset-source`, {}), "Quelle zur\u00FCckgesetzt");
-    }, "Zur\u00FCcksetzen");
+    }, "Zur\u00FCcksetzen", { danger: true });
 }
 
 function deleteDataElement(elem) {
@@ -6697,7 +7385,7 @@ function deleteDataElement(elem) {
     el("p", null, `Datenelement \u201E${elem.name}\u201C und alle zugeh\u00F6rigen Lese-/Schreibbindungen und Maskenfelder l\u00F6schen?`),
     async () => {
       return commitSchemaChange(() => api.del(`/schemas/${state.schemaId}/data-elements/${elem.id}`), "Datenelement gel\u00F6scht");
-    }, "L\u00F6schen");
+    }, "L\u00F6schen", { danger: true });
 }
 
 // --------------------------------------------------------------------------
@@ -6738,7 +7426,10 @@ function viewOrg() {
         (i) => ruleEntries[i][0] === state.staffFocusNode ? "hl-row" : "")
     : emptyState("Noch keine Bearbeiterzuordnung.");
   const addRuleBtn = el("button", { class: "btn small", onClick: addStaffRule,
-    disabled: !draft || activitiesOf(schema).length === 0 || (Object.keys(org.roles || {}).length + Object.keys(org.org_units || {}).length) === 0 }, "+ Zuordnung");
+    ...lockedBy([!draft, DRAFT_ONLY_REASON],
+      [activitiesOf(schema).length === 0, "Erst einen Schritt modellieren."],
+      [(Object.keys(org.roles || {}).length + Object.keys(org.org_units || {}).length) === 0,
+        "Erst eine Rolle oder Abteilung anlegen."]) }, "+ Zuordnung");
   const rulePanel = el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "Bearbeiterzuordnung (BZR)"), el("span", { class: "sub" }, "Z1-Z4 live"), el("span", { class: "spacer", style: "flex:1" }), addRuleBtn),
     el("div", { class: "panel-b" }, ruleTable));
@@ -6951,7 +7642,7 @@ function orgUnitPanel(org, draft) {
   const head = el("div", { class: "panel-h" }, el("h2", null, "Abteilungen"),
     el("span", { class: "sub" }, "Hierarchie mit Vorgesetzten"),
     el("span", { class: "spacer", style: "flex:1" }),
-    el("button", { class: "btn small", onClick: () => addChildOrgUnit(null), disabled: !draft }, "+ Abteilung"));
+    el("button", { class: "btn small", onClick: () => addChildOrgUnit(null), ...lockedBy([!draft, DRAFT_ONLY_REASON]) }, "+ Abteilung"));
   const body = el("div", { class: "panel-b" });
   if (!units.length) { body.appendChild(emptyState("Noch keine Abteilung.")); return el("div", { class: "panel" }, head, body); }
 
@@ -6999,11 +7690,14 @@ function renderUnitNode(unit, org, draft, childrenOf) {
 
 function agentListPanel(org, draft) {
   const agents = Object.values(org.agents || {});
+  // Login-Spalte (nur Admin, Passwort-Modus): wird nach dem Laden der Logins
+  // gefuellt (fillLoginSlots), damit die Tabelle nicht auf /users wartet.
+  const loginSlots = {};
   // The licensing badge column only appears while enforcement is active.
   const showLicense = !!(state.license && state.license.enforced);
   const head = el("div", { class: "panel-h" }, el("h2", null, "Agenten"),
     el("span", { class: "spacer", style: "flex:1" }),
-    el("button", { class: "btn small", onClick: addAgent, disabled: !draft }, "+ Agent"));
+    el("button", { class: "btn small", onClick: addAgent, ...lockedBy([!draft, DRAFT_ONLY_REASON]) }, "+ Agent"));
   const body = el("div", { class: "panel-b" });
   if (!agents.length) body.appendChild(emptyState("Noch keine Agenten."));
   else {
@@ -7011,14 +7705,15 @@ function agentListPanel(org, draft) {
       const roles = (a.role_ids || []).map((r) => org.roles[r] ? org.roles[r].name : r).join(", ") || "\u2013";
       const unit = a.org_unit_id && org.org_units[a.org_unit_id] ? org.org_units[a.org_unit_id].name : "\u2013";
       const dep = a.deputy_id && org.agents[a.deputy_id] ? org.agents[a.deputy_id].name : "\u2013";
-      const editBtn = el("button", { class: "btn small", onClick: () => editAgent(a), disabled: !draft }, "Bearbeiten");
+      const editBtn = el("button", { class: "btn small", onClick: () => editAgent(a), ...lockedBy([!draft, DRAFT_ONLY_REASON]) }, "Bearbeiten");
       const depBtn = el("button", { class: "btn small", onClick: () => editDeputy(a) }, "Vertreter");
       const actions = el("div", { style: "display:flex; gap:6px; justify-content:flex-end" }, editBtn, depBtn);
       // Login provisioning is an admin-only convenience available in password
       // mode; it is independent of the schema lifecycle (works on shared orgs).
       if (state.passwordLogin && hasRole("admin")) {
-        actions.appendChild(
-          el("button", { class: "btn small", onClick: () => provisionLogin(a) }, "Login"));
+        const slot = el("span", { class: "login-slot" });
+        loginSlots[a.id] = { slot, agent: a };
+        actions.appendChild(slot);
       }
       const email = a.email
         ? a.email
@@ -7033,8 +7728,38 @@ function agentListPanel(org, draft) {
     cols.push("");
     body.appendChild(table(cols, rows,
       (i) => (state.orgFocusAgents || []).includes(agents[i].id) ? "hl-row" : ""));
+    if (Object.keys(loginSlots).length) fillLoginSlots(loginSlots);
   }
   return el("div", { class: "panel" }, head, body);
+}
+
+/**
+ * Fuellt die Login-Spalte der Agententabelle: bestehender Login oder Knopf.
+ *
+ * Hat eine Person schon einen Login (``GET /users``, Feld ``agent_id``),
+ * steht dort „Login: <name>“ mit Verweis auf Administration → Benutzer –
+ * ein zweiter Klick legte sonst still einen weiteren Login (``name2``) an.
+ * Sonst der Knopf „Login“ (``provisionLogin``). Scheitert das Laden, bleibt
+ * es beim Knopf: Anlegen ist dann weiterhin moeglich, der Kern lehnt einen
+ * doppelten Loginnamen ohnehin ab.
+ *
+ * @param {Object<string, {slot: HTMLElement, agent: object}>} slots je Agent-id
+ * @returns {Promise<void>}
+ */
+async function fillLoginSlots(slots) {
+  let users = [];
+  try { users = await api.get("/users"); } catch (_e) { users = []; }
+  const byAgent = {};
+  (users || []).forEach((u) => { if (u.agent_id && !byAgent[u.agent_id]) byAgent[u.agent_id] = u; });
+  Object.entries(slots).forEach(([agentId, { slot, agent }]) => {
+    clear(slot);
+    const u = byAgent[agentId];
+    slot.appendChild(u
+      ? el("span", { class: "muted login-exists",
+          title: "Passwort zur\u00FCcksetzen oder l\u00F6schen unter Administration \u2192 Benutzer" },
+          `Login: ${u.login}`)
+      : el("button", { class: "btn small", onClick: () => provisionLogin(agent) }, "Login"));
+  });
 }
 
 // Organigramm: the org-unit hierarchy rendered as a classic top-down org chart
@@ -7382,22 +8107,67 @@ function provisionLogin(agent) {
     if (loginInput.value.trim()) payload.login = loginInput.value.trim();
     try {
       const res = await api.post("/users", payload);
-      showLoginCredentials(res);
       toast("ok", "Login angelegt", [`Login: ${res.login}`]);
+      // Der Zugangsdaten-Dialog ersetzt diesen; ``false``, sonst schloesse
+      // openModal ihn sofort wieder (ein Container fuer alle Dialoge).
+      showLoginCredentials(res);
+      render();   // die Zeile zeigt jetzt „Login: …“ statt des Knopfs
+      return false;
     } catch (err) { toastError(err); return false; }
   }, "Anlegen");
 }
 
-// Show the freshly provisioned login + one-off initial password (shown once).
-function showLoginCredentials(res) {
-  const loginField = el("input", { type: "text", value: res.login, readonly: "readonly" });
-  const pwField = el("input", { type: "text", value: res.initial_password, readonly: "readonly" });
-  openModal("Zugangsdaten", el("div", null,
+/**
+ * Nur-Lese-Feld mit Kopierknopf fuer einen einmalig gezeigten Wert
+ * (Login, Initialpasswort).
+ *
+ * Kopiert ueber die Zwischenablage-API; wo sie fehlt oder verweigert wird
+ * (unsicherer Kontext, Berechtigung), markiert der Knopf den Text und
+ * versucht ``execCommand("copy")``; scheitert auch das, bittet die
+ * Beschriftung, selbst zu kopieren. Der Wert bleibt immer sichtbar.
+ *
+ * @param {string} label Feldbeschriftung
+ * @param {string} value anzuzeigender Wert
+ * @returns {HTMLElement} das Feld samt Knopf
+ */
+function copyField(label, value) {
+  const input = el("input", { type: "text", value, readonly: "readonly", class: "copy-value",
+    "aria-label": label });
+  const btn = el("button", { class: "btn small", type: "button", onClick: async () => {
+    let ok = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(value);
+        ok = true;
+      }
+    } catch (_e) { /* Rueckfall unten */ }
+    if (!ok) {
+      try { input.focus(); input.select(); ok = !!document.execCommand("copy"); } catch (_e) { ok = false; }
+    }
+    btn.textContent = ok ? "Kopiert \u2713" : "Bitte markieren und kopieren";
+  } }, "Kopieren");
+  return el("div", { class: "field copy-field" }, el("span", null, label),
+    el("div", { class: "copy-row" }, input, btn));
+}
+
+/**
+ * Zeigt Login und einmaliges Initialpasswort (nach Anlegen oder Zuruecksetzen).
+ *
+ * Ergebnisdialog (``cancel: false``): ein Knopf „Schliessen“, kein
+ * „Abbrechen“ und kein Schliessen per Klick daneben – das Passwort steht nur
+ * hier und ist danach nicht wieder abrufbar.
+ *
+ * @param {{login: string, initial_password: string}} res Antwort von
+ *   ``POST /users`` bzw. ``POST /users/{login}/reset-password``
+ * @param {string} [title] Dialogtitel (Standard „Zugangsdaten“)
+ */
+function showLoginCredentials(res, title) {
+  openModal(title || "Zugangsdaten", el("div", null,
     el("div", { class: "muted", style: "margin-bottom:10px" },
-      "Bitte notieren und der Person sicher mitteilen. Das Initialpasswort wird nur jetzt angezeigt."),
-    el("label", { class: "field" }, "Login", loginField),
-    el("label", { class: "field", style: "margin-top:10px" }, "Initialpasswort", pwField)),
-    async () => true, "Schlie\u00DFen");
+      "Bitte notieren und der Person sicher mitteilen. Das Initialpasswort wird nur jetzt angezeigt; beim ersten Anmelden vergibt die Person ein eigenes."),
+    copyField("Login", res.login),
+    copyField("Initialpasswort", res.initial_password)),
+    async () => true, "Schlie\u00DFen", { cancel: false });
 }
 
 
@@ -7524,10 +8294,13 @@ function addStaffRule(fixedNodeId) {
   }
   openModal("Bearbeiterregel", el("div", { class: "form-grid" },
     nodeId
-      ? el("div", { class: "field" }, "Schritt: ", el("strong", null, nodeCaption(schema.nodes[nodeId])))
-      : el("label", { class: "field" }, "Schritt", nodeSel),
+      // ``wide``: Schritt und Verknuepfung stehen allein in ihrer Zeile --
+      // im halben Raster brach der Schrittname um und „AUSSER – ohne
+      // Folgende“ war abgeschnitten.
+      ? el("div", { class: "field wide" }, "Schritt: ", el("strong", null, nodeCaption(schema.nodes[nodeId])))
+      : el("label", { class: "field wide" }, "Schritt", nodeSel),
     first.node,
-    el("label", { class: "field" }, "Verknüpfen mit", combSel),
+    el("label", { class: "field wide" }, "Verknüpfen mit", combSel),
     secondHost,
     othersHost), async () => {
     const a = first.read();
@@ -7575,7 +8348,8 @@ async function startInstance() {
     const inst = await api.post(`/schemas/${state.schemaId}/instances`);
     await loadInstance(inst.id);
     render();
-    toast("ok", inst.is_test ? "Test-Instanz gestartet" : "Instanz gestartet", [inst.id]);
+    toast("ok", inst.is_test ? "Test-Instanz gestartet" : "Instanz gestartet",
+      [`${instanceCaption(inst, state.schema)} \u00B7 ${inst.id}`]);
   } catch (err) { toastError(err); }
 }
 
@@ -7583,6 +8357,77 @@ async function loadInstance(id) {
   state.instanceId = id;
   state.instance = await api.get(`/instances/${id}`);
   state.worklist = await api.get(`/instances/${id}/worklist`);
+  rememberInstance(id);
+}
+
+/** sessionStorage-Schluessel des gewaehlten Vorgangs (siehe ``rememberInstance``). */
+const INSTANCE_KEY = "selectedInstance";
+
+/**
+ * Merkt den gewaehlten Vorgang fuer ein Neuladen **dieses Tabs**.
+ *
+ * Nach F5 stand „Keine Instanz geladen“, obwohl man gerade an einem Vorgang
+ * war. Gemerkt wird in ``sessionStorage`` (nur dieser Tab, endet mit ihm) und
+ * **zusammen mit dem Login**: Ein Vorgang ist personenbezogen -- die naechste
+ * Anmeldung darf ihn nie erben, auch nicht ueber einen anderen Tab, der sich
+ * inzwischen als jemand anderes angemeldet hat. ``resetSessionState`` und
+ * ``dropUnreadableInstance`` loeschen den Eintrag.
+ * @param {string} id Vorgang
+ */
+function rememberInstance(id) {
+  const owner = (state.principal && state.principal.subject) || "";
+  storageSet(sessionStorage, INSTANCE_KEY, JSON.stringify({ owner, id }));
+}
+
+/** Vergisst den gemerkten Vorgang (Abmelden, Login-Wechsel, nicht mehr lesbar). */
+function forgetInstance() {
+  try { sessionStorage.removeItem(INSTANCE_KEY); } catch (_e) { /* nur Komfort */ }
+}
+
+/**
+ * Laedt beim Start den gemerkten Vorgang wieder -- nur fuer denselben Login.
+ *
+ * Gehoert der Eintrag einem anderen Login (oder ist er unlesbar), wird er
+ * verworfen und nichts geladen. Verweigert der Kern den Vorgang (404/403:
+ * geloescht oder nicht mehr einsehbar), erscheint der Hinweis aus
+ * ``dropUnreadableInstance``; bei anderen Fehlern bleibt die Auswahl leer.
+ * Der Prozess des Vorgangs wird mitgewaehlt, damit die Ausfuehrung ihn zeigt.
+ * @returns {Promise<boolean>} true, wenn ein Vorgang wiederhergestellt wurde
+ */
+async function restoreInstance() {
+  if (state.instanceId) return false;
+  let saved = null;
+  try { saved = JSON.parse(storageGet(sessionStorage, INSTANCE_KEY) || "null"); } catch (_e) { saved = null; }
+  const owner = (state.principal && state.principal.subject) || "";
+  if (!saved || !saved.id || saved.owner !== owner) { forgetInstance(); return false; }
+  try {
+    await loadInstance(saved.id);
+  } catch (err) {
+    if (!dropUnreadableInstance(err)) { state.instanceId = null; state.instance = null; state.worklist = null; }
+    forgetInstance();
+    return false;
+  }
+  if (state.instance.schema_id !== state.schemaId) {
+    // Ein Fehler hier darf den Start nicht abbrechen (sonst liefe etwa die
+    // Live-Aktualisierung nie an): dann eben ohne wiederhergestellten Vorgang.
+    const previous = state.schemaId;
+    try {
+      state.schemaId = state.instance.schema_id;
+      await refreshSchema();
+      renderSchemaPicker();
+    } catch (_e) {
+      // Zurueck zum vorher gewaehlten Prozess und ihn vollstaendig neu laden
+      // (Schema, Pruefergebnis, gemerkte Auswahl) -- ``refreshSchema`` kann
+      // schon teilweise umgestellt haben. Scheitert auch das, bleibt der Start
+      // trotzdem stehen.
+      state.schemaId = previous;
+      try { await refreshSchema(); renderSchemaPicker(); } catch (_e2) { /* bestmoeglich */ }
+      state.instanceId = null; state.instance = null; state.worklist = null;
+      forgetInstance();
+      return false;
+    }
+  }
+  return true;
 }
 
 async function renderInstanceDetail(container, withActions) {
@@ -7593,7 +8438,7 @@ async function renderInstanceDetail(container, withActions) {
   const statePill = statePillFor(inst.state);
 
   const graphPanel = el("div", { class: "panel" },
-    el("div", { class: "panel-h" }, el("h2", null, "Live-Prozesslandkarte"), el("span", { class: "sub" }, instanceCaption(inst, runSchema)), statePill,
+    el("div", { class: "panel-h" }, el("h2", null, "Live-Prozesslandkarte"), el("span", { class: "sub", title: `Kennung: ${inst.id}` }, instanceCaption(inst, runSchema)), statePill,
       inst.is_test ? el("span", { class: "pill pill-amber", title: "Test-Instanz \u2013 nicht im Monitoring gez\u00E4hlt" }, "TEST") : null),
     el("div", { class: "panel-b" }, renderGraph(runSchema, { instance: inst })));
 
@@ -7610,7 +8455,7 @@ async function renderInstanceDetail(container, withActions) {
     } catch (e) { /* best effort: ohne Liste bleibt die bisherige Anzeige */ }
   }
   if (inst.state === "COMPLETED") {
-    wlBody.appendChild(el("div", { class: "ok-banner" }, "\u2713 Instanz abgeschlossen \u2013 jeder Knoten COMPLETED oder SKIPPED."));
+    wlBody.appendChild(el("div", { class: "ok-banner" }, "\u2713 Instanz abgeschlossen \u2013 jeder Schritt ist erledigt oder \u00FCbersprungen."));
   } else {
     (wl.ready_activities || []).forEach((nid) => {
       const node = runSchema.nodes[nid];
@@ -7649,7 +8494,17 @@ async function renderInstanceDetail(container, withActions) {
   });
   // Daten koennen direkt nach dem Start eingegeben werden – unabhaengig davon,
   // ob schon eine Aktivitaet aktiviert wurde.
+  // „Daten eingeben“ nur, wo der Kern es grundsaetzlich erlaubt (Spiegel von
+  // _authorize_data_write, nur Sichtbarkeit): Schreibrolle vorausgesetzt;
+  // dann Modellierer/Admin, jeder Test-Vorgang, wer fuer andere handeln darf
+  // (offener/Token-Modus, Rolle integration) oder eine Person mit eigenem
+  // offenem Schritt. Den Einzelfall entscheidet weiter der Kern.
+  const meAgent = state.principal && state.principal.agent_id;
+  const ownOpenStep = !!meAgent && hasRole("operator")
+    && Object.values(eligibleOf || {}).some((ids) => (ids || []).includes(meAgent));
   const canEditData = withActions && inst.state !== "COMPLETED"
+    && hasRole("operator", "modeler", "admin")
+    && (hasRole("modeler", "admin") || inst.is_test || mayActForOthers() || ownOpenStep)
     && Object.values(runSchema.data_elements || {}).some((e) => e.source !== "EXTERNAL");
   const dataPanel = el("div", { class: "panel" },
     el("div", { class: "panel-h" }, el("h2", null, "Instanzdaten"),
@@ -7681,7 +8536,7 @@ async function renderInstanceDetail(container, withActions) {
     tlBody.appendChild(tl);
   }
   const timelinePanel = el("div", { class: "panel" },
-    el("div", { class: "panel-h" }, el("h2", null, "Audit-Verlauf"), el("span", { class: "sub" }, events.length + " Ereignisse")),
+    el("div", { class: "panel-h" }, el("h2", null, "Audit-Verlauf"), el("span", { class: "sub" }, countLabel(events.length, "Ereignis", "Ereignisse"))),
     tlBody);
 
   // Ad-hoc-Instanzanpassung (Schema-Evolution einer einzelnen Instanz, R1/R2).
@@ -7825,7 +8680,7 @@ function adhocReasonField(inst) {
 // Organisationsmodells. Die Entscheidung trifft der Kern.
 function openAdhocInsert(schema, inst, anchors) {
   const anchorSel = el("select", null,
-    ...anchors.map((n) => el("option", { value: n.id }, nodeCaption(n))));
+    ...anchors.map((n) => el("option", { value: n.id }, nodeCaptionInContext(schema, n))));
   const labelInput = el("input", { type: "text", placeholder: "Bezeichnung des neuen Schritts" });
   const org = schema.org_model || { roles: {}, org_units: {}, agents: {} };
   const choices = {};
@@ -7928,7 +8783,7 @@ function openAdhocDelete(schema, inst, targets) {
       toast("ok", "Schritt entfernt");
       await reloadInstance(inst.id);
     } catch (err) { toastError(err); return false; }
-  }, "Entfernen");
+  }, "Entfernen", { danger: true });
 }
 
 /**
@@ -7996,6 +8851,10 @@ function responsibleSummary(agentIds) {
  * @returns {HTMLElement}
  */
 function completionActionFor(inst, nid, node, eligible, schema) {
+  // Abschliessen (auch als Aufsicht) erlaubt der Kern nur Bearbeitern,
+  // Modellierern und Administratoren. Ein Leser bekam die Knoepfe trotzdem
+  // und scheiterte erst nach dem Ausfuellen der Maske mit 403.
+  if (!hasRole("operator", "modeler", "admin")) return null;
   const me = state.principal && state.principal.agent_id;
   const staffed = eligible && eligible.length > 0;
   const ruled = !!((schema || {}).staff_rules || {})[nid];
@@ -8199,10 +9058,18 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       if (f.max_value != null) control.setAttribute("max", String(f.max_value));
       if (f.max_length != null) control.setAttribute("maxlength", String(f.max_length));
       const wrap = el("label", { class: "field" },
-        f.label + (f.required && writable ? " *" : ""), control,
+        f.label + (showsRequiredMark(f) && writable ? " *" : ""), control,
         f.help_text ? el("span", { class: "field-help" }, f.help_text) : null);
-      if (!writable) control.setAttribute("disabled", "disabled");
-      else inputs[f.element_id] = { read, elem, label: f.label, required: f.required !== false, field: f, wrap };
+      if (!writable) {
+        control.setAttribute("disabled", "disabled");
+        // Nur-Lese-Zahlen wie ueberall anzeigen (Betrag „1.500,00“): ein
+        // Zahlenfeld zeigte den Rohwert „1500“.
+        const v = values[f.element_id];
+        if (elem && isNumericType(elem.data_type) && typeof v === "number" && "value" in control) {
+          control.setAttribute("type", "text");
+          control.value = formatValue(elem, v);
+        }
+      } else inputs[f.element_id] = { read, elem, label: f.label, required: f.required !== false, field: f, wrap };
       return { group: f.group, node: wrap };
     }), form.columns || 1));
   } else {
@@ -8272,8 +9139,14 @@ async function promptComplete(schema, instanceId, nodeId, label, agentId, onDone
       toastError(err); return false;
     }
   };
-  if (form || body.childNodes.length) openModal(`Abschlie\u00DFen: ${label}`, body, doComplete, "Abschlie\u00DFen");
-  else doComplete();
+  // Ohne Maske und ohne Werte schloss ein einziger Klick den Schritt ab --
+  // unumkehrbar und leicht versehentlich. Jetzt fragt ein kurzer Dialog nach;
+  // der Fokus liegt auf „Abschliessen“, Enter bestaetigt.
+  if (!form && !body.children.length) {
+    body.appendChild(el("p", null,
+      `\u201E${label}\u201C ist erledigt? Der Schritt hat keine Eingaben; abgeschlossen geht es mit dem n\u00E4chsten Schritt weiter.`));
+  }
+  openModal(`Abschlie\u00DFen: ${label}`, body, doComplete, "Abschlie\u00DFen");
 }
 
 /**
@@ -8364,10 +9237,10 @@ async function conformancePanel(instances, pmap) {
   body.appendChild(renderGraph(schema, { observed, fitOnShow: true }));
   const never = report.steps.filter((st) => !st.completed);
   const facts = el("div", { class: "conf-facts" },
-    el("span", null, `${report.instances} Instanz(en) ausgewertet`),
-    el("span", null, never.length ? `${never.length} Schritt(e) nie ausgeführt` : "jeder Schritt wurde ausgeführt"),
+    el("span", null, `${countLabel(report.instances, "Instanz", "Instanzen")} ausgewertet`),
+    el("span", null, never.length ? `${countLabel(never.length, "Schritt", "Schritte")} nie ausgeführt` : "jeder Schritt wurde ausgeführt"),
     el("span", { class: report.deviations.length ? "conf-warn" : "" },
-      report.deviations.length ? `${report.deviations.length} Abweichung(en) vom Modell` : "keine Abweichung vom Modell"));
+      report.deviations.length ? `${countLabel(report.deviations.length, "Abweichung", "Abweichungen")} vom Modell` : "keine Abweichung vom Modell"));
   body.appendChild(facts);
   if (report.deviations.length) {
     const foreign = new Set(report.foreign_steps);
@@ -8398,26 +9271,102 @@ const INSTANCE_FILTERS = [
   { key: "RUNNING", label: "Laufend" },
   { key: "COMPLETED", label: "Abgeschlossen" },
   { key: "UNSTAFFED", label: "Niemand zust\u00E4ndig" },
+  { key: "ABSENT_ONLY", label: "Nur Abwesende zust\u00E4ndig" },
 ];
 
 /** Grund aus ``GET /monitoring/unstaffed`` als Satzteil. */
 const UNSTAFFED_REASONS = {
   no_rule: "keine Bearbeiterzuordnung",
   nobody: "Regel findet aktuell niemanden",
+  no_login: "kein Login",
+  only_absent: "abwesend ohne Vertretung",
 };
+
+/**
+ * Grund einer Zeile aus ``GET /monitoring/unstaffed`` als Text – bei
+ * „kein Login“ und „abwesend ohne Vertretung“ mit den betroffenen Personen
+ * (Namen aus dem Personenverzeichnis), damit die Aufsicht weiss, wen es angeht.
+ *
+ * @param {{reason: string, agent_ids?: string[]}} u die Zeile
+ * @returns {string} z. B. „kein Login: Petra Pruef“
+ */
+function unstaffedReasonText(u) {
+  const base = UNSTAFFED_REASONS[u.reason] || u.reason;
+  const names = (u.agent_ids || []).map(agentNameOf);
+  return names.length ? `${base}: ${names.join(", ")}` : base;
+}
+
+/**
+ * Teilt den Bericht in die zwei Kategorien des Monitorings.
+ *
+ * „Niemand zust\u00E4ndig“ (``no_rule``, ``nobody``, ``no_login``): der Vorgang
+ * steht still, bis jemand zugeordnet wird oder eine Aufsicht abschliesst.
+ * „Nur Abwesende zust\u00E4ndig“ (``only_absent``): schwaecher – die Aufgabe
+ * bleibt bei der Person und laeuft weiter, sobald sie zurueck ist.
+ *
+ * @param {object[]} unstaffed Zeilen aus ``GET /monitoring/unstaffed``
+ * @returns {{stalled: object[], absentOnly: object[]}}
+ */
+function splitUnstaffed(unstaffed) {
+  const rows = unstaffed || [];
+  return {
+    stalled: rows.filter((u) => u.reason !== "only_absent"),
+    absentOnly: rows.filter((u) => u.reason === "only_absent"),
+  };
+}
+
+/**
+ * Zaehlkacheln des Monitorings: aus dem KPI-Bericht, nicht aus der Liste.
+ *
+ * Die Anleitung sagt zu: Kennzahlen ueber **alle** Vorgaenge, einzeln nur die,
+ * an denen ein Bearbeiter beteiligt ist. Die Liste (``GET /instances``) ist fuer
+ * einen solchen Login gefiltert und enthaelt dazu Test-Instanzen, die nicht ins
+ * Monitoring zaehlen; der Bericht (``GET /monitoring/kpis``) zaehlt alle echten
+ * Vorgaenge. Frueher kamen „Instanzen gesamt“ aus der Liste, die
+ * Durchlaufzeit und die Engpaesse aus dem Bericht -- widerspruechlich ohne
+ * Hinweis. Die Einschraenkung kennt der Client nicht; er erkennt sie daran,
+ * dass die Liste weniger echte Vorgaenge zeigt als der Bericht zaehlt.
+ *
+ * @param {object[]} instances geladene Vorgaenge der Liste
+ * @param {?{total_instances: number, running: number, completed: number}} report
+ *   KPI-Bericht; ``null``, wenn er nicht geladen werden konnte
+ * @param {boolean} [listLoaded=true] ``false``, wenn das Laden der Liste
+ *   scheiterte -- eine leere oder kurze Liste ist dann keine Einschraenkung,
+ *   und der Hinweis darauf waere irrefuehrend
+ * @returns {{total: number, running: number, done: number, listIsPartial: boolean}}
+ *   ``listIsPartial``: Die Liste (und alles, was aus ihr gezaehlt wird) zeigt
+ *   nur einen Teil der Vorgaenge. Ohne Bericht zaehlt die Liste ohne
+ *   Test-Instanzen, ``listIsPartial`` ist dann ``false`` (nicht feststellbar).
+ */
+function monitorCounts(instances, report, listLoaded = true) {
+  const real = instances.filter((i) => !i.is_test);
+  if (!report) {
+    return {
+      total: real.length,
+      running: real.filter((i) => i.state === "RUNNING").length,
+      done: real.filter((i) => i.state === "COMPLETED").length,
+      listIsPartial: false,
+    };
+  }
+  return {
+    total: report.total_instances,
+    running: report.running,
+    done: report.completed,
+    listIsPartial: listLoaded && real.length < report.total_instances,
+  };
+}
 
 async function viewMonitor() {
   const content = byId("content");
   clear(content);
   let instances = [];
+  let listLoaded = false;
   try {
     const ids = await api.get("/instances");
     instances = await Promise.all(ids.map((id) => api.get(`/instances/${id}`)));
+    listLoaded = true;
     await ensureSchemaNames(instances.map((i) => i.schema_id));
   } catch (err) { toastError(err); }
-
-  const running = instances.filter((i) => i.state === "RUNNING").length;
-  const done = instances.filter((i) => i.state === "COMPLETED").length;
 
   // KPI-Report + Prozesskarte aus dem Audit-Log (Schritt 15)
   let report = null;
@@ -8433,7 +9382,10 @@ async function viewMonitor() {
   // Benennende Werte je Vorgang; fehlen sie, bleibt die ID.
   let titles = {};
   try { titles = await api.get("/instance-titles"); } catch (e) { /* best-effort */ }
-  const unstaffedIds = new Set(unstaffed.map((u) => u.instance_id));
+  const { stalled, absentOnly } = splitUnstaffed(unstaffed);
+  const instancesById = Object.fromEntries(instances.map((i) => [i.id, i]));
+  const unstaffedIds = new Set(stalled.map((u) => u.instance_id));
+  const absentOnlyIds = new Set(absentOnly.map((u) => u.instance_id));
 
   // Z4: \u00DCberf\u00E4llig-Zusammenfassung \u00FCber alle
   // laufenden Vorg\u00E4nge \u2013 best-effort aus den vorhandenen Task-Endpunkten.
@@ -8450,58 +9402,72 @@ async function viewMonitor() {
     escalatedTasks = allTasks.filter((t) => (t.escalated_stage || 0) > 0);
   } catch (e) { /* best-effort: Kacheln zeigen dann 0 */ }
 
+  const counts = monitorCounts(instances, report, listLoaded);
   const kpis = el("div", { class: "kpis" },
-    kpi("Instanzen gesamt", instances.length),
-    kpi("Laufend", running),
-    kpi("Abgeschlossen", done),
+    kpi("Instanzen gesamt", counts.total),
+    kpi("Laufend", counts.running),
+    kpi("Abgeschlossen", counts.done),
     kpi("\u00DCberf\u00E4llige Aufgaben", overdueTasks),
     kpi("Eskalierte Aufgaben", escalatedTasks.length),
     kpi("Niemand zust\u00E4ndig", unstaffedIds.size),
+    kpi("Nur Abwesende zust\u00E4ndig", absentOnlyIds.size),
     kpi("\u00D8 Durchlaufzeit", report ? fmtDuration(report.avg_cycle_seconds) : "\u2013"));
   content.appendChild(kpis);
+  if (counts.listIsPartial) {
+    content.appendChild(el("div", { class: "muted monitor-scope-note" },
+      "Anzahl, Durchlaufzeit und Engp\u00E4sse z\u00E4hlen alle Vorg\u00E4nge. "
+      + "\u00DCberf\u00E4llige und eskalierte Aufgaben, die Zust\u00E4ndigkeits-Kacheln und die Liste "
+      + "zeigen nur Vorg\u00E4nge, an denen du beteiligt bist."));
+  }
 
   // Eskalations-Sicht (Stufe C): jede Aufgabe mit
   // gefeuerten Stufen, klickbar zur Instanz. Nur sichtbar, wenn es etwas zu
   // zeigen gibt \u2013 ein Betrieb ohne Eskalationen bekommt kein leeres Panel.
   if (escalatedTasks.length) {
-    const escRows = escalatedTasks.map((t) => el("tr",
-      { class: "clickable", onClick: () => openInstanceFromMonitor(t.instance_id) },
-      el("td", null, t.instance_id),
-      el("td", null, t.label || t.node_id),
-      el("td", null, `Stufe ${t.escalated_stage}`),
-      el("td", null, criticalityBadge(t) || "\u2013"),
-      el("td", null, t.claimed_by || "\u2013")));
+    const escRows = escalatedTasks.map((t) => [
+      instanceNameCell(t.instance_id, t.instance_started_at, t.context),
+      t.label || t.node_id,
+      `Stufe ${t.escalated_stage}`,
+      criticalityBadge(t) || "\u2013",
+      t.claimed_by || "\u2013"]);
     content.appendChild(el("div", { class: "panel" },
       el("div", { class: "panel-h" }, el("h2", null, "Eskalationen"),
         el("span", { class: "sub" }, "Aufgaben mit gefeuerten Eskalationsstufen")),
       el("div", { class: "panel-b" },
-        el("table", null,
-          el("thead", null, el("tr", null, ...["Instanz", "Schritt", "Eskalation", "Kritikalit\u00E4t", "Inhaber"].map((h) => el("th", null, h)))),
-          el("tbody", null, ...escRows)))));
+        table(["Instanz", "Schritt", "Eskalation", "Kritikalit\u00E4t", "Inhaber"], escRows,
+          (i) => ({ class: "clickable", onClick: () => openInstanceFromMonitor(escalatedTasks[i].instance_id) })))));
   }
 
-  // „Niemand zustaendig“: nur sichtbar, wenn es etwas zu zeigen gibt.
-  if (unstaffed.length) {
-    const rowsU = unstaffed.map((u) => el("tr",
-      { class: "clickable", onClick: () => openInstanceFromMonitor(u.instance_id) },
-      el("td", null, u.instance_id),
-      el("td", null, schemaLabel(u.schema_id, u.schema_version)),
-      el("td", null, u.label || u.node_id),
-      el("td", null, UNSTAFFED_REASONS[u.reason] || u.reason)));
-    content.appendChild(el("div", { class: "panel" },
-      el("div", { class: "panel-h" }, el("h2", null, "Niemand zust\u00E4ndig"),
-        el("span", { class: "sub" }, "Diese Vorg\u00E4nge stehen still, bis jemand zugeordnet wird oder per Aufsicht abschlie\u00DFt")),
+  // „Niemand zustaendig“ / „Nur Abwesende zustaendig“: nur sichtbar, wenn
+  // es etwas zu zeigen gibt.
+  const unstaffedPanel = (rows, title, sub) => {
+    const cells = rows.map((u) => [
+      instanceNameCell(u.instance_id, (instancesById[u.instance_id] || {}).started_at, titles[u.instance_id]),
+      schemaLabel(u.schema_id, u.schema_version),
+      u.label || u.node_id,
+      unstaffedReasonText(u)]);
+    return el("div", { class: "panel" },
+      el("div", { class: "panel-h" }, el("h2", null, title), el("span", { class: "sub" }, sub)),
       el("div", { class: "panel-b" },
-        el("table", null,
-          el("thead", null, el("tr", null, ...["Instanz", "Schema", "Schritt", "Grund"].map((h) => el("th", null, h)))),
-          el("tbody", null, ...rowsU)))));
+        table(["Instanz", "Schema", "Schritt", "Grund"], cells,
+          (i) => ({ class: "clickable", onClick: () => openInstanceFromMonitor(rows[i].instance_id) }))));
+  };
+  if (stalled.length) {
+    content.appendChild(unstaffedPanel(stalled, "Niemand zust\u00E4ndig",
+      "Diese Vorg\u00E4nge stehen still, bis jemand zugeordnet wird, einen Login bekommt oder per Aufsicht abschlie\u00DFt"));
+  }
+  if (absentOnly.length) {
+    content.appendChild(unstaffedPanel(absentOnly, "Nur Abwesende zust\u00E4ndig",
+      "Die Aufgabe bleibt bei der Person und l\u00E4uft weiter, sobald sie zur\u00FCck ist \u2013 oder eine Vertretung eintragen"));
   }
 
   // Filter der Instanzliste: die Liste hiess
   // „Aktive Instanzen“, zeigte aber auch abgeschlossene. Rein clientseitig,
   // transient (state.monitorFilter), Standard "alle".
   const filter = INSTANCE_FILTERS.some((f) => f.key === state.monitorFilter) ? state.monitorFilter : "all";
-  const matches = (i, key) => key === "all" || (key === "UNSTAFFED" ? unstaffedIds.has(i.id) : i.state === key);
+  const matches = (i, key) => key === "all"
+    || (key === "UNSTAFFED" ? unstaffedIds.has(i.id)
+      : key === "ABSENT_ONLY" ? absentOnlyIds.has(i.id) : i.state === key);
   const shown = instances.filter((i) => matches(i, filter));
   const filterBar = el("div", { class: "seg-filter", role: "group", "aria-label": "Instanzen filtern" },
     ...INSTANCE_FILTERS.map((f) => {
@@ -8516,18 +9482,18 @@ async function viewMonitor() {
     const total = Object.keys(i.node_states || {}).length || 1;
     const completed = Object.values(i.node_states || {}).filter((s) => s === "COMPLETED" || s === "SKIPPED").length;
     const pct = Math.round((completed / total) * 100);
-    const title = contextTitle(titles[i.id]);
-    const idCell = title ? el("div", null, title, el("div", { class: "task-context" }, i.id)) : i.id;
+    const idCell = instanceNameCell(i.id, i.started_at, titles[i.id]);
     return { i, cells: [idCell, schemaLabel(i.schema_id, i.schema_version), statePillFor(i.state), `${pct}%`] };
   });
 
-  const tbl = el("table", null,
-    el("thead", null, el("tr", null, ...["Instanz", "Schema", "Status", "Fortschritt"].map((h) => el("th", null, h)))),
-    el("tbody", null, ...(rows.length ? rows.map((r) =>
-      el("tr", { class: r.i.id === state.instanceId ? "clickable selected" : "clickable", onClick: () => openInstanceFromMonitor(r.i.id) }, ...r.cells.map((c) => el("td", null, c))))
-      : [el("tr", null, el("td", { colspan: 4 }, emptyState(instances.length
-          ? "Keine Instanzen in diesem Filter."
-          : "Keine Instanzen. Starte eine in der Ausf\u00FChrungs-Sicht.")))])));
+  // Leere Liste: ein Hinweis statt einer Tabelle mit einer Leerzeile.
+  const tbl = rows.length
+    ? table(["Instanz", "Schema", "Status", "Fortschritt"], rows.map((r) => r.cells),
+        (i) => ({ class: rows[i].i.id === state.instanceId ? "clickable selected" : "clickable",
+          onClick: () => openInstanceFromMonitor(rows[i].i.id) }))
+    : emptyState(instances.length
+        ? "Keine Instanzen in diesem Filter."
+        : "Keine Instanzen. Starte eine in der Ausf\u00FChrungs-Sicht.");
 
   content.appendChild(el("div", { class: "panel", "data-tour": "monitor.instances" },
     el("div", { class: "panel-h" }, el("h2", null, "Instanzen"), el("span", { class: "sub" }, "Klick \u00F6ffnet Detail"), filterBar),
@@ -8542,7 +9508,9 @@ async function viewMonitor() {
   // mehr lesbar (geloescht, fremd), faellt die Auswahl weg.
   if (state.instanceId) {
     try { await loadInstance(state.instanceId); }
-    catch (e) { state.instanceId = null; state.instance = null; state.worklist = null; }
+    catch (e) {
+      if (!dropUnreadableInstance(e)) { state.instanceId = null; state.instance = null; state.worklist = null; }
+    }
   }
   if (state.instance) {
     const detail = el("div");
@@ -8630,6 +9598,19 @@ async function viewAdmin() {
     return;
   }
 
+  // Benutzer (nur Passwort-Modus): die Logins verwalten -- auflisten,
+  // Passwort zuruecksetzen, loeschen. Rollen aendert die Oberflaeche bewusst
+  // nicht; neue Logins entstehen an der Person in der Ressourcensicht.
+  if (state.passwordLogin) {
+    const usersBody = el("div", { class: "panel-b" });
+    content.appendChild(el("div", { class: "panel", "data-panel": "admin.users" },
+      el("div", { class: "panel-h" },
+        el("h2", null, "Benutzer"),
+        el("span", { class: "sub" }, "Logins \u00B7 Passwort zur\u00FCcksetzen \u00B7 l\u00F6schen")),
+      usersBody));
+    loadUsersPanel(usersBody);
+  }
+
   // Sicherungen (nur Ansicht): zeigt den Zustand der automatischen
   // Datensicherung und erlaubt, sofort eine Sicherung anzustossen. Die
   // Oberflaeche fuehrt selbst KEIN pg_dump aus -- sie setzt nur einen
@@ -8638,7 +9619,7 @@ async function viewAdmin() {
   content.appendChild(el("div", { class: "panel", "data-tour": "admin.backups" },
     el("div", { class: "panel-h" },
       el("h2", null, "Sicherungen"),
-      el("span", { class: "sub" }, "Datensicherung \u00B7 nur Ansicht")),
+      el("span", { class: "sub" }, "Datensicherung \u00B7 Zustand und Sofort-Sicherung")),
     backupsBody));
   loadBackupsPanel(backupsBody);
 
@@ -8650,7 +9631,7 @@ async function viewAdmin() {
   content.appendChild(el("div", { class: "panel", "data-tour": "admin.mail" },
     el("div", { class: "panel-h" },
       el("h2", null, "E-Mail-Ausgang"),
-      el("span", { class: "sub" }, "Benachrichtigungen · nur Ansicht")),
+      el("span", { class: "sub" }, "Benachrichtigungen · Zustand und erneuter Versand")),
     mailBody));
   loadMailOutboxPanel(mailBody);
 
@@ -8662,7 +9643,7 @@ async function viewAdmin() {
       el("span", { class: "sub" }, "Daten zur\u00FCcksetzen \u00B7 Beispiel laden")),
     el("div", { class: "panel-b" },
       el("p", { class: "muted" },
-        "Setzt das gesamte System zur\u00FCck. Die Beispieldaten zeigen alle Funktionen anhand zweier Prozesse, einer Organisation und drei laufenden Instanzen. Das Order-to-Cash-Beispiel ist der gro\u00DFe Datensatz: sechs Prozesse (Haupt-, Teil- und Folgeprozesse) vom Angebot bis zum Mahnwesen, mit neun laufenden bzw. abgeschlossenen Vorg\u00E4ngen. Dieser Vorgang l\u00F6scht alle vorhandenen Daten unwiderruflich."),
+        "Setzt das gesamte System zur\u00FCck. Die Beispieldaten zeigen alle Funktionen anhand zweier Prozesse, einer Organisation und drei Vorg\u00E4ngen (zwei laufend, einer abgeschlossen). Das Order-to-Cash-Beispiel ist der gro\u00DFe Datensatz: sechs Prozesse (Haupt-, Teil- und Folgeprozesse) vom Angebot bis zum Mahnwesen, mit neun Auftragsvorg\u00E4ngen an unterschiedlichen Stellen (samt Teil- und Folgeprozessen 21 Vorg\u00E4nge). Dieser Vorgang l\u00F6scht alle vorhandenen Daten unwiderruflich."),
       el("div", { style: "display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;" },
         el("button", { class: "btn primary", onClick: () => confirmReset("demo") }, "Beispieldaten laden"),
         el("button", { class: "btn", onClick: () => confirmReset("o2c") }, "Order-to-Cash-Beispiel laden"),
@@ -8675,7 +9656,7 @@ function fmtBytes(n) {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let i = 0, x = n;
   while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
-  return x.toFixed(i ? 1 : 0) + " " + units[i];
+  return fmtNumber(x, i ? 1 : 0) + " " + units[i];
 }
 
 // Fuellt den Sicherungen-Bereich asynchron (der Monitoring-Render bleibt sync).
@@ -8761,11 +9742,12 @@ async function triggerBackupNow(body) {
 // Epoch-Sekunden (Float) menschenlesbar; die Mail-Outbox stempelt so (analog outbox.py).
 function fmtEpoch(sec) {
   if (!sec) return "–";
-  try { return new Date(sec * 1000).toLocaleString(); } catch (_e) { return "–"; }
+  try { return new Date(sec * 1000).toLocaleString("de-DE"); } catch (_e) { return "–"; }
 }
 
 const MAIL_STATE_LABELS = {
   PENDING: "ausstehend", FAILED: "in Wiederholung", SENT: "zugestellt", DEAD: "gescheitert",
+  DROPPED: "verworfen \u2013 kein Mailserver",
 };
 
 // Fuellt den E-Mail-Ausgang-Bereich asynchron (GET /admin/mail-outbox).
@@ -8797,7 +9779,8 @@ function renderMailOutboxBody(status, body) {
   }
   info.appendChild(el("div", null,
     `Gesamt ${status.total} · ausstehend ${status.pending} · in Wiederholung ` +
-    `${status.failed} · zugestellt ${status.sent} · gescheitert ${status.dead}`));
+    `${status.failed} · zugestellt ${status.sent} · gescheitert ${status.dead}`
+    + ` · verworfen (kein Mailserver) ${status.dropped || 0}`));
   frag.appendChild(info);
 
   const entries = status.entries || [];
@@ -8830,7 +9813,8 @@ async function dispatchMailOutbox(body) {
     const status = await api.post("/admin/mail-outbox/dispatch");
     clear(body);
     body.appendChild(renderMailOutboxBody(status, body));
-    toast("ok", "Versand angestoßen", [`Zugestellt: ${status.sent} · gescheitert: ${status.dead}`]);
+    toast("ok", "Versand angestoßen", [`Zugestellt: ${status.sent} · gescheitert: ${status.dead}`
+      + ` · verworfen (kein Mailserver): ${status.dropped || 0}`]);
   } catch (err) { toastError(err); }
 }
 
@@ -8886,7 +9870,7 @@ function confirmReset(kind) {
       if (password) { showExamplePassword(password); return false; }
       return true;
     },
-    spec.confirm);
+    spec.confirm, { danger: true });
 }
 
 /**
@@ -8916,6 +9900,99 @@ async function runReset(kind) {
 }
 
 /**
+ * Zeichnet die Benutzerverwaltung (Administration → Benutzer) in ``body``.
+ *
+ * Eine Zeile je Login: Login, Name, Rollen, zugeordnete Person (aus dem
+ * Personenverzeichnis, sonst die id) und Zustand („muss Passwort aendern“).
+ * Aktionen: „Passwort zuruecksetzen“ (neues Initialpasswort einmal angezeigt,
+ * Sitzungen enden) und „Loeschen“ (mit Bestaetigung). Der eigene Login ist
+ * nicht loeschbar – der Knopf ist gesperrt und nennt den Grund; der Kern
+ * lehnt es zusaetzlich ab, ebenso das Loeschen des letzten Administrators.
+ *
+ * @param {HTMLElement} body Panel-Koerper; wird bei jedem Aufruf neu gefuellt
+ * @returns {Promise<void>}
+ */
+async function loadUsersPanel(body) {
+  let users;
+  try { users = await api.get("/users"); }
+  catch (err) {
+    clear(body);
+    body.appendChild(emptyState(describeError(err).title));
+    return;
+  }
+  clear(body);
+  const me = state.principal && state.principal.subject;
+  const reload = () => loadUsersPanel(body);
+  const rows = (users || []).slice().sort((a, b) => a.login.localeCompare(b.login)).map((u) => {
+    const roles = (u.roles || []).map((r) => ROLE_LABELS[r] || r).join(", ") || "\u2013";
+    const person = u.agent_id
+      ? ((state.agentDirectory[u.agent_id] && state.agentDirectory[u.agent_id].name) || u.agent_id)
+      : el("span", { class: "muted" }, "\u2013");
+    const status = u.must_change
+      ? el("span", { class: "pill pill-amber", title: "Initialpasswort noch nicht ge\u00E4ndert" }, "muss Passwort \u00E4ndern")
+      : el("span", { class: "pill pill-green" }, "aktiv");
+    const own = u.login === me;
+    const actions = el("div", { style: "display:flex; gap:6px; justify-content:flex-end; flex-wrap:wrap" },
+      el("button", { class: "btn small", onClick: () => confirmUserPasswordReset(u, reload) },
+        "Passwort zur\u00FCcksetzen"),
+      el("button", { class: "btn small danger", disabled: own,
+        title: own ? "Den eigenen Login kann man nicht l\u00F6schen \u2013 sonst w\u00E4re man ausgesperrt." : null,
+        onClick: () => confirmUserDelete(u, reload) }, "L\u00F6schen"));
+    return [u.login, u.display_name || "\u2013", roles, person, status, actions];
+  });
+  body.appendChild(rows.length
+    ? table(["Login", "Name", "Rollen", "Person", "Zustand", ""], rows)
+    : emptyState("Keine Logins."));
+}
+
+/**
+ * Rueckfrage und Zuruecksetzen des Passworts eines Logins.
+ *
+ * Nach Erfolg ersetzt der Zugangsdaten-Dialog diesen (Rueckgabe ``false``);
+ * das neue Initialpasswort steht nur dort. Bestehende Sitzungen des Logins
+ * beendet der Kern.
+ *
+ * @param {{login: string}} user der Login
+ * @param {() => void} onDone laedt die Liste neu
+ */
+function confirmUserPasswordReset(user, onDone) {
+  openModal(`Passwort zur\u00FCcksetzen: ${user.login}`,
+    el("p", { class: "muted" },
+      "Erzeugt ein neues Initialpasswort, das nur einmal angezeigt wird. Bestehende Anmeldungen dieses Logins enden; beim n\u00E4chsten Anmelden vergibt die Person ein eigenes Passwort."),
+    async () => {
+      try {
+        const res = await api.post(`/users/${encodeURIComponent(user.login)}/reset-password`);
+        showLoginCredentials(res, "Neues Initialpasswort");
+        onDone();
+        return false;
+      } catch (err) { toastError(err); return false; }
+    }, "Zur\u00FCcksetzen", { danger: true });
+}
+
+/**
+ * Bestaetigung und Loeschen eines Logins.
+ *
+ * Die Person im Organisationsmodell bleibt erhalten; nur die Anmeldung
+ * verschwindet, und ihre Sitzungen enden. Lehnt der Kern ab (eigener Login,
+ * letzter Administrator), steht sein Grund in der Fehlermeldung.
+ *
+ * @param {{login: string}} user der Login
+ * @param {() => void} onDone laedt die Liste neu
+ */
+function confirmUserDelete(user, onDone) {
+  openModal(`Login l\u00F6schen: ${user.login}`,
+    el("p", { class: "muted" },
+      "Der Login wird entfernt, laufende Anmeldungen enden sofort. Die Person im Organisationsmodell, ihre Aufgaben und der Verlauf bleiben erhalten."),
+    async () => {
+      try {
+        await api.del(`/users/${encodeURIComponent(user.login)}`);
+        toast("ok", "Login gel\u00F6scht", [user.login]);
+        onDone();
+      } catch (err) { toastError(err); return false; }
+    }, "L\u00F6schen", { danger: true });
+}
+
+/**
  * Zeigt das Passwort der gerade angelegten Beispiel-Anmeldungen -- genau
  * einmal, in einem Dialog statt einer verschwindenden Meldung.
  *
@@ -8923,6 +10000,9 @@ async function runReset(kind) {
  * Demo-Passwort; auf einer Kundeninstallation war damit u. a. eine
  * Modellierer-Anmeldung fuer jeden offen. Der Server vergibt jetzt ein
  * zufaelliges Passwort und nennt es nur in der Antwort auf das Laden.
+ *
+ * Ergebnisdialog (``cancel: false``): nur „Verstanden“ und ein Kopierknopf;
+ * der Text verweist auf Administration → Benutzer zum Aufraeumen.
  * @param {string} password das Passwort aller Beispiel-Anmeldungen
  */
 function showExamplePassword(password) {
@@ -8931,10 +10011,10 @@ function showExamplePassword(password) {
       el("p", null, "Die Beispieldaten bringen Anmeldungen mit, z. B. ",
         el("code", null, "mara.modell"), " oder ", el("code", null, "erika.sander"),
         ". Ihr gemeinsames Passwort wird nur jetzt angezeigt:"),
-      el("p", null, el("code", { class: "example-password" }, password)),
+      copyField("Passwort der Beispiel-Anmeldungen", password),
       el("p", { class: "muted", style: "font-size:13px" },
-        "Vor dem echten Einsatz die Beispiel-Anmeldungen in der Benutzerverwaltung l\u00F6schen oder das System auf Null zur\u00FCcksetzen.")),
-    async () => true, "Verstanden");
+        "Vor dem echten Einsatz die Beispiel-Anmeldungen unter Administration \u2192 Benutzer l\u00F6schen oder ihnen neue Passw\u00F6rter geben \u2013 oder das System auf Null zur\u00FCcksetzen.")),
+    async () => true, "Verstanden", { cancel: false });
 }
 
 /** Deutsche Namen der Vorgangszustaende (statt RUNNING/COMPLETED roh). */
@@ -8967,6 +10047,16 @@ const EVENT_LABELS = {
   INSTANCE_MIGRATED: "Instanz migriert",
   INSTANCE_DATA_SET: "Daten ge\u00E4ndert",
   INSTANCE_COMPLETED: "Instanz abgeschlossen",
+  ACTIVITY_CLAIMED: "Aufgabe \u00FCbernommen",
+  ACTIVITY_RETURNED: "Aufgabe zur\u00FCckgelegt",
+  ACTIVITY_SUSPENDED: "Aufgabe angehalten",
+  ACTIVITY_RESUMED: "Weiterarbeit aufgenommen",
+  ACTIVITY_FAILED: "Problem gemeldet",
+  ACTIVITY_RESET: "Wiederanlauf",
+  TASK_ESCALATED: "Eskaliert",
+  MAIL_SENT: "E-Mail versendet",
+  MAIL_FAILED: "E-Mail gescheitert",
+  TIME_ANCHOR: "Zeitbezug gesetzt",
 };
 
 function eventLabel(t) { return EVENT_LABELS[t] || t; }
@@ -9023,7 +10113,7 @@ function fmtTimestamp(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
-  return d.toLocaleString();
+  return d.toLocaleString("de-DE");
 }
 
 function fmtDuration(sec) {
@@ -9033,9 +10123,9 @@ function fmtDuration(sec) {
   // Die Demo-Daten haben einen Zeitverlauf; bleibt der Wert dennoch unter einer Sekunde, sagt die Kachel
   // das jetzt, statt eine Null zu zeigen.
   if (sec < 1) return "< 1 s";
-  if (sec < 60) return sec.toFixed(1) + " s";
-  if (sec < 3600) return (sec / 60).toFixed(1) + " min";
-  return (sec / 3600).toFixed(1) + " h";
+  if (sec < 60) return fmtNumber(sec, 1) + " s";
+  if (sec < 3600) return fmtNumber(sec / 60, 1) + " min";
+  return fmtNumber(sec / 3600, 1) + " h";
 }
 
 // --------------------------------------------------------------------------
@@ -9247,26 +10337,71 @@ async function viewTasks() {
       }
       // Zwei gleiche Aufgaben verschiedener Vorgaenge waren nicht zu
       // unterscheiden -- darunter jetzt die benennenden Werte.
-      const title = contextTitle(t.context);
-      const taskCell = title
-        ? el("div", null, t.label || t.node_id, el("div", { class: "task-context" }, title))
-        : (t.label || t.node_id);
+      // Ohne benennende Werte (meist beim ersten Schritt) unterscheidet die
+      // Startzeit des Vorgangs.
+      const taskCell = el("div", { title: `Kennung: ${t.instance_id}` }, t.label || t.node_id,
+        el("div", { class: "task-context" }, instanceName(t.instance_started_at, t.context)),
+        deputyNote(t, agentId));
       return [taskCell, schemaLabel(t.schema_id, t.schema_version), dueCell(t), elig, status, actions];
     });
     body.appendChild(table(["Aufgabe", "Prozess", "Fällig", "Berechtigte", "Status", ""], rows));
     if (hiddenCount > 0) {
       body.appendChild(el("div", { class: "muted", style: "font-size:12px;margin-top:6px" },
-        `${hiddenCount} Aufgabe(n) durch den Filter ausgeblendet.`));
+        `${countLabel(hiddenCount, "Aufgabe", "Aufgaben")} durch den Filter ausgeblendet.`));
     }
   }
   content.appendChild(el("div", { class: "panel", "data-tour": "tasks.list" },
     el("div", { class: "panel-h" }, el("h2", null, "Offene Aufgaben"),
       el("span", { class: "sub" },
-        hiddenCount > 0 ? `${visible.length} von ${tasks.length} Eintr\u00E4gen` : tasks.length + " Eintr\u00E4ge"),
+        hiddenCount > 0 ? `${visible.length} von ${tasks.length} Eintr\u00E4gen` : countLabel(tasks.length, "Eintrag", "Eintr\u00E4ge")),
       filterSel),
     body));
 
   content.appendChild(await absencePanel(agentId));
+}
+
+/**
+ * „in Vertretung für <Name>“ an einer Aufgabe der Arbeitsliste.
+ *
+ * Eine Vertretung sah die Aufgabe einer abwesenden Kollegin ohne Hinweis,
+ * warum. Der Kern nennt je Vertretung die vertretene Person
+ * (``OpenTask.deputy_of``); der Name kommt aus dem Personenverzeichnis, weil
+ * die Liste ueber alle Prozesse reicht.
+ * @param {{deputy_of?: Object<string, string>}} task Aufgabe
+ * @param {string} agentId Person, deren Liste gezeigt wird
+ * @returns {HTMLElement|null} Vermerk, oder ``null``, wenn die Person die
+ *   Aufgabe selbst traegt
+ */
+function deputyNote(task, agentId) {
+  const forId = task.deputy_of && task.deputy_of[agentId];
+  if (!forId) return null;
+  const known = state.agentDirectory && state.agentDirectory[forId];
+  return el("div", { class: "task-deputy" }, `in Vertretung f\u00FCr ${known ? known.name : forId}`);
+}
+
+/**
+ * Hinweis zum Vertretungs-Status im Abwesenheits-Panel.
+ *
+ * @param {string|null} person Name der Person, deren Liste gezeigt wird –
+ *   ``null``, wenn es die eigene ist (dann „du/deine“).
+ * @param {string|null} deputy Name der Vertretung, ``null`` ohne Vertretung
+ * @returns {HTMLElement} gruener bzw. gelber Hinweis. Ohne Vertretung nennt er,
+ *   wer sie hinterlegen kann: Modellierer und Administratoren in der
+ *   Ressourcensicht; ein Bearbeiter sieht diese Sicht nicht und wird an die
+ *   Administration verwiesen.
+ */
+function absenceDeputyBanner(person, deputy) {
+  const howToSet = hasRole("modeler", "admin")
+    ? "Vertretung in der Ressourcensicht setzen."
+    : "Bitte die Vertretung bei der Administration hinterlegen lassen.";
+  if (deputy) {
+    return el("div", { class: "ok-banner" }, person
+      ? `\u2713 Vertretung hinterlegt: ${deputy} erh\u00E4lt die Aufgaben von ${person} w\u00E4hrend der Abwesenheit (parallel).`
+      : `\u2713 Vertretung hinterlegt: ${deputy} erh\u00E4lt deine Aufgaben w\u00E4hrend deiner Abwesenheit (parallel zu dir).`);
+  }
+  return el("div", { class: "warn-banner" }, person
+    ? `\u26A0 F\u00FCr ${person} ist keine Vertretung hinterlegt. W\u00E4hrend der Abwesenheit bleiben die Aufgaben bei ${person} \u2013 niemand \u00FCbernimmt sie; das Monitoring zeigt solche Vorg\u00E4nge unter \u201ENur Abwesende zust\u00E4ndig\u201C. ${howToSet}`
+    : `\u26A0 Keine Vertretung hinterlegt. W\u00E4hrend deiner Abwesenheit bleiben deine Aufgaben dir zugewiesen \u2013 die Instanz steht nicht still, aber niemand \u00FCbernimmt f\u00FCr dich. ${howToSet}`);
 }
 
 // Panel \u201EAbwesenheit / Vertretung" in \u201EMeine Aufgaben": eine gut sichtbare
@@ -9285,12 +10420,11 @@ async function absencePanel(agentId) {
   const deputyId = agent.deputy_id || null;
 
   // Vertretungs-Status: ohne Vertreter ein deutlicher Hinweis, dass die
-  // Aufgaben in der Abwesenheit beim Agenten selbst verbleiben.
-  const deputyLine = deputyId
-    ? el("div", { class: "ok-banner" },
-        `\u2713 Vertretung hinterlegt: ${agentNameOf(deputyId)} erh\u00E4lt deine Aufgaben w\u00E4hrend deiner Abwesenheit (parallel zu dir).`)
-    : el("div", { class: "warn-banner" },
-        "\u26A0 Keine Vertretung hinterlegt. W\u00E4hrend deiner Abwesenheit bleiben deine Aufgaben dir zugewiesen \u2013 die Instanz steht nicht still, aber niemand \u00FCbernimmt f\u00FCr dich. Vertretung in der Ressourcensicht setzen.");
+  // Aufgaben in der Abwesenheit beim Agenten selbst verbleiben. Sieht eine
+  // Aufsicht die Liste einer anderen Person, nennt der Text diese Person.
+  const own = !!(state.principal && state.principal.agent_id === agentId);
+  const deputyLine = absenceDeputyBanner(own ? null : (agent.name || agentNameOf(agentId)),
+    deputyId ? agentNameOf(deputyId) : null);
 
   // Eingabezeile: Zeitraum (von/bis, ganze Tage) plus optionale Notiz.
   const fromInp = el("input", { type: "date" });
@@ -9318,7 +10452,7 @@ async function absencePanel(agentId) {
   catch (err) { toastError(err); }
 
   const now = new Date();
-  const fmt = (iso) => (iso || "").slice(0, 10);
+  const fmt = fmtDate;
   const listBody = el("div", { class: "panel-b" });
   if (!absences.length) {
     listBody.appendChild(el("div", { class: "muted", style: "font-size:13px" }, "Keine Abwesenheiten eingetragen."));
@@ -9538,7 +10672,29 @@ async function viewTestRun() {
 // Aufruf von POST /schemas/{id}/simulate – der Kern spielt rein und ohne
 // jede Spur durch (kein Store, kein Audit, keine Mails); der Client zeigt
 // das Ergebnis mit demselben renderGraph wie jede Laufzeit-Sicht.
+//
+// Eingaben und letztes Ergebnis liegen in ``state.simulation`` (je Schema),
+// nicht nur im DOM: Die Pruefinstanz-Sicht zeichnet sich bei jedem Fortschritt
+// und alle 30 s neu, und das Ergebnis verschwand sonst ungefragt.
+/**
+ * @param {object} schema das simulierte Schema (Entwurf oder Ad-hoc-Variante)
+ * @returns {HTMLElement} das Panel
+ */
 function simulationPanel(schema) {
+  const key = schema.id || state.schemaId;
+  // Fingerabdruck des Modellstands: Aendert sich der Entwurf (Zweig geloescht,
+  // Schritt eingefuegt), passt ein altes Ergebnis nicht mehr zum Graphen --
+  // es wird verworfen; die Eingaben bleiben als Vorschlag stehen.
+  const fp = JSON.stringify([schema.nodes, schema.edges, schema.data_elements,
+    schema.data_accesses, schema.version]);
+  if (!state.simulation || state.simulation.key !== key) {
+    state.simulation = { key, fp, values: {}, result: null, runId: 0 };
+  } else if (state.simulation.fp !== fp) {
+    state.simulation.fp = fp;
+    state.simulation.result = null;
+    state.simulation.runId = (state.simulation.runId || 0) + 1;  // laufende Antwort ist veraltet
+  }
+  const sim0 = state.simulation;
   const elems = Object.values(schema.data_elements || {})
     .filter((d) => d.source === "INSTANCE")
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
@@ -9556,9 +10712,19 @@ function simulationPanel(schema) {
       input = el("input", { type: "text", placeholder: "– nicht gesetzt –" });
     }
     inputs[d.id] = { input, type: d.data_type };
+    // Wert aus state wiederherstellen und dort mitfuehren; data-live-safe:
+    // diese Eingabe haelt die Live-Aktualisierung nicht auf (sie uebersteht sie).
+    input.setAttribute("data-live-safe", "1");
+    if (sim0.values[d.id] != null) input.value = sim0.values[d.id];
+    const keep = () => { sim0.values[d.id] = input.value; };
+    input.addEventListener("input", keep);
+    input.addEventListener("change", keep);
     return el("label", { class: "field" }, `${d.name} (${typeName(d.data_type)})`, input);
   });
-  const result = el("div", null);
+  // data-sim-result: Kommt die Antwort erst, nachdem die Sicht neu gezeichnet
+  // wurde, landet sie im dann sichtbaren Panel statt im verworfenen.
+  const result = el("div", { "data-sim-result": "1" });
+  if (sim0.result) result.appendChild(renderSimulationResult(schema, sim0.result));
   async function run() {
     const data = {};
     Object.entries(inputs).forEach(([id, { input, type }]) => {
@@ -9568,9 +10734,15 @@ function simulationPanel(schema) {
       else data[id] = coerceTypedInput(type, v);  // Zahlen inkl. Betrag
     });
     clear(result);
+    sim0.result = null;
+    const runId = (sim0.runId || 0) + 1;
+    sim0.runId = runId;
     try {
       const sim = await api.post(`/schemas/${state.schemaId}/simulate`, { data });
-      result.appendChild(renderSimulationResult(schema, sim));
+      if (sim0.runId !== runId || state.simulation !== sim0) return;  // ueberholt
+      sim0.result = sim;
+      const target = result.isConnected ? result : document.querySelector("[data-sim-result]");
+      if (target) { clear(target); target.appendChild(renderSimulationResult(schema, sim)); }
     } catch (err) { toastError(err); }
   }
   return el("div", { class: "panel" },
@@ -9597,7 +10769,7 @@ function renderSimulationResult(schema, sim) {
   box.appendChild(el("div", { class: "row", style: "gap:8px;align-items:center;margin-bottom:8px" },
     badge,
     el("span", { class: "muted", style: "font-size:12px" }, `erwartete Dauer: ${dur}`),
-    el("span", { class: "muted", style: "font-size:12px" }, `${(sim.executed || []).length} Schritte ausgeführt`)));
+    el("span", { class: "muted", style: "font-size:12px" }, `${countLabel((sim.executed || []).length, "Schritt", "Schritte")} ausgeführt`)));
   (sim.findings || []).forEach((f) => box.appendChild(el("div", { class: "warn-banner" }, f)));
   // Markierungsbild: dieselbe Kontrollfluss-Darstellung wie jede Laufzeit-
   // Sicht, gespeist aus der synthetischen Instanz des Simulationsergebnisses
@@ -9613,8 +10785,8 @@ function renderSimulationResult(schema, sim) {
   if (dec.length) {
     box.appendChild(el("div", { class: "sub-h", style: "margin-top:8px" }, el("h3", null, "Gewählte Zweige")));
     box.appendChild(table(["Verzweigung", "Zweig"], dec.map(([split, target]) => {
-      const s = schema.nodes[split], t = schema.nodes[target];
-      return [s ? nodeCaption(s) : split, t ? nodeCaption(t) : target];
+      const s = schema.nodes[split];
+      return [s ? nodeCaptionInContext(schema, s) : split, branchCaption(schema, split, target)];
     })));
   }
   return box;
@@ -9728,7 +10900,7 @@ async function startTestInstance() {
       state.view = "testrun";
       setActiveNav();
       render();
-      toast("ok", "Pr\u00FCfinstanz gestartet", [inst.id]);
+      toast("ok", "Pr\u00FCfinstanz gestartet", [`${instanceCaption(inst, schema)} \u00B7 ${inst.id}`]);
       return true;
     } catch (err) { toastError(err); return false; }
   }, "Starten");
@@ -9822,7 +10994,8 @@ function testMonitorPanel(inst, runSchema) {
   }
 
   return el("div", { class: "panel" },
-    el("div", { class: "panel-h" }, el("h2", null, "Monitoring"), el("span", { class: "sub" }, inst.id),
+    el("div", { class: "panel-h" }, el("h2", null, "Monitoring"),
+      el("span", { class: "sub", title: `Kennung: ${inst.id}` }, instanceCaption(inst, runSchema)),
       inst.state === "COMPLETED"
         ? el("span", { class: "pill pill-green" }, "fertig")
         : el("span", { class: "pill pill-blue" }, "l\u00E4uft")),
@@ -9839,6 +11012,14 @@ const NODE_STATE_META = {
   COMPLETED: { label: "erledigt", cls: "pill-green" },
   SKIPPED: { label: "\u00FCbersprungen", cls: "pill-amber" },
 };
+/**
+ * Deutsche Bezeichnung einer Knotenmarkierung (``NodeState``), z. B. fuer die
+ * Unterzeile der Prozesslandkarte. Leer bleibt leer.
+ * @param {string} s Markierung
+ * @returns {string}
+ */
+function nodeStateLabel(s) { return s ? ((NODE_STATE_META[s] || {}).label || s) : ""; }
+
 function nodeStatePill(s) {
   const m = NODE_STATE_META[s] || { label: s, cls: "" };
   return el("span", { class: "pill " + m.cls }, m.label);
@@ -10199,7 +11380,7 @@ function dataBindingPanel() {
   // Modell-Connectoren (Metadaten im Schema, getrennt von der Laufzeit-Registry).
   const connRows = Object.values(schema.connectors || {}).map((c) =>
     [c.name, el("span", { class: "pill pill-blue" }, c.kind), c.id]);
-  const addConnBtn = el("button", { class: "btn small", onClick: registerSchemaConnector, disabled: !draft }, "+ Connector");
+  const addConnBtn = el("button", { class: "btn small", onClick: registerSchemaConnector, ...lockedBy([!draft, DRAFT_ONLY_REASON]) }, "+ Connector");
   const connBlock = el("div", null,
     el("div", { class: "sub-h" }, el("h3", null, "Modell-Connectoren"), el("span", { class: "spacer", style: "flex:1" }), addConnBtn),
     connRows.length ? table(["Name", "Typ", "ID"], connRows)
@@ -10221,9 +11402,11 @@ function dataBindingPanel() {
     } else if (d.write) {
       detail = `${d.write.connector_id} \u00B7 UPDATE ${d.write.entity} SET ${d.write.column}`;
     }
-    const bindBtn = el("button", { class: "btn small ghost", onClick: () => bindExternalElement(d), disabled: !draft || !hasConn }, "Datensatz");
-    const sqlBtn = el("button", { class: "btn small ghost", onClick: () => bindSqlSelect(d), disabled: !draft || !hasConn }, "SQL-Select");
-    const writeBtn = el("button", { class: "btn small ghost", onClick: () => bindSqlWrite(d), disabled: !draft || !hasConn }, "SQL-Write");
+    const connLock = lockedBy([!draft, DRAFT_ONLY_REASON],
+      [!hasConn, "Erst oben unter „Connectoren“ einen Connector anlegen."]);
+    const bindBtn = el("button", { class: "btn small ghost", onClick: () => bindExternalElement(d), ...connLock }, "Datensatz");
+    const sqlBtn = el("button", { class: "btn small ghost", onClick: () => bindSqlSelect(d), ...connLock }, "SQL-Select");
+    const writeBtn = el("button", { class: "btn small ghost", onClick: () => bindSqlWrite(d), ...connLock }, "SQL-Write");
     return [d.name, typeName(d.data_type), src, detail, el("div", { class: "row-actions" }, bindBtn, sqlBtn, writeBtn)];
   });
   const elemBlock = el("div", null,
@@ -10560,7 +11743,7 @@ function automationPanel() {
     const pill = el("span", { class: "pill " + (auto === "MANUAL_NONE" ? "pill-gray" : "pill-green") },
       auto === "MANUAL_NONE" ? "manuell" : "automatisch");
     const btn = sb
-      ? el("button", { class: "btn small", onClick: () => editAutomation(n, sb), disabled: !draft }, "Bearbeitung w\u00E4hlen")
+      ? el("button", { class: "btn small", onClick: () => editAutomation(n, sb), ...lockedBy([!draft, DRAFT_ONLY_REASON]) }, "Bearbeitung w\u00E4hlen")
       : el("span", { class: "muted" }, "erst Dienst zuweisen");
     return [nodeCaption(n), pill, detail, btn];
   });
@@ -10619,7 +11802,7 @@ async function webhookPanel() {
   try { subs = await api.get("/v1/webhooks"); }
   catch (err) { toastError(err); }
   const rows = subs.map((s) => {
-    const events = (s.events || []).join(", ");
+    const events = (s.events || []).map(webhookEventLabel).join(", ");
     const test = el("button", { class: "btn small", onClick: () => testWebhook(s.id) }, "Testzustellung");
     const log = el("button", { class: "btn small ghost", onClick: () => showDeliveries(s.id) }, "Protokoll");
     const del = el("button", { class: "btn small danger", onClick: () => deleteWebhook(s) }, "L\u00F6schen");
@@ -10648,22 +11831,34 @@ function addWebhook() {
   const secret = el("input", { type: "text", placeholder: "z. B. WEBHOOK_SECRET (optional)" });
   const checks = WEBHOOK_EVENT_TYPES.map((ev) => {
     const cb = el("input", { type: "checkbox", value: ev });
-    return { cb, row: el("label", { class: "check-row" }, cb, " " + ev) };
+    return { cb, row: el("label", { class: "check-row" }, cb, " " + webhookEventLabel(ev)) };
   });
   const result = el("div", { class: "wh-preview" });
+  // Ein Probelauf gilt nur fuer die Eingaben, mit denen er lief. Aendert sich
+  // URL, Secret oder Ereignis, verschwindet das Ergebnis -- sonst stand der
+  // Befund zu „127.0.0.1“ noch unter einer laengst anderen URL. ``previewGen``
+  // verwirft zudem eine Antwort, die erst nach einer Aenderung eintrifft.
+  let previewGen = 0;
+  const dropPreview = () => { previewGen++; clear(result); };
+  url.addEventListener("input", dropPreview);
+  secret.addEventListener("input", dropPreview);
+  checks.forEach((c) => c.cb.addEventListener("change", dropPreview));
   const previewBtn = el("button", { class: "btn small", onClick: async () => {
     const chosen = checks.filter((c) => c.cb.checked).map((c) => c.cb.value);
     if (!url.value.trim()) { toast("info", "Bitte eine Ziel-URL angeben"); return; }
+    const gen = ++previewGen;
     try {
       const p = await api.post("/v1/webhooks/preview",
         { url: url.value.trim(), event: chosen[0] || "task.completed", secret_ref: secret.value.trim() });
-      renderWebhookPreview(result, p);
-    } catch (err) { toastError(err); }
+      if (gen === previewGen) renderWebhookPreview(result, p);
+    } catch (err) { if (gen === previewGen) toastError(err); }
   } }, "Probelauf (sendet nichts)");
+  // Jedes Feld in eigener Zeile: Die URL ist lang, und die Ereignisliste
+  // drueckte im Dreier-Raster URL und Secret auf ein Drittel zusammen.
   const body = el("div", { class: "form-grid" },
-    el("label", { class: "field" }, "Ziel-URL", url),
-    el("label", { class: "field" }, "Secret-Referenz (Servername, optional)", secret),
-    el("div", { class: "field" }, el("span", null, "Ereignisse"),
+    el("label", { class: "field wide" }, "Ziel-URL", url),
+    el("label", { class: "field wide" }, "Secret-Referenz (Servername, optional)", secret),
+    el("div", { class: "field wide" }, el("span", null, "Ereignisse"),
       el("div", { class: "check-list" }, ...checks.map((c) => c.row))),
     el("div", null, previewBtn), result);
   openModal("Webhook-Abonnement", body, async () => {
@@ -10734,7 +11929,7 @@ function deleteWebhook(sub) {
   openModal("Webhook l\u00F6schen", el("p", { class: "muted" }, `Abonnement f\u00FCr ${sub.url} entfernen?`), async () => {
     try { await api.del(`/v1/webhooks/${sub.id}`); render(); toast("ok", "Webhook gel\u00F6scht"); }
     catch (err) { toastError(err); return false; }
-  }, "L\u00F6schen");
+  }, "L\u00F6schen", { danger: true });
 }
 
 // --------------------------------------------------------------------------
@@ -10756,15 +11951,27 @@ function kpi(label, value) { return el("div", { class: "kpi" }, el("div", { clas
  * Aktionsspalte mit dem „Erledigen"-Knopf) tragen bewusst kein Label, damit die
  * Zelle mobil die volle Breite nutzt.
  *
+ * Alle Tabellen laufen hierueber: Tabellen, die ``el("table")`` direkt bauten
+ * (Instanzliste, Eskalationen, Zustaendigkeit, Migration), zeigten mobil
+ * Karten ohne „Instanz/Schema/Status“ (Waechter
+ * ``test_every_table_is_built_by_the_shared_helper``).
+ *
  * @param {string[]} headers Spaltenueberschriften (leere Strings erlaubt).
  * @param {Array<Array>} rows Zeilen; jede ein Array von Zellen (Node oder Text).
- * @param {(i:number)=>string} [rowClassFn] Optionale CSS-Klasse je Zeilenindex.
+ * @param {(i:number)=>(string|object|null)} [rowAttrs] je Zeilenindex eine
+ *   CSS-Klasse (String) oder Attribute (Objekt, z. B. ``{class, onClick}``).
+ * @param {object} [tableAttrs] Attribute der Tabelle (z. B. ``{class}``).
  * @returns {Node} Das <table>-Element.
  */
-function table(headers, rows, rowClassFn) {
-  return el("table", null,
+function table(headers, rows, rowAttrs, tableAttrs) {
+  const attrsOf = (i) => {
+    const a = rowAttrs ? rowAttrs(i) : null;
+    if (a == null || a === "") return null;
+    return typeof a === "string" ? { class: a } : a;
+  };
+  return el("table", tableAttrs || null,
     el("thead", null, el("tr", null, ...headers.map((h) => el("th", null, h)))),
-    el("tbody", null, ...rows.map((r, i) => el("tr", rowClassFn ? { class: rowClassFn(i) || null } : null,
+    el("tbody", null, ...rows.map((r, i) => el("tr", attrsOf(i),
       ...r.map((c, j) => {
         const label = headers[j];
         const attrs = label ? { "data-label": String(label) } : null;
@@ -10802,11 +12009,13 @@ const HELP_VIEWS = [
   ["\u25A3 Modellieren", "Schritte \u00FCber \u201E+\u201C einf\u00FCgen (seriell / parallel / bedingt), umbenennen, entfernen, Befunde pr\u00FCfen, freigeben."],
   ["\u2630 Datensicht", "Datenelemente anlegen, bearbeiten/l\u00F6schen und je Aktivit\u00E4t Lesen/Schreiben verbinden (Datenfluss D)."],
   ["\u265F Ressourcensicht", "Organisation (Rollen, Einheiten, Agenten) und Bearbeiterregeln je Schritt (Z/A)."],
-  ["\u25B6 Ausf\u00FChrung", "Instanzen starten, Arbeitsliste abarbeiten, XOR-Zweige w\u00E4hlen. Modellierer starten Entw\u00FCrfe als Test-Instanz."],
+  ["\u25B6 Ausf\u00FChrung", "Freigegebene Prozesse starten und die Schritte eines Vorgangs abarbeiten. Verzweigungen entscheidet das System anhand der erfassten Daten. Modellierer starten Entw\u00FCrfe als Test-Instanz."],
   ["\u2630 Meine Aufgaben", "Pers\u00F6nliche Arbeitsliste \u2013 Aufgaben mit \u201EErledigen\u201C abschlie\u00DFen."],
+  ["\u2697 Pr\u00FCfinstanz", "Nur Modellierer und Administratoren: einen Entwurf als Test-Instanz durchspielen \u2013 alle Aufgaben an einer Stelle, ohne Mails und Eskalationen."],
   ["\u2609 Monitoring", "Live-Status aktiver Instanzen, Prozesslandkarte, Inzidente externer Aufgaben."],
   ["\u21C4 Integration", "Connectoren, externe Datenbindung, Automatik (External-Task / HTTP-Push), Webhooks."],
-  ["\u2699 Administration", "Nur f\u00FCr Administratoren: Datensicherung, Wartung (Zur\u00FCcksetzen) und Beispieldaten."],
+  ["\u2699 Administration", "Nur f\u00FCr Administratoren: Benutzer, Datensicherung, E-Mail-Ausgang, Wartung (Zur\u00FCcksetzen) und Beispieldaten."],
+  ["\u24D8 Hilfe", "Diese Seite: Sichten, Schnellstart je Rolle, Glossar der Regel-Codes und die gef\u00FChrten Touren."],
 ];
 
 // Role-oriented quick starts: each entry points at the matching how-to doc.
@@ -10886,6 +12095,8 @@ const HELP_RULES = [
   ]],
   ["Bearbeitungsschritte (OP)", [
     ["OP", "Vorbedingung einer Bearbeitung nicht erf\u00FCllt \u2013 etwa: das Element gibt es nicht (mehr), der Schritt liegt an der falschen Stelle, der Name fehlt."],
+    ["USERS", "Benutzerverwaltung: Login schon vergeben, Rolle unbekannt, eigener oder letzter Administrator-Login nicht l\u00F6schbar."],
+    ["PW", "Passwortregeln: Mindestl\u00E4nge, und das neue Passwort muss sich vom bisherigen unterscheiden."],
   ]],
   ["Laufzeit & Migration (R, M)", [
     ["R0", "Nur Entw\u00FCrfe sind editierbar; freigegebene Schemata sind unver\u00E4nderlich."],
@@ -10998,9 +12209,13 @@ function tourPanel() {
       el("h2", null, "Geführte Tour"),
       el("span", { class: "sub" }, "Popups führen dich durch die wichtigsten Funktionen")),
     el("div", { class: "panel-b" },
+      // Der Hinweis gilt nur der Modellierer-Tour (Sandkasten) -- ohne sie
+      // nur der allgemeine Teil.
       el("p", { class: "muted", style: "font-size:13px;margin:0 0 12px" },
-        "Die Modellierer-Tour arbeitet auf einem Beispielprozess in deinem Browser – ",
-        "es wird dabei nichts gespeichert. Abbrechen jederzeit mit Esc."),
+        tours.some((t) => t.sandbox)
+          ? "Die Modellierer-Tour arbeitet auf einem Beispielprozess in deinem Browser – es wird dabei nichts gespeichert. "
+          : "",
+        "Abbrechen jederzeit mit Esc."),
       cards));
 }
 
@@ -11056,14 +12271,35 @@ function hasRole(...allowed) {
 
 // Fetch the verified identity from the API (/auth/me). On 401 the token is
 // invalid; we drop it and fall back to anonymous so the UI stays usable.
+// Gehoeren die gemerkten Sitzungsdaten einem anderen Login (SESSION_OWNER_KEY)
+// – Wechsel nach abgelaufener Sitzung, Neuladen nach fremder Anmeldung,
+// Rollenwechsel der Demo –, werden sie verworfen (resetSessionState). Derselbe
+// Login behaelt sie, damit ein Neuladen die Arbeit nicht verliert.
 async function loadPrincipal() {
   const before = state.principal && state.principal.subject;
   try {
     state.principal = await api.get("/auth/me");
     // Anderer Login: Meldungen der vorigen Person gehoeren nicht hierher.
     if (before !== undefined && before !== (state.principal && state.principal.subject)) clearToasts();
+    const subject = (state.principal && state.principal.subject) || "";
+    const owner = storageGet(localStorage, SESSION_OWNER_KEY);
+    if (owner !== subject) {
+      // Kein Eintrag (null) ist ebenfalls fremd: Er fehlt nach dem Abmelden
+      // (dann ist ohnehin alles leer) und bei Altbestand aus der Zeit vor der
+      // Bindung, dessen Herkunft unbekannt ist.
+      resetSessionState();
+      storageSet(localStorage, SESSION_OWNER_KEY, subject);
+    }
   } catch (err) {
     state.principal = null;
+    // 401: Diese Anmeldung gilt nicht (Token geleert, ungueltig, abgelaufen).
+    // Dann gehoert der gemerkte Stand niemandem mehr, der hier sitzt – sonst
+    // zeichnete etwa die Ausfuehrung den Vorgang der vorigen Person weiter.
+    // Ein Netzfehler (kein status) laesst ihn stehen: Die Person ist dieselbe.
+    if (err && err.status === 401) {
+      resetSessionState();
+      try { localStorage.removeItem(SESSION_OWNER_KEY); } catch (_e) { /* nur Komfort */ }
+    }
     if (err && err.status === 401 && state.token && !demoRecovering) {
       toast("err", "Anmeldung fehlgeschlagen", ["Token ung\u00FCltig \u2013 bitte erneut anmelden."]);
     }
@@ -11300,8 +12536,10 @@ function showChangePasswordOverlay(forced) {
       toast("ok", "Passwort ge\u00E4ndert", ["Sie sind jetzt angemeldet."]);
       await boot();
     } catch (err) {
+      // Der Kern nennt den konkreten Grund (``PW.too-short``/``PW.unchanged``);
+      // formuliert wird im Meldungskatalog wie jede andere Absage.
       errBox.textContent = err && err.status === 400
-        ? "Passwort zu kurz oder identisch mit dem alten."
+        ? describeError(err).title
         : (err && err.status === 401
           ? "Aktuelles Passwort ist falsch."
           : "\u00C4nderung fehlgeschlagen.");
@@ -11321,7 +12559,118 @@ function showChangePasswordOverlay(forced) {
   setTimeout(() => curInput.focus(), 0);
 }
 
+/**
+ * localStorage-Schluessel: Login (``principal.subject``), dem die gemerkten
+ * Sitzungsdaten gehoeren (Pruefinstanz-Auswahl u. ae.). Meldet sich jemand
+ * anderes an, verwirft ``loadPrincipal`` diese Daten, statt sie zu uebernehmen.
+ */
+const SESSION_OWNER_KEY = "sessionOwner";
+
+/**
+ * localStorage-Schluessel, die an der angemeldeten Person haengen und beim
+ * Sitzungswechsel verworfen werden (``resetSessionState``): ``agentId`` ist
+ * die in „Meine Aufgaben“ gewaehlte Person – sonst oeffnete die naechste
+ * Anmeldung ohne eigene Bearbeiter-Zuordnung direkt deren Liste. Wer einen
+ * neuen personenbezogenen Schluessel einfuehrt, traegt ihn hier ein.
+ */
+const SESSION_STORAGE_KEYS = ["agentId"];
+
+/**
+ * Verwirft alles, was an der Anmeldung der vorigen Person haengt.
+ *
+ * Zweck: Nach einem Abmelden oder Login-Wechsel im selben Browser darf die
+ * naechste Person in keiner Sicht Daten der vorigen sehen. Der zuletzt
+ * geladene Vorgang stand sonst samt Instanzdaten weiter in der Ausfuehrung,
+ * obwohl der Kern ihn der neuen Person verweigert (er liest einzelne Vorgaenge
+ * nur fuer Beteiligte).
+ *
+ * Geleert werden: der geladene Vorgang und seine Arbeitsliste (auch der fuer
+ * ein Neuladen gemerkte Vorgang, ``forgetInstance``), die
+ * Pruefinstanz-Auswahl (auch ihr localStorage-Spiegel), das
+ * Personenverzeichnis, Schema-Liste/-Namen und das geladene Schema samt
+ * Validierung und Hinweisen (``boot`` laedt sie mit den Rechten der neuen
+ * Person neu), Verbindungsstatus der Konnektoren, Fokus-/Ruecksprung-Marken,
+ * die Basis fuer „neue Aufgabe eingetroffen“, offene Dialoge und der
+ * gezeichnete Seiteninhalt.
+ *
+ * Bewusst erhalten: gewaehlte Sicht und gewaehlter Prozess (``view``,
+ * ``schemaId``) – sie tragen selbst keine Daten; der Prozess wird beim
+ * naechsten ``boot`` mit den Rechten der neuen Person nachgeladen, und eine
+ * fuer sie gesperrte Sicht faengt ``applyRoleNav`` ab. Ebenso reine
+ * Darstellungswahl (Farbschema, Menue, Modellier-Oberflaeche).
+ *
+ * Keine Parameter, kein Rueckgabewert; ohne DOM (Tests) laeuft es ebenfalls.
+ */
+function resetSessionState() {
+  state.instanceIds = [];
+  state.instanceId = null;
+  state.instance = null;
+  state.worklist = null;
+  state.testInstanceId = null;
+  state.testInstance = null;
+  state.testStarter = null;
+  state.testAgentA = null;
+  state.testAgentB = null;
+  persistTestState();
+  state.simulation = null;
+  state.agentDirectory = {};
+  state.schemaIds = [];
+  state.schemaNames = {};
+  state.schemaVersions = {};
+  state.schema = null;
+  state.validation = null;
+  state.hints = [];
+  state.migrationReport = null;
+  state.connectorStatus = {};
+  state.revision = 0;
+  state.selectedNode = null;
+  state.dataFocusNode = null;
+  state.staffFocusNode = null;
+  state.returnTo = null;
+  state.dataElemFocus = null;
+  state.orgFocusUnit = null;
+  state.orgFocusAgents = [];
+  taskAlert = { agentId: null, keys: new Set(), primed: false };
+  forgetInstance();
+  // Gemerkte Werte, die an der Person haengen (die Pruefinstanz-Schluessel
+  // raeumt persistTestState oben ab). Reine Darstellungswahl bleibt.
+  SESSION_STORAGE_KEYS.forEach((k) => {
+    try { localStorage.removeItem(k); } catch (_e) { /* nur Komfort */ }
+  });
+  const content = byId("content");
+  if (content) clear(content);
+  const modals = byId("modal-root");
+  if (modals) clear(modals);
+}
+
+/**
+ * Nimmt den angezeigten Vorgang aus der Ansicht, wenn der Kern ihn nicht
+ * (mehr) herausgibt.
+ *
+ * Ein 404 bzw. 403 beim Nachladen heisst: Der Vorgang ist geloescht, oder die
+ * aktuelle Anmeldung darf ihn nicht lesen. Dann darf der zuvor geladene Stand
+ * nicht weiter angezeigt werden – sonst stuende ein fremder Vorgang samt Daten
+ * auf dem Schirm, obwohl der Kern ihn verweigert.
+ *
+ * @param {*} err Fehlerobjekt aus ``request`` (``{status, detail}``) oder etwas anderes.
+ * @returns {boolean} true, wenn der Vorgang verworfen und ein Hinweis gezeigt
+ *   wurde; false bei jedem anderen Fehler (z. B. Verbindungsabbruch) – dann
+ *   bleibt der Stand stehen, weil der Vorgang vermutlich noch existiert.
+ */
+function dropUnreadableInstance(err) {
+  if (!err || (err.status !== 403 && err.status !== 404)) return false;
+  forgetInstance();
+  state.instanceId = null;
+  state.instance = null;
+  state.worklist = null;
+  toast("info", "Vorgang nicht mehr verfügbar",
+    ["Er wurde gelöscht, oder diese Anmeldung darf ihn nicht einsehen."]);
+  return true;
+}
+
 // End the session server-side, drop the local token and return to the login.
+// Alles Sitzungsbezogene wird verworfen (resetSessionState) – die naechste
+// Person am selben Browser sieht nichts von dieser Sitzung.
 async function logout() {
   try {
     await api.post("/auth/logout");
@@ -11331,7 +12680,9 @@ async function logout() {
   state.token = "";
   state.principal = null;
   clearToasts();  // nichts von dieser Sitzung bleibt fuer die naechste stehen
+  resetSessionState();
   localStorage.removeItem("authToken");
+  try { localStorage.removeItem(SESSION_OWNER_KEY); } catch (_e) { /* nur Komfort */ }
   if (state.passwordLogin) showLoginOverlay();
   else await boot();
 }
@@ -11669,9 +13020,26 @@ async function setToken(token) {
 // Renderlaeufe.
 let renderBusy = false;
 let renderQueued = false;
+// Nur wenn ALLE vorgemerkten Laeufe die Rollposition behalten wollen
+// (Live-Aktualisierung), behaelt sie auch der nachgeholte Lauf.
+let renderQueuedKeepScroll = true;
+
+/**
+ * Hat die Person im Inhaltsbereich etwas eingegeben, das noch nicht
+ * abgeschickt ist? Gesetzt von ``markContentDirty`` (input/change an einem
+ * Formularfeld in ``#content``), geloescht bei jedem Neuzeichnen der Sicht –
+ * danach steht ohnehin ein frisches Formular da. Solange es gesetzt ist,
+ * zeichnet die automatische Aktualisierung nicht neu (``userIsBusy``); sie
+ * bietet stattdessen „Aktualisieren“ an (``showLiveRefreshHint``).
+ */
+let contentDirty = false;
 
 /**
  * Zeichnet die aktuelle Sicht neu.
+ *
+ * @param {{keepScroll?: boolean}} [opts] ``keepScroll: true`` (automatische
+ *   Aktualisierung): Rollposition des Inhalts danach wiederherstellen.
+ *   Ohne Option (Aktion der Person, Sichtwechsel) beginnt die Sicht oben.
  *
  * **Renderlaeufe ueberlappen sich nie.** Die Sichtfunktionen sind asynchron und
  * folgen alle demselben Muster: erst ``clear(content)``, dann ``await api.get``,
@@ -11691,9 +13059,19 @@ let renderQueued = false;
  * genau einmal nachgeholt. Der zuletzt gewuenschte Zustand wird also immer
  * gezeichnet, nur eben nacheinander statt verschraenkt.
  */
-function render() {
-  if (renderBusy) { renderQueued = true; return; }
+function render(opts) {
+  const keepScroll = !!(opts && opts.keepScroll);
+  if (renderBusy) {
+    renderQueued = true;
+    renderQueuedKeepScroll = renderQueuedKeepScroll && keepScroll;
+    return;
+  }
   renderBusy = true;
+  // Neu gezeichnet = frisches Formular: nichts Ungespeichertes mehr auf dem Schirm.
+  contentDirty = false;
+  // Live-Aktualisierung: an derselben Stelle bleiben, statt nach oben zu springen.
+  const scroller = keepScroll ? document.querySelector(".main") : null;
+  const scrollTop = scroller ? scroller.scrollTop : 0;
   // Guard against a stale/unknown persisted view (e.g. after a rename) so the
   // dispatch below never dereferences an undefined entry.
   if (!VIEW_META[state.view]) state.view = "model";
@@ -11706,11 +13084,13 @@ function render() {
   const meta = VIEW_META[state.view];
   byId("view-title").textContent = meta.title;
   byId("view-sub").textContent = meta.sub;
+  byId("view-sub").title = meta.sub;   // gekuerzt angezeigt, voll im Tooltip
   renderSchemaPicker();
   setActiveNav();
   renderTourBadge();
   Promise.resolve(meta.fn())
     .catch((err) => { toastError(err); })
+    .then(() => { if (scroller) scroller.scrollTop = scrollTop; })
     // Die Sichten bauen ihr DOM bei jedem Rendern komplett neu auf -- der Anker
     // der laufenden Tour existiert danach nicht mehr und muss neu gesucht
     // werden. Gekapselt, damit ein Fehler in der Tour nie die Sicht mitreisst.
@@ -11721,7 +13101,12 @@ function render() {
     .catch(() => { /* Tour-Fehler: die Sicht steht, weiter geht es trotzdem */ })
     .finally(() => {
       renderBusy = false;
-      if (renderQueued) { renderQueued = false; render(); }
+      if (renderQueued) {
+        const keep = renderQueuedKeepScroll;
+        renderQueued = false;
+        renderQueuedKeepScroll = true;
+        render({ keepScroll: keep });
+      }
     });
 }
 
@@ -11754,19 +13139,62 @@ const LIVE_VIEWS = new Set(["run", "tasks", "testrun", "monitor"]);
 const LIVE_POLL_MS = 4000;
 let livePollBusy = false;
 
-// True while the user is actively interacting (a modal/login overlay is open or
-// the focus sits in a form field of the content area). Auto-refresh is skipped
-// then so it never wipes an open dropdown or a half-filled form.
+// True while the user is actively interacting (a modal/login overlay is open,
+// the focus sits in a form field of the content area, or something was typed
+// there and not yet sent -- contentDirty, regardless of focus). Auto-refresh is
+// skipped then so it never wipes an open dropdown or a half-filled form.
 function userIsBusy() {
   if (byId("modal-root").children.length) return true;
   const overlay = byId("auth-overlay");
   if (overlay && overlay.style.display !== "none") return true;
+  if (contentDirty) return true;
   const active = document.activeElement;
   if (active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
     const content = byId("content");
     if (content && content.contains(active)) return true;
   }
   return false;
+}
+
+/**
+ * Merkt eine Eingabe im Inhaltsbereich als „noch nicht abgeschickt“.
+ *
+ * Haengt (in ``wireNav``) als input-/change-Lauscher am Dokument. Zaehlt nur
+ * Formularfelder in ``#content``; Felder mit ``data-live-safe`` sind
+ * ausgenommen – ihr Wert liegt in ``state`` und uebersteht ein Neuzeichnen
+ * (Simulation). Ohne diese Marke verwarf die automatische Aktualisierung
+ * halb ausgefuellte Formulare, sobald der Fokus das Feld verliess.
+ *
+ * @param {Event} e das Ereignis
+ */
+function markContentDirty(e) {
+  const t = e && e.target;
+  if (!t || !/^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName)) return;
+  if (t.hasAttribute && t.hasAttribute("data-live-safe")) return;
+  const content = byId("content");
+  if (content && content.contains(t)) contentDirty = true;
+}
+
+/**
+ * Zeigt oben in der Sicht „Neue Daten – Aktualisieren“, statt die Sicht mit
+ * ungespeicherten Eingaben neu zu zeichnen. Einmal je Sicht (kein Stapeln).
+ * Der Knopf zeichnet neu – bewusst durch die Person, denn dabei gehen die
+ * Eingaben verloren (Tooltip sagt das).
+ */
+function showLiveRefreshHint() {
+  const content = byId("content");
+  if (!content || content.querySelector(".live-refresh-hint")) return;
+  const hint = el("div", { class: "live-refresh-hint", role: "status" },
+    el("span", null, "Neue Daten sind da."),
+    el("button", { class: "btn small", type: "button",
+      title: "Zeichnet die Ansicht neu \u2013 nicht abgeschickte Eingaben gehen dabei verloren.",
+      onClick: async () => {
+        if (state.view === "run" && state.instanceId) {
+          try { await loadInstance(state.instanceId); } catch (e) { dropUnreadableInstance(e); }
+        }
+        render({ keepScroll: true });
+      } }, "Aktualisieren"));
+  content.insertBefore(hint, content.firstChild);
 }
 
 // Poll the cheap runtime-event revision; when it changed, refresh the current
@@ -11781,11 +13209,19 @@ async function pollLiveUpdates() {
     const rev = res && typeof res.revision === "number" ? res.revision : 0;
     if (rev === state.revision) return;
     state.revision = rev;
-    if (!LIVE_VIEWS.has(state.view) || userIsBusy()) return;
-    if (state.view === "run" && state.instanceId) {
-      try { await loadInstance(state.instanceId); } catch (_e) { /* instance gone */ }
+    if (!LIVE_VIEWS.has(state.view)) return;
+    if (userIsBusy()) {
+      // Ungespeicherte Eingaben (nicht Dialog/Anmeldung): Daten nicht still
+      // verschlucken, sondern Neuladen anbieten.
+      if (contentDirty && !byId("modal-root").children.length) showLiveRefreshHint();
+      return;
     }
-    render();
+    if (state.view === "run" && state.instanceId) {
+      // 404/403: geloescht oder nicht (mehr) lesbar -> aus der Ansicht nehmen,
+      // nie den alten Stand stehen lassen. Andere Fehler (Netz) behalten ihn.
+      try { await loadInstance(state.instanceId); } catch (e) { dropUnreadableInstance(e); }
+    }
+    render({ keepScroll: true });
   } catch (_e) {
     // Silent: a transient API hiccup must not spam toasts on a background poll.
   } finally {
@@ -11805,7 +13241,7 @@ const TIME_TICK_MS = 30000;
 function tickTimeViews() {
   if (!TIME_TICK_VIEWS.has(state.view) || userIsBusy()) return;
   if (state.passwordLogin && !state.principal) return;
-  render();
+  render({ keepScroll: true });
 }
 
 // Start the background poll exactly once (boot may run repeatedly on re-login).
@@ -11847,6 +13283,10 @@ function syncInert() {
 }
 
 function wireNav() {
+  // Ungespeicherte Eingaben im Inhalt erkennen (schuetzt sie vor der
+  // automatischen Aktualisierung, siehe markContentDirty).
+  document.addEventListener("input", markContentDirty, true);
+  document.addEventListener("change", markContentDirty, true);
   byId("nav").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-view]");
     if (!btn) return;
@@ -11871,8 +13311,8 @@ function wireNav() {
   if (burger) burger.addEventListener("click", toggleMobileNav);
   const scrim = byId("nav-scrim");
   if (scrim) scrim.addEventListener("click", closeMobileNav);
-  // Escape verlaesst das Kontrollfluss-Vollbild, hebt die Auswahl in der
-  // Karten-Sicht auf bzw. schliesst die mobile Menue-Schublade (in dieser
+  // Escape verlaesst das Kontrollfluss-Vollbild, hebt die Auswahl im
+  // Kontrollfluss auf (beide Oberflaechen) bzw. schliesst die mobile Menue-Schublade (in dieser
   // Reihenfolge, jeweils nur wenn aktiv). Eingaben in einem Feld bleiben
   // unberuehrt -- sonst raeumte Escape mitten im Tippen die Karte weg.
   document.addEventListener("keydown", (e) => {
@@ -11885,7 +13325,7 @@ function wireNav() {
     if (state.graphMaximized) {
       state.graphMaximized = false;
       render();
-    } else if (state.view === "model" && modelUx() === "card" && state.selectedNode) {
+    } else if (state.view === "model" && state.selectedNode) {
       state.selectedNode = null;
       render();
     } else if (document.documentElement.getAttribute("data-mobile-nav") === "open") {
@@ -11999,6 +13439,9 @@ async function boot() {
     if (state.demo) mountDemoBanner();
     await loadSchemas();
     await refreshSchema();
+    // Nach einem Neuladen beim zuletzt gewaehlten Vorgang bleiben (nur
+    // derselbe Login, nur dieser Tab -- siehe rememberInstance).
+    await restoreInstance();
     // Personenverzeichnis ueber alle Organisationen: Namen in Aufgaben-,
     // Audit- und Monitoring-Sichten sollen nicht davon abhaengen, welcher
     // Prozess oben gewaehlt ist ("Meine Aufgaben" zeigte sonst interne IDs).

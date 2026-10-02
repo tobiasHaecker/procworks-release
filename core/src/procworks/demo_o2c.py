@@ -48,7 +48,15 @@ from procworks import operations as ops
 from procworks import org as org_ops
 from procworks.audit import AuditLog, EventType
 from procworks.auth_password import PasswordAuthBackend
-from procworks.demo import DEMO_PASSWORD, BackdatedAudit, _emit, _seed_logins
+from procworks.demo import (
+    DEMO_PASSWORD,
+    BackdatedAudit,
+    InputRule,
+    _emit,
+    _seed_logins,
+    stamp_seeded_start_times,
+    with_input_rules,
+)
 from procworks.model import (
     AbsenceEntry,
     AccessMode,
@@ -95,12 +103,75 @@ SCHEMA_RETOURE = "o2c-retoure"
 #: jeweils, welche echte Anbindung dort spaeter ansetzen wuerde.
 SYSTEM_PREFIX = "System (simuliert): "
 
-#: Hinweis in jeder Maske eines simulierten Systemschritts.
+#: Hinweis in jeder Maske eines simulierten Systemschritts -- fuer
+#: Sachbearbeiter formuliert, ohne Regelkuerzel und Technikbegriffe.
 SYSTEM_HINT = (
-    "In der Produktion liefert das Vorsystem diesen Wert über einen "
-    "Daten-Connector (C1-C9) bzw. einen External Task (I1-I4). Im Demo wird er "
-    "von Hand erfasst."
+    "Im echten Betrieb liefert ein angeschlossenes System diesen Wert. "
+    "In der Demo tragen Sie ihn selbst ein."
 )
+
+#: Pruefregeln der Order-to-Cash-Masken je Datenelement (siehe
+#: :func:`procworks.demo.with_input_rules`): Betraege und Mengen nie negativ,
+#: Prozentwerte und der Bonitaetsindex in ihrem Bereich, die Sendungsverfolgung
+#: eine Web-Adresse, Kennungen und Namen in sinnvoller Laenge.
+O2C_INPUT_RULES: dict[str, InputRule] = {
+    "kunden_nr": InputRule(min_value=1),
+    "kunde": InputRule(max_length=120),
+    "artikel": InputRule(max_length=120),
+    "menge": InputRule(min_value=1),
+    "einzelpreis": InputRule(min_value=0),
+    "auftragswert": InputRule(min_value=0),
+    "rabatt": InputRule(min_value=0, max_value=100),
+    "zahlungsziel": InputRule(min_value=0, max_value=120),
+    "lager_bestand": InputRule(min_value=0),
+    "zahlbetrag": InputRule(min_value=0),
+    "offener_betrag": InputRule(min_value=0),
+    "bonitaet_score": InputRule(min_value=0, max_value=100),
+    "kredit_vorschlag": InputRule(min_value=0),
+    "kreditlimit": InputRule(min_value=0),
+    "rechnungsbetrag": InputRule(min_value=0),
+    "gutschrift_betrag": InputRule(min_value=0),
+    "retoure_menge": InputRule(
+        min_value=1, help_text="Höchstens die gelieferte Menge."
+    ),
+    "packstuecke": InputRule(min_value=1),
+    "gewicht": InputRule(min_value=0.01),
+    "tracking_url": InputRule(
+        pattern=r"https?://\S+",
+        help_text="Web-Adresse des Spediteurs (beginnt mit https://).",
+    ),
+    "auftrags_nr": InputRule(max_length=40),
+    "angebots_nr": InputRule(max_length=40),
+    "rechnungs_nr": InputRule(max_length=40),
+    "lieferschein_nr": InputRule(max_length=40),
+    "gutschrift_nr": InputRule(max_length=40),
+    "lieferadresse": InputRule(max_length=500),
+    "freigabe_vermerk": InputRule(max_length=2000),
+    "reklamationsgrund": InputRule(max_length=2000),
+    "pruef_vermerk": InputRule(max_length=2000),
+    "abschluss_notiz": InputRule(max_length=2000),
+    "abschluss_vermerk": InputRule(max_length=2000),
+    "retoure_notiz": InputRule(max_length=2000),
+}
+
+
+def _set_form(
+    schema: ProcessSchema,
+    node_id: str,
+    *,
+    title: str = "",
+    fields: list[ops.FormFieldSpec],
+    columns: int = 1,
+) -> ProcessSchema:
+    """:func:`procworks.operations.set_form` with :data:`O2C_INPUT_RULES`."""
+
+    return ops.set_form(
+        schema,
+        node_id,
+        title=title,
+        fields=with_input_rules(fields, O2C_INPUT_RULES),
+        columns=columns,
+    )
 
 #: Die Demo-Logins dieses Datensatzes: (login, name, rollen, agent-id).
 #: Das Passwort ist dasselbe wie im Basis-Demo (``demo.DEMO_PASSWORD``), damit
@@ -155,12 +226,24 @@ def _system_form(
     title: str,
     fields: list[ops.FormFieldSpec],
     confirm_element: str,
+    *,
+    confirm_label: str = "Systemlauf bestätigt",
+    confirm_help: str = "Ersetzt die Rückmeldung des Vorsystems.",
 ) -> ProcessSchema:
     """Maske eines simulierten Systemschritts: Nutzdaten + Bestaetigungshaken.
 
     Der Haken (``confirm_element``, ein BOOLEAN) steht fuer den Lauf des
     Vorsystems und macht den Schritt auch ohne Nutzdaten quittierbar. Jedes Feld
     traegt den Hinweis, welche echte Anbindung hier spaeter greifen wuerde.
+
+    Entscheidet der Haken zugleich eine Verzweigung (Zahlungseingang im
+    Forderungsmanagement), muss die Maske das sagen: ``confirm_label`` fragt
+    fachlich („Zahlung eingegangen?“), ``confirm_help`` nennt die Folge beider
+    Antworten. Mit der neutralen Vorgabe quittierte man sonst ahnungslos eine
+    Zahlung -- oder loeste eine Mahnung aus.
+
+    :param confirm_label: Beschriftung des Hakens
+    :param confirm_help: Hilfetext darunter
     """
 
     marked = [
@@ -179,11 +262,23 @@ def _system_form(
         ops.FormFieldSpec(
             element_id=confirm_element,
             widget=WidgetKind.CHECKBOX,
-            label="Systemlauf bestätigt",
-            help_text="Ersetzt die Rückmeldung des Vorsystems.",
+            label=confirm_label,
+            help_text=confirm_help,
         )
     )
-    return ops.set_form(schema, node_id, title=title, fields=marked)
+    return _set_form(schema, node_id, title=title, fields=marked)
+
+
+def _payment_help(next_step: str) -> str:
+    """Hilfetext des Hakens „Zahlung eingegangen?“: beide Folgen ausgeschrieben.
+
+    :param next_step: was ohne Zahlung als Naechstes kommt (z. B. „die 1. Mahnung“)
+    """
+
+    return (
+        f"Angehakt: Die Zahlung wird verbucht. Nicht angehakt: Es folgt {next_step}. "
+        "(Im Beispiel ersetzt der Haken den Abgleich mit dem Kontoauszug.)"
+    )
 
 
 def _schema_resolver(schemas: dict[str, ProcessSchema]) -> SchemaResolver:
@@ -386,7 +481,7 @@ def _build_bonitaet(org: OrgModel) -> ProcessSchema:
 
     s = ops.serial_insert(s, "Kundenstammdaten prüfen", after_node_id="start")
     stamm = _nid(s, "Kundenstammdaten prüfen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         stamm,
         title="Kundenstammdaten prüfen",
@@ -395,13 +490,13 @@ def _build_bonitaet(org: OrgModel) -> ProcessSchema:
                 element_id="kunden_nr",
                 widget=WidgetKind.NUMBER,
                 label="Kundennummer",
-                help_text="Aus dem Auftragsvorgang übernommen -- bitte bestätigen.",
+                help_text="Aus dem Auftragsvorgang übernommen – bitte bestätigen.",
             ),
             ops.FormFieldSpec(
                 element_id="auftragswert",
                 widget=WidgetKind.NUMBER,
                 label="Auftragswert (EUR)",
-                help_text="Aus dem Auftragsvorgang übernommen -- Prüfgrundlage.",
+                help_text="Aus dem Auftragsvorgang übernommen – Prüfgrundlage.",
             ),
             ops.FormFieldSpec(
                 element_id="stammdaten_ok",
@@ -421,7 +516,7 @@ def _build_bonitaet(org: OrgModel) -> ProcessSchema:
             ops.FormFieldSpec(
                 element_id="bonitaet_score",
                 widget=WidgetKind.NUMBER,
-                label="Bonitätsindex (0-100)",
+                label="Bonitätsindex (0–100)",
             )
         ],
         confirm_element="auskunft_ok",
@@ -448,7 +543,7 @@ def _build_bonitaet(org: OrgModel) -> ProcessSchema:
         (manuell, "Kreditlimit manuell festlegen"),
         (freigeben, "Kreditlimit freigeben"),
     ]:
-        s = ops.set_form(
+        s = _set_form(
             s,
             node_id,
             title=title,
@@ -458,7 +553,7 @@ def _build_bonitaet(org: OrgModel) -> ProcessSchema:
                     widget=WidgetKind.NUMBER,
                     label="Bonitätsindex",
                     mode=AccessMode.READ,
-                    help_text="Entscheidungsgrundlage -- hier nur zur Ansicht.",
+                    help_text="Entscheidungsgrundlage – hier nur zur Ansicht.",
                 ),
                 ops.FormFieldSpec(
                     element_id="kredit_vorschlag",
@@ -471,7 +566,7 @@ def _build_bonitaet(org: OrgModel) -> ProcessSchema:
     join = _succ(s, eskalieren)
     s = ops.serial_insert(s, "Kreditentscheidung dokumentieren", after_node_id=join)
     doku = _nid(s, "Kreditentscheidung dokumentieren")
-    s = ops.set_form(
+    s = _set_form(
         s,
         doku,
         title="Kreditentscheidung dokumentieren",
@@ -497,7 +592,7 @@ def _build_bonitaet(org: OrgModel) -> ProcessSchema:
                 widget=WidgetKind.DROPDOWN,
                 label="Zahlungsart",
                 options=("Rechnung", "Lastschrift", "Vorkasse"),
-                help_text="Ergebnis der Kreditprüfung -- geht in den Vorgang zurück.",
+                help_text="Ergebnis der Kreditprüfung – geht in den Vorgang zurück.",
             ),
         ],
     )
@@ -542,6 +637,9 @@ def _build_bonitaet(org: OrgModel) -> ProcessSchema:
     s = ops.set_time_constraint(s, freigeben, TimeConstraint(max_duration_seconds=1800))
     s = ops.set_time_constraint(s, doku, TimeConstraint(max_duration_seconds=3600))
     s = ops.set_deadline(s, 86400)  # ein Arbeitstag
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["kunden_nr", "auftragswert"])
     return ops.set_library_subprocess(ops.release(s), True)
 
 
@@ -575,7 +673,7 @@ def _build_versand(org: OrgModel) -> ProcessSchema:
 
     s = ops.serial_insert(s, "Sendung übernehmen und verpacken", after_node_id="start")
     packen = _nid(s, "Sendung übernehmen und verpacken")
-    s = ops.set_form(
+    s = _set_form(
         s,
         packen,
         title="Sendung verpacken",
@@ -584,7 +682,7 @@ def _build_versand(org: OrgModel) -> ProcessSchema:
                 element_id="auftrags_nr",
                 widget=WidgetKind.TEXT,
                 label="Auftragsnummer",
-                help_text="Aus dem Auftragsvorgang übernommen -- bitte bestätigen.",
+                help_text="Aus dem Auftragsvorgang übernommen – bitte bestätigen.",
             ),
             ops.FormFieldSpec(
                 element_id="lieferadresse",
@@ -624,7 +722,7 @@ def _build_versand(org: OrgModel) -> ProcessSchema:
     )
     uebergabe = _nid(s, "Sendung an Spediteur übergeben")
     infomail = _nid(s, "Kunde über Versand informieren")
-    s = ops.set_form(
+    s = _set_form(
         s,
         uebergabe,
         title="Übergabe an den Spediteur",
@@ -634,7 +732,7 @@ def _build_versand(org: OrgModel) -> ProcessSchema:
             )
         ],
     )
-    s = ops.set_form(
+    s = _set_form(
         s,
         infomail,
         title="Versandinformation an den Kunden",
@@ -656,7 +754,7 @@ def _build_versand(org: OrgModel) -> ProcessSchema:
     join = _succ(s, uebergabe)
     s = ops.serial_insert(s, "Zustellung bestätigen", after_node_id=join)
     zustellung = _nid(s, "Zustellung bestätigen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         zustellung,
         title="Zustellung bestätigen",
@@ -706,6 +804,9 @@ def _build_versand(org: OrgModel) -> ProcessSchema:
     s = ops.set_time_constraint(s, infomail, TimeConstraint(max_duration_seconds=1800))
     s = ops.set_time_constraint(s, zustellung, TimeConstraint(max_duration_seconds=172800))
     s = ops.set_deadline(s, 259200)  # drei Tage -- deckt sich mit der Frist am Elternknoten
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["auftrags_nr", "lieferadresse"])
     return ops.set_library_subprocess(ops.release(s), True)
 
 
@@ -766,7 +867,7 @@ def _build_faktura(org: OrgModel) -> ProcessSchema:
 
     s = ops.serial_insert(s, "Rechnung fachlich prüfen", after_node_id=erzeugen)
     pruefen = _nid(s, "Rechnung fachlich prüfen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         pruefen,
         title="Rechnung prüfen",
@@ -794,7 +895,7 @@ def _build_faktura(org: OrgModel) -> ProcessSchema:
 
     s = ops.serial_insert(s, "Rechnung versenden", after_node_id=pruefen)
     versenden = _nid(s, "Rechnung versenden")
-    s = ops.set_form(
+    s = _set_form(
         s,
         versenden,
         title="Rechnung versenden",
@@ -830,6 +931,9 @@ def _build_faktura(org: OrgModel) -> ProcessSchema:
     )
     s = ops.set_time_constraint(s, versenden, TimeConstraint(max_duration_seconds=3600))
     s = ops.set_deadline(s, 86400)
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["rechnungs_nr", "auftrags_nr"])
     return ops.set_library_subprocess(ops.release(s), True)
 
 
@@ -870,7 +974,7 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
     # gesetzt gelten und in den Mail-Vorlagen verwendet werden duerfen (N4).
     s = ops.serial_insert(s, "Forderungsakte anlegen", after_node_id="start")
     akte = _nid(s, "Forderungsakte anlegen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         akte,
         title="Forderungsakte anlegen",
@@ -890,7 +994,7 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
 
     s = ops.serial_insert(s, "Zahlungserinnerung versenden", after_node_id=akte)
     erinnerung = _nid(s, "Zahlungserinnerung versenden")
-    s = ops.set_form(
+    s = _set_form(
         s,
         erinnerung,
         title="Zahlungserinnerung",
@@ -912,7 +1016,11 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
         s, SYSTEM_PREFIX + "Zahlungseingang prüfen (Stufe 1)", after_node_id=erinnerung
     )
     pruef_1 = _nid(s, SYSTEM_PREFIX + "Zahlungseingang prüfen (Stufe 1)")
-    s = _system_form(s, pruef_1, "Zahlungseingang (Stufe 1)", [], confirm_element="zahlung_1")
+    s = _system_form(
+        s, pruef_1, "Zahlungseingang (Stufe 1)", [], confirm_element="zahlung_1",
+        confirm_label="Zahlung eingegangen?",
+        confirm_help=_payment_help("die 1. Mahnung"),
+    )
     s = ops.conditional_insert(
         s,
         after_node_id=pruef_1,
@@ -924,7 +1032,7 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
     )
     verbuchen_1 = _nid(s, "Zahlung verbuchen (Stufe 1)")
     mahnung_1 = _nid(s, "1. Mahnung versenden")
-    s = ops.set_form(
+    s = _set_form(
         s,
         mahnung_1,
         title="1. Mahnung",
@@ -940,7 +1048,11 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
         s, SYSTEM_PREFIX + "Zahlungseingang prüfen (Stufe 2)", after_node_id=mahnung_1
     )
     pruef_2 = _nid(s, SYSTEM_PREFIX + "Zahlungseingang prüfen (Stufe 2)")
-    s = _system_form(s, pruef_2, "Zahlungseingang (Stufe 2)", [], confirm_element="zahlung_2")
+    s = _system_form(
+        s, pruef_2, "Zahlungseingang (Stufe 2)", [], confirm_element="zahlung_2",
+        confirm_label="Zahlung eingegangen?",
+        confirm_help=_payment_help("die 2. Mahnung mit Fristsetzung"),
+    )
     s = ops.conditional_insert(
         s,
         after_node_id=pruef_2,
@@ -952,7 +1064,7 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
     )
     verbuchen_2 = _nid(s, "Zahlung verbuchen (Stufe 2)")
     mahnung_2 = _nid(s, "2. Mahnung mit Fristsetzung")
-    s = ops.set_form(
+    s = _set_form(
         s,
         mahnung_2,
         title="2. Mahnung mit Fristsetzung",
@@ -968,7 +1080,11 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
         s, SYSTEM_PREFIX + "Zahlungseingang prüfen (Stufe 3)", after_node_id=mahnung_2
     )
     pruef_3 = _nid(s, SYSTEM_PREFIX + "Zahlungseingang prüfen (Stufe 3)")
-    s = _system_form(s, pruef_3, "Zahlungseingang (Stufe 3)", [], confirm_element="zahlung_3")
+    s = _system_form(
+        s, pruef_3, "Zahlungseingang (Stufe 3)", [], confirm_element="zahlung_3",
+        confirm_label="Zahlung eingegangen?",
+        confirm_help=_payment_help("die Übergabe an das Inkasso"),
+    )
     s = ops.conditional_insert(
         s,
         after_node_id=pruef_3,
@@ -1001,7 +1117,7 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
         ),
         (inkasso, "Inkasso beauftragen", ("An Inkasso übergeben", "Ausgebucht")),
     ]:
-        s = ops.set_form(
+        s = _set_form(
             s,
             node_id,
             title=title,
@@ -1026,7 +1142,7 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
     join_1 = _succ(s, join_2)
     s = ops.serial_insert(s, "Forderungsvorgang abschließen", after_node_id=join_1)
     abschluss = _nid(s, "Forderungsvorgang abschließen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         abschluss,
         title="Forderungsvorgang abschließen",
@@ -1119,6 +1235,9 @@ def _build_forderung(org: OrgModel) -> ProcessSchema:
     s = ops.set_time_constraint(s, inkasso, TimeConstraint(max_duration_seconds=7200))
     s = ops.set_time_constraint(s, abschluss, TimeConstraint(max_duration_seconds=3600))
     s = ops.set_deadline(s, 45 * 86400)
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["kunde", "rechnungs_nr"])
     return ops.release(s)
 
 
@@ -1147,7 +1266,7 @@ def _build_retoure(org: OrgModel) -> ProcessSchema:
 
     s = ops.serial_insert(s, "Reklamation aufnehmen", after_node_id="start")
     aufnehmen = _nid(s, "Reklamation aufnehmen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         aufnehmen,
         title="Reklamation aufnehmen",
@@ -1175,7 +1294,7 @@ def _build_retoure(org: OrgModel) -> ProcessSchema:
     )
     pruefen = _nid(s, "Ware zurücknehmen und prüfen")
     bewerten = _nid(s, "Kaufmännische Bewertung")
-    s = ops.set_form(
+    s = _set_form(
         s,
         pruefen,
         title="Warenprüfung",
@@ -1198,7 +1317,7 @@ def _build_retoure(org: OrgModel) -> ProcessSchema:
             ),
         ],
     )
-    s = ops.set_form(
+    s = _set_form(
         s,
         bewerten,
         title="Kaufmännische Bewertung",
@@ -1223,7 +1342,7 @@ def _build_retoure(org: OrgModel) -> ProcessSchema:
     )
     gutschrift = _nid(s, "Gutschrift erstellen und versenden")
     zurueckweisen = _nid(s, "Reklamation zurückweisen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         gutschrift,
         title="Gutschrift erstellen",
@@ -1245,7 +1364,7 @@ def _build_retoure(org: OrgModel) -> ProcessSchema:
             ),
         ],
     )
-    s = ops.set_form(
+    s = _set_form(
         s,
         zurueckweisen,
         title="Reklamation zurückweisen",
@@ -1268,7 +1387,7 @@ def _build_retoure(org: OrgModel) -> ProcessSchema:
     xor_join = _succ(s, gutschrift)
     s = ops.serial_insert(s, "Retourenvorgang abschließen", after_node_id=xor_join)
     abschluss = _nid(s, "Retourenvorgang abschließen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         abschluss,
         title="Retourenvorgang abschließen",
@@ -1319,6 +1438,9 @@ def _build_retoure(org: OrgModel) -> ProcessSchema:
     s = ops.set_time_constraint(s, zurueckweisen, TimeConstraint(max_duration_seconds=3600))
     s = ops.set_time_constraint(s, abschluss, TimeConstraint(max_duration_seconds=1800))
     s = ops.set_deadline(s, 7 * 86400)
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["kunde", "auftrags_nr"])
     return ops.release(s)
 
 
@@ -1414,7 +1536,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
     # --- Anfrage ----------------------------------------------------------
     s = ops.serial_insert(s, "Kundenanfrage erfassen", after_node_id="start")
     anfrage = _nid(s, "Kundenanfrage erfassen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         anfrage,
         title="Kundenanfrage erfassen",
@@ -1445,7 +1567,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
     )
     kalkulation = _nid(s, "Preis und Konditionen kalkulieren")
     bestand = _nid(s, "Verfügbarkeit vorab klären")
-    s = ops.set_form(
+    s = _set_form(
         s,
         kalkulation,
         title="Preis und Konditionen",
@@ -1467,7 +1589,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
             ),
         ],
     )
-    s = ops.set_form(
+    s = _set_form(
         s,
         bestand,
         title="Verfügbarkeit vorab klären",
@@ -1511,7 +1633,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
     # --- Angebot ----------------------------------------------------------
     s = ops.serial_insert(s, "Angebot erstellen und versenden", after_node_id=bonitaet)
     angebot = _nid(s, "Angebot erstellen und versenden")
-    s = ops.set_form(
+    s = _set_form(
         s,
         angebot,
         title="Angebot erstellen",
@@ -1527,7 +1649,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
                 widget=WidgetKind.CHECKBOX,
                 label="Kreditfreigabe erteilt",
                 mode=AccessMode.READ,
-                help_text="Ergebnis der Kreditprüfung -- hier nur zur Ansicht.",
+                help_text="Ergebnis der Kreditprüfung – hier nur zur Ansicht.",
             ),
             ops.FormFieldSpec(
                 element_id="zahlungsart",
@@ -1543,7 +1665,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
 
     s = ops.serial_insert(s, "Kundenrückmeldung erfassen", after_node_id=angebot)
     rueckmeldung = _nid(s, "Kundenrückmeldung erfassen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         rueckmeldung,
         title="Kundenrückmeldung erfassen",
@@ -1579,7 +1701,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
     auftrag = _nid(s, "Auftrag anlegen und bestätigen")
     nachverhandeln = _nid(s, "Angebot nachverhandeln")
     absage = _nid(s, "Absage dokumentieren")
-    s = ops.set_form(
+    s = _set_form(
         s,
         auftrag,
         title="Auftrag anlegen und bestätigen",
@@ -1602,7 +1724,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
                 widget=WidgetKind.DROPDOWN,
                 label="Beschaffungsweg",
                 options=("Ab Lager", "Fertigung", "Zukauf"),
-                help_text="Entscheidung des Innendienstes -- steuert die Beschaffung.",
+                help_text="Entscheidung des Innendienstes – steuert die Beschaffung.",
             ),
         ],
     )
@@ -1626,7 +1748,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
         (frei_vl, "Freigabe (bis 25.000 EUR)"),
         (frei_gf, "Freigabe (über 25.000 EUR)"),
     ]:
-        s = ops.set_form(
+        s = _set_form(
             s,
             node_id,
             title=title,
@@ -1671,7 +1793,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
         (fertigung, "Fertigungsauftrag anlegen"),
         (zukauf, "Zukauf beauftragen"),
     ]:
-        s = ops.set_form(
+        s = _set_form(
             s,
             node_id,
             title=title,
@@ -1701,7 +1823,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
     s = ops.parallel_insert(s, ["Kommissionieren", "Versandpapiere erstellen"], verf_join)
     kommission = _nid(s, "Kommissionieren")
     papiere = _nid(s, "Versandpapiere erstellen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         kommission,
         title="Kommissionierung",
@@ -1716,7 +1838,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
             ),
         ],
     )
-    s = ops.set_form(
+    s = _set_form(
         s,
         papiere,
         title="Versandpapiere",
@@ -1771,7 +1893,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
     # --- Zahlungseingang --------------------------------------------------
     s = ops.serial_insert(s, SYSTEM_PREFIX + "Zahlungseingang prüfen", after_node_id=faktura)
     zahlpruef = _nid(s, SYSTEM_PREFIX + "Zahlungseingang prüfen")
-    s = ops.set_form(
+    s = _set_form(
         s,
         zahlpruef,
         title="Zahlungseingang prüfen",
@@ -1791,8 +1913,8 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
             ops.FormFieldSpec(
                 element_id="zahlungseingang",
                 widget=WidgetKind.CHECKBOX,
-                label="Zahlungseingang festgestellt",
-                help_text=SYSTEM_HINT,
+                label="Zahlung eingegangen?",
+                help_text=_payment_help("die Dokumentation der offenen Forderung"),
             ),
         ],
     )
@@ -1807,7 +1929,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
     )
     verbuchen = _nid(s, "Zahlung verbuchen")
     offen = _nid(s, "Offene Forderung dokumentieren")
-    s = ops.set_form(
+    s = _set_form(
         s,
         verbuchen,
         title="Zahlung verbuchen",
@@ -1831,11 +1953,11 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
                 element_id="vorgangsstatus",
                 widget=WidgetKind.DROPDOWN,
                 label="Vorgangsstatus",
-                options=("Abgeschlossen - bezahlt", "Abgeschlossen - teilbezahlt"),
+                options=("Abgeschlossen – bezahlt", "Abgeschlossen – teilbezahlt"),
             ),
         ],
     )
-    s = ops.set_form(
+    s = _set_form(
         s,
         offen,
         title="Offene Forderung dokumentieren",
@@ -1867,7 +1989,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
     )
 
     # --- die beiden uebrigen Zweige der Kundenentscheidung ----------------
-    s = ops.set_form(
+    s = _set_form(
         s,
         nachverhandeln,
         title="Angebot nachverhandeln",
@@ -1886,7 +2008,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
             ),
         ],
     )
-    s = ops.set_form(
+    s = _set_form(
         s,
         absage,
         title="Absage dokumentieren",
@@ -1910,7 +2032,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
     outer_join = _succ(s, nachverhandeln)
     s = ops.serial_insert(s, "Vorgang abschließen und archivieren", after_node_id=outer_join)
     abschluss = _nid(s, "Vorgang abschließen und archivieren")
-    s = ops.set_form(
+    s = _set_form(
         s,
         abschluss,
         title="Vorgang abschließen",
@@ -1920,7 +2042,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
                 widget=WidgetKind.TEXT,
                 label="Vorgangsstatus",
                 mode=AccessMode.READ,
-                help_text="Auf jedem Pfad gesetzt -- deshalb hier verbindlich lesbar.",
+                help_text="Stand des Vorgangs zum Abschluss.",
             ),
             ops.FormFieldSpec(
                 element_id="offener_betrag",
@@ -1928,7 +2050,7 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
                 label="Offener Betrag (EUR)",
                 mode=AccessMode.READ,
                 required=False,
-                help_text="Nur auf dem Auftragspfad vorhanden -- deshalb unverbindlich.",
+                help_text="Nur bei angenommenen Aufträgen gefüllt.",
             ),
             ops.FormFieldSpec(
                 element_id="forderung_offen",
@@ -2124,6 +2246,9 @@ def _build_main(org: OrgModel, resolver: SchemaResolver) -> ProcessSchema:
         resolver=resolver,
         link_id="followup-retoure",
     )
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["kunde", "auftrags_nr"])
     return ops.release(s, resolver)
 
 
@@ -2792,7 +2917,7 @@ def _seed_completed_order(
             {
                 "zahlbetrag": wert,
                 "offener_betrag": 0.0,
-                "vorgangsstatus": "Abgeschlossen - bezahlt",
+                "vorgangsstatus": "Abgeschlossen – bezahlt",
             },
         )
     else:
@@ -2812,7 +2937,7 @@ def _seed_completed_order(
             "abschluss_notiz": (
                 "Vorgang vollständig abgewickelt."
                 if bezahlt
-                else "Zahlungsziel verstrichen -- an das Forderungsmanagement übergeben."
+                else "Zahlungsziel verstrichen – an das Forderungsmanagement übergeben."
             ),
         },
     )
@@ -2905,6 +3030,7 @@ def load_o2c(
     schemas[main.id] = main
 
     _seed_instances(schemas, instance_store, audit_log)
+    stamp_seeded_start_times(instance_store, audit_log)
 
     for schema in schemas.values():
         schema_store.put(dehydrate_org(schema))

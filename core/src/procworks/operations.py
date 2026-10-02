@@ -80,6 +80,7 @@ from procworks.validator import (
     ValidationFinding,
     check_executable,
     clean_label,
+    node_name,
     raise_if_invalid,
 )
 
@@ -361,28 +362,87 @@ def _require_agent(schema: ProcessSchema, agent_id: str) -> Agent:
     return agent
 
 
-def serial_insert(schema: ProcessSchema, label: str, after_node_id: str) -> ProcessSchema:
+def serial_insert(
+    schema: ProcessSchema,
+    label: str,
+    after_node_id: str,
+    before_node_id: str | None = None,
+) -> ProcessSchema:
     """Insert a single ACTIVITY sequentially after ``after_node_id``.
 
+    ``before_node_id`` picks the edge ``after -> before`` when the anchor has
+    several outgoing edges -- the start of one branch of a split, including an
+    empty XOR branch (a direct ``split -> join`` edge). It is still a serial
+    splice on *one* existing edge, so no crossed block can arise. On an XOR
+    branch the edge's predicate caption moves to the new first edge and the
+    branch's partition cell (``XorBranch.target``) moves to the new node, so
+    the branch keeps its condition.
+
     requires: schema editable; anchor exists and is not END; anchor has one
-              outgoing edge.
-    ensures:  new activity spliced between anchor and its successor; K1-K3 hold.
+              outgoing edge, or ``before_node_id`` names the target of one of
+              its outgoing edges.
+    ensures:  new activity spliced between anchor and that successor; K1-K3 hold.
+
+    :raises CorrectnessError: ``OP.anchor-not-serial`` without ``before_node_id``
+        on a multi-exit anchor; ``OP.no-edge`` if there is no edge
+        ``after -> before``.
     """
 
     candidate = schema.model_copy(deep=True)
     _require_editable(candidate)
     _require_insert_anchor(candidate, after_node_id)
-    edge = _single_outgoing(candidate, after_node_id)
+    if before_node_id is None:
+        edge = _single_outgoing(candidate, after_node_id)
+    else:
+        edge = _outgoing_to(candidate, after_node_id, before_node_id)
     successor_id = edge.target
 
     new_node = Node(
         id=_new_id("act"), type=NodeType.ACTIVITY, label=clean_label(label, what="node")
     )
     candidate.nodes[new_node.id] = new_node
-    candidate.edges.remove(edge)
-    candidate.edges.append(ControlEdge(source=after_node_id, target=new_node.id))
+    first = ControlEdge(source=after_node_id, target=new_node.id, condition=edge.condition)
+    if before_node_id is None:
+        # Unchanged single-exit path (stored schemas and recorded fixtures keep
+        # their edge order).
+        candidate.edges.remove(edge)
+        candidate.edges.append(first)
+    else:
+        # At a branch start the new first edge takes the old edge's place: the
+        # order of a split's outgoing edges is the order of its branches in the
+        # drawing, so appending would move the branch to the bottom.
+        candidate.edges[candidate.edges.index(edge)] = first
     candidate.edges.append(ControlEdge(source=new_node.id, target=successor_id))
+    decision = candidate.xor_decisions.get(after_node_id)
+    if decision is not None:
+        _retarget_xor_branch(decision, successor_id, new_node.id)
     return raise_if_invalid(candidate)
+
+
+def _outgoing_to(schema: ProcessSchema, source_id: str, target_id: str) -> ControlEdge:
+    """The control edge ``source -> target``, or a rejection naming both steps.
+
+    :raises CorrectnessError: ``OP.no-edge`` (params ``source``/``target`` as
+        step names) if the anchor has no such outgoing edge.
+    """
+
+    for edge in schema.outgoing(source_id):
+        if edge.target == target_id:
+            return edge
+    raise CorrectnessError(
+        [
+            ValidationFinding(
+                rule="OP",
+                code="OP.no-edge",
+                node_id=source_id,
+                params={
+                    "source": node_name(schema, source_id),
+                    "target": node_name(schema, target_id),
+                },
+                message=f"no control edge '{source_id}' -> '{target_id}'",
+            )
+        ]
+    )
 
 
 def parallel_insert(

@@ -119,8 +119,8 @@ ausführen. Am Ende steht „Ergebnis: bestanden" oder, was genau fehlt.
 ### Sofort ausprobieren: Beispieldaten laden
 
 Damit alle Funktionen **sofort greifbar** sind, bringt ProcWorks fertige
-Beispieldaten mit (eine Organisation „Acme", zwei Prozesse und drei laufende
-Instanzen). So laden Sie sie:
+Beispieldaten mit (eine Organisation „Acme", zwei Prozesse und drei Vorgänge –
+zwei laufend, einer abgeschlossen). So laden Sie sie:
 
 1. Als **Administrator** anmelden.
 2. In die Sicht **Administration** wechseln und zum Bereich **„Wartung"**
@@ -196,6 +196,8 @@ PROCWORKS_MAIL_FROM=procworks@ihre-firma.de
 ```
 
 Ob es funktioniert, zeigt die Verwaltung im Bereich **„E-Mail-Ausgang"**.
+Ohne Mailserver stehen Benachrichtigungen dort als „verworfen – kein
+Mailserver“; sie werden auch später nicht nachgeschickt.
 
 **Anbindungen und Worker** (andere Programme, die Aufgaben abholen oder
 Vorgänge starten): Sie melden sich nicht mit Passwort an, sondern mit einem

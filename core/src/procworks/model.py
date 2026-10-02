@@ -1924,6 +1924,10 @@ class MailOutboxState(StrEnum):
     SENT = "SENT"          # accepted by the SMTP server
     FAILED = "FAILED"      # transient failure, will be retried after back-off
     DEAD = "DEAD"          # retries exhausted -> dead-letter
+    #: No mail server configured: the notification was dropped, never sent.
+    #: Final (no retry), so configuring SMTP later does not flush a backlog of
+    #: stale notifications -- and the outbox no longer claims "sent".
+    DROPPED = "DROPPED"
 
 
 class MailOutboxEntry(BaseModel):

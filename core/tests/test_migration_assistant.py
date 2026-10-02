@@ -116,6 +116,8 @@ def test_report_lists_running_instances_of_earlier_revisions_only() -> None:
     assert test_inst.id not in listed
     assert listed[running]["migratable"] is True
     assert listed[running]["missing_data"] == []
+    # Der Assistent benennt Vorgaenge ohne benennende Werte nach ihrem Start.
+    assert listed[running]["started_at"] is not None
     assert report["target_version"] == 2
 
 

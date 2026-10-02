@@ -387,3 +387,38 @@ def test_disconnect_data_rejected_on_released_schema():
         disconnect_data(schema, act, "x")
     assert any(f.rule == "R0" for f in exc.value.findings)
     assert any(a.element_id == "x" for a in schema.data_accesses)
+
+
+def test_discriminator_deletion_names_element_and_branch():
+    """The rejection says *which* split still depends on the element.
+
+    The client words the message from ``code``/``params``; without the element
+    and the split it could only state the hypothetical result ("the element
+    does not exist"), not what to change first.
+    """
+
+    schema = _conditional_over_flag("del_disc_params")
+    split = next(n.id for n in schema.nodes.values() if n.type.value == "XOR_SPLIT")
+    with pytest.raises(CorrectnessError) as exc:
+        delete_data_element(schema, "flag")
+    k7 = [f for f in exc.value.findings if f.rule == "K7"]
+    assert [f.code for f in k7] == ["K7.discriminator-missing"]
+    assert k7[0].node_id == split
+    assert k7[0].params == {"element": "flag"}
+    # The model itself is unchanged -- the client resolves the name from it.
+    assert "flag" in schema.data_elements
+
+
+def test_discriminator_type_change_names_element_and_branch():
+    """A type change that breaks the partition names the element as well."""
+
+    schema = _conditional_over_flag("upd_disc_params")
+    split = next(n.id for n in schema.nodes.values() if n.type.value == "XOR_SPLIT")
+    with pytest.raises(CorrectnessError) as exc:
+        update_data_element(schema, "flag", data_type=DataType.STRING)
+    k7 = [f for f in exc.value.findings if f.rule == "K7"]
+    assert k7, exc.value.findings
+    for f in k7:
+        assert f.node_id == split
+        assert f.params.get("element") == "flag", f
+    assert {f.code for f in k7} <= {"K7.kind-mismatch", "K7.discriminator-type"}

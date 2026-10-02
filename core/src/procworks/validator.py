@@ -778,7 +778,10 @@ def _check_single_loop(
                 "loop discriminator (K6b)",
                 end_id,
                 code="K6.discriminator-type",
-                params={"type": str(element.data_type.value)},
+                params={
+                    "type": str(element.data_type.value),
+                    "element": str(decision.discriminator),
+                },
             )
         elif expected_kind is not decision.kind:
             fail(
@@ -786,7 +789,11 @@ def _check_single_loop(
                 f"discriminator type {element.data_type.value} (K6b)",
                 end_id,
                 code="K6.kind-mismatch",
-                params={"kind": str(decision.kind.value), "type": str(element.data_type.value)},
+                params={
+                    "kind": str(decision.kind.value),
+                    "type": str(element.data_type.value),
+                    "element": str(decision.discriminator),
+                },
             )
         _check_partition(end_id, decision.kind, decision.cells, fail, noun="loop")
         if all(cell.repeat for cell in decision.cells):
@@ -1073,6 +1080,10 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
                 "discriminator data element does not exist",
                 split_id,
                 code="K7.discriminator-missing",
+                # The element id lets a client name what the split still
+                # depends on -- after a rejected deletion it is still in the
+                # unchanged model the user looks at.
+                params={"element": str(decision.discriminator)},
             )
             continue
         if element.source is not DataSourceKind.INSTANCE:
@@ -1080,6 +1091,7 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
                 "discriminator must be an instance data element",
                 split_id,
                 code="K7.discriminator-not-instance",
+                params={"element": str(decision.discriminator)},
             )
         expected_kind = discriminator_kind(element.data_type)
         if expected_kind is None:
@@ -1087,7 +1099,10 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
                 f"data type {element.data_type.value} cannot be used as an XOR discriminator",
                 split_id,
                 code="K7.discriminator-type",
-                params={"type": str(element.data_type.value)},
+                params={
+                    "type": str(element.data_type.value),
+                    "element": str(decision.discriminator),
+                },
             )
         elif expected_kind is not decision.kind:
             fail(
@@ -1095,7 +1110,11 @@ def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
                 f"discriminator type {element.data_type.value}",
                 split_id,
                 code="K7.kind-mismatch",
-                params={"kind": str(decision.kind.value), "type": str(element.data_type.value)},
+                params={
+                    "kind": str(decision.kind.value),
+                    "type": str(element.data_type.value),
+                    "element": str(decision.discriminator),
+                },
             )
         if decision.discriminator not in written_before.get(split_id, set()):
             fail(

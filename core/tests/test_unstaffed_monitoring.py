@@ -118,3 +118,150 @@ def test_completing_the_step_away_clears_the_report() -> None:
     instance = complete_activity(instance, legacy, act, context=context)
 
     assert unstaffed_steps(legacy, instance) == []
+
+
+# --- Wer kann den Schritt tatsaechlich bearbeiten? ----------------------------
+# Eine Regel, die Personen findet, hilft nichts, wenn keine davon sich anmelden
+# kann oder alle ohne anwesende Vertretung abwesend sind. Beides meldet der
+# Bericht -- mit Grund und den betroffenen Personen.
+
+
+def _one_step_instance(*, with_deputy: bool = False):  # type: ignore[no-untyped-def]
+    """Released one-step schema, staffed by the test person (+ optional deputy)."""
+    from staffing import TEST_AGENT_ID
+
+    from procworks import add_agent, set_agent_deputy
+
+    schema = serial_insert(create_empty_schema("W", schema_id="unst-w"), "A", after_node_id="start")
+    schema = staffed(schema)
+    if with_deputy:
+        schema = add_agent(schema, "Vera Vertretung", agent_id="a-dep")
+        schema = set_agent_deputy(schema, TEST_AGENT_ID, "a-dep")
+    schema = release(schema)
+    context = ExecutionContext(lambda *_: None, InMemoryInstanceStore())
+    return schema, instantiate(schema, context=context), TEST_AGENT_ID
+
+
+def test_step_whose_only_person_has_no_login_is_reported() -> None:
+    schema, instance, person = _one_step_instance()
+
+    [step] = unstaffed_steps(schema, instance, agents_with_login=frozenset({"someone-else"}))
+
+    assert (step.reason, step.agent_ids) == ("no_login", [person])
+
+
+def test_step_whose_only_person_is_absent_without_deputy_is_reported_weaker() -> None:
+    schema, instance, person = _one_step_instance()
+    absent = frozenset({person})
+
+    [step] = unstaffed_steps(
+        schema, instance, absent_agents=absent, agents_with_login=frozenset({person})
+    )
+
+    assert (step.reason, step.agent_ids) == ("only_absent", [person])
+
+
+def test_present_person_with_login_staffs_the_step() -> None:
+    """Negativfall: anwesend und mit Login -> nichts zu melden."""
+    schema, instance, person = _one_step_instance()
+
+    assert unstaffed_steps(schema, instance, agents_with_login=frozenset({person})) == []
+
+
+def test_absent_person_with_present_deputy_staffs_the_step() -> None:
+    """Grenzfall: Die anwesende Vertretung (mit Login) uebernimmt -> nicht gemeldet."""
+    schema, instance, person = _one_step_instance(with_deputy=True)
+
+    found = unstaffed_steps(
+        schema,
+        instance,
+        absent_agents=frozenset({person}),
+        agents_with_login=frozenset({person, "a-dep"}),
+    )
+
+    assert found == []
+
+
+def test_absent_deputy_too_is_only_absent_naming_both() -> None:
+    """Grenzfall: Ist auch die Vertretung abwesend, stehen beide im Bericht."""
+    schema, instance, person = _one_step_instance(with_deputy=True)
+
+    [step] = unstaffed_steps(
+        schema,
+        instance,
+        absent_agents=frozenset({person, "a-dep"}),
+        agents_with_login=frozenset({person, "a-dep"}),
+    )
+
+    assert (step.reason, step.agent_ids) == ("only_absent", sorted([person, "a-dep"]))
+
+
+def test_absent_person_without_login_counts_as_no_login() -> None:
+    """Grenzfall: kein Login wiegt schwerer als abwesend."""
+    schema, instance, person = _one_step_instance()
+
+    [step] = unstaffed_steps(
+        schema, instance, absent_agents=frozenset({person}), agents_with_login=frozenset()
+    )
+
+    assert step.reason == "no_login"
+
+
+def test_unknown_logins_keep_the_previous_behaviour() -> None:
+    """Ohne Kenntnis der Logins (Token/JWT) wird der Login nicht geprueft."""
+    schema, instance, _person = _one_step_instance()
+
+    assert unstaffed_steps(schema, instance) == []
+    assert unstaffed_steps(schema, instance, agents_with_login=None) == []
+
+
+def test_api_reports_no_login_in_password_mode_and_clears_with_a_login() -> None:
+    """Passwort-Modus: Die einzige Zustaendige hat keinen Login -> gemeldet;
+    bekommt sie einen, verschwindet die Meldung."""
+    import procworks.api as api_module
+    from procworks.auth_password import InMemoryCredentialStore, PasswordAuthBackend, hash_password
+
+    original = api_module._auth_backend
+    backend = PasswordAuthBackend(InMemoryCredentialStore())
+    user, _ = backend.create_user(subject="admin", roles=["admin"], login="admin")
+    backend.store.put_user(
+        user.model_copy(update={"password_hash": hash_password("admin-pw1"), "must_change": False})
+    )
+    api_module._auth_backend = backend
+    try:
+        h = {"Authorization": f"Bearer {backend.login('admin', 'admin-pw1').token}"}
+        sid = client.post("/schemas", json={"name": "Ohne Login"}, headers=h).json()["id"]
+        client.post(
+            f"/schemas/{sid}/serial-insert",
+            json={"label": "Pruefen", "after_node_id": "start"},
+            headers=h,
+        )
+        client.post(f"/schemas/{sid}/roles", json={"name": "PT", "role_id": "pt"}, headers=h)
+        client.post(
+            f"/schemas/{sid}/agents",
+            json={"name": "Petra Pruef", "role_ids": ["pt"], "agent_id": "a-petra-nl"},
+            headers=h,
+        )
+        step = next(
+            n["id"]
+            for n in client.get(f"/schemas/{sid}", headers=h).json()["nodes"].values()
+            if n["label"] == "Pruefen"
+        )
+        client.post(
+            f"/schemas/{sid}/staff-rule",
+            json={"node_id": step, "rule": {"kind": "ROLE", "ref": "pt"}},
+            headers=h,
+        )
+        assert client.post(f"/schemas/{sid}/release", headers=h).status_code == 200
+        iid = client.post(f"/schemas/{sid}/instances", headers=h).json()["id"]
+
+        rows = [r for r in client.get("/monitoring/unstaffed", headers=h).json()
+                if r["instance_id"] == iid]
+        assert [(r["reason"], r["agent_ids"]) for r in rows] == [("no_login", ["a-petra-nl"])]
+
+        client.post("/users", json={"roles": ["operator"], "agent_id": "a-petra-nl"}, headers=h)
+        rows = [r for r in client.get("/monitoring/unstaffed", headers=h).json()
+                if r["instance_id"] == iid]
+        assert rows == []
+    finally:
+        api_module._auth_backend = original

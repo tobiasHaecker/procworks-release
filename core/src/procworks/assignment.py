@@ -63,6 +63,9 @@ class DisplayValue(BaseModel):
     element_id: str
     name: str
     value: object | None = None
+    #: Data type of the element (``DataType`` value), so the client formats
+    #: a customer number differently from an amount. ``None`` for old data.
+    data_type: str | None = None
 
 
 def display_values(schema: ProcessSchema, instance: ProcessInstance) -> list[DisplayValue]:
@@ -82,6 +85,7 @@ def display_values(schema: ProcessSchema, instance: ProcessInstance) -> list[Dis
                 element_id=element_id,
                 name=element.name,
                 value=instance.data_values.get(element_id),
+                data_type=element.data_type.value,
             )
         )
     return result
@@ -137,6 +141,17 @@ class OpenTask(BaseModel):
     #: The values that name the instance (``display_fields``) -- two
     #: equal tasks of different instances were indistinguishable in a worklist.
     context: list[DisplayValue] = Field(default_factory=list)
+    #: When the instance started (``ProcessInstance.started_at``), or ``None``
+    #: for instances from before the stamp. Lets a worklist tell two tasks of
+    #: the same step apart while the naming values above are still empty --
+    #: typically at the very first step, which is what sets them.
+    instance_started_at: datetime | None = None
+    #: Deputies among ``eligible_agents``: deputy agent id -> the absent agent
+    #: they stand in for (the one whose deputy edge added them; along a chain
+    #: the absent deputy before them). Lets a worklist say "in Vertretung für
+    #: …" -- a deputy saw a colleague's task without knowing why. Agents who
+    #: are eligible on their own never appear here.
+    deputy_of: dict[str, str] = Field(default_factory=dict)
 
 
 def absent_agent_ids(
@@ -175,6 +190,7 @@ def eligible_agents(
     *,
     include_deputies: bool = True,
     absent_agents: frozenset[str] = frozenset(),
+    deputy_of: dict[str, str] | None = None,
 ) -> set[str]:
     """Return the concrete agent ids currently eligible to perform ``node_id``.
 
@@ -191,6 +207,10 @@ def eligible_agents(
     absent agent without a registered deputy keeps the task rather than the
     instance stalling (safety invariant). ``include_deputies=False`` disables
     substitution entirely (used by a mail notification that opts out).
+
+    ``deputy_of``, when given, is filled with every deputy this call added and
+    the absent agent it stands in for (see :attr:`OpenTask.deputy_of`); the
+    returned set is the same with or without it.
     """
 
     rule = schema.staff_rules.get(node_id)
@@ -210,7 +230,11 @@ def eligible_agents(
     if not include_deputies:
         return base
     return _with_deputies(
-        schema.org_model, base, absent_agents, _four_eyes_performers(rule, instance)
+        schema.org_model,
+        base,
+        absent_agents,
+        _four_eyes_performers(rule, instance),
+        via=deputy_of,
     )
 
 
@@ -271,6 +295,7 @@ def open_tasks(
         if node_id not in schema.staff_rules:
             continue
         priority = schema.node_priorities.get(node_id, _DEFAULT_PRIORITY)
+        deputy_of: dict[str, str] = {}
         task = OpenTask(
             instance_id=instance.id,
             schema_id=instance.schema_id,
@@ -278,7 +303,13 @@ def open_tasks(
             node_id=node_id,
             label=node.label or node_id,
             eligible_agents=sorted(
-                eligible_agents(schema, node_id, instance, absent_agents=absent_agents)
+                eligible_agents(
+                    schema,
+                    node_id,
+                    instance,
+                    absent_agents=absent_agents,
+                    deputy_of=deputy_of,
+                )
             ),
             priority=priority.level,
             claimed_by=instance.claimed_by.get(node_id),
@@ -287,6 +318,8 @@ def open_tasks(
             detail=instance.node_details.get(node_id),
             detail_reason=instance.node_detail_reason.get(node_id, ""),
             context=context,
+            instance_started_at=instance.started_at,
+            deputy_of=deputy_of,
         )
         if ctx is not None:
             view = worklist_priority.assess(schema, node_id, ctx)
@@ -335,11 +368,24 @@ def _open_activities(
 class UnstaffedStep(BaseModel):
     """An open human step of a running instance that nobody may work.
 
-    ``reason`` is ``"no_rule"`` (an interactive step without a staff rule --
-    e.g. an ad-hoc step from before the B2 gate) or ``"nobody"`` (the rule
-    resolves to nobody right now: an empty EXCEPT, an org change, a
-    supervision act before a four-eyes step). Such an instance stands still,
-    and before this report it showed as "overdue 0, escalated 0".
+    ``reason`` is one of
+
+    * ``"no_rule"`` -- an interactive step without a staff rule (e.g. an
+      ad-hoc step from before the B2 gate);
+    * ``"nobody"`` -- the rule resolves to nobody right now (an empty EXCEPT,
+      an org change, a supervision act before a four-eyes step);
+    * ``"no_login"`` -- the rule finds people, but none of them can sign in
+      (only reported when the caller knows the logins, see
+      :func:`unstaffed_steps`);
+    * ``"only_absent"`` -- every eligible person who could sign in is absent
+      and no deputy is present. Weaker than the others: the task stays with
+      them (the safety invariant of :func:`eligible_agents`) and moves on once
+      someone is back, but meanwhile nobody works it.
+
+    The first three stand still for good; before this report such an instance
+    showed as "overdue 0, escalated 0". ``agent_ids`` names the eligible
+    people behind ``no_login`` / ``only_absent`` (empty otherwise), so a
+    supervisor sees *whom* to chase.
     """
 
     instance_id: str
@@ -348,6 +394,7 @@ class UnstaffedStep(BaseModel):
     node_id: str
     label: str
     reason: str
+    agent_ids: list[str] = Field(default_factory=list)
 
 
 def unstaffed_steps(
@@ -355,6 +402,7 @@ def unstaffed_steps(
     instance: ProcessInstance,
     *,
     absent_agents: frozenset[str] = frozenset(),
+    agents_with_login: frozenset[str] | None = None,
 ) -> list[UnstaffedStep]:
     """List the open human steps of ``instance`` that no agent can work.
 
@@ -369,6 +417,20 @@ def unstaffed_steps(
     most such steps at modelling time, but an organisation changes during
     operation, and some rules (performer references) are only decided at
     runtime.
+
+    Beyond an empty set, a step also counts as unstaffed when nobody in the
+    eligible set can actually act: ``"no_login"`` when none of them has a
+    login, ``"only_absent"`` when all who have one are absent (their deputies,
+    if any, are already in the set -- a present deputy staffs the step).
+    Assignment itself is untouched; this is a report.
+
+    :param absent_agents: agents absent right now (deputy substitution and
+        the ``only_absent`` check).
+    :param agents_with_login: agent ids that can sign in. ``None`` means
+        "unknown" (token/JWT modes accept people without a stored login) --
+        then logins are not checked and only ``only_absent`` can add to the
+        classic reasons.
+    :returns: the unstaffed steps, sorted by label.
     """
 
     result: list[UnstaffedStep] = []
@@ -378,12 +440,23 @@ def unstaffed_steps(
         binding = schema.service_bindings.get(node_id)
         if binding is not None and binding.automatic:
             continue
+        agent_ids: list[str] = []
         if node_id not in schema.staff_rules:
             reason = "no_rule"
-        elif not eligible_agents(schema, node_id, instance, absent_agents=absent_agents):
-            reason = "nobody"
         else:
-            continue
+            eligible = eligible_agents(schema, node_id, instance, absent_agents=absent_agents)
+            if not eligible:
+                reason = "nobody"
+            else:
+                can_sign_in = (
+                    eligible if agents_with_login is None else eligible & agents_with_login
+                )
+                if not can_sign_in:
+                    reason, agent_ids = "no_login", sorted(eligible)
+                elif can_sign_in <= absent_agents:
+                    reason, agent_ids = "only_absent", sorted(can_sign_in)
+                else:
+                    continue
         result.append(
             UnstaffedStep(
                 instance_id=instance.id,
@@ -392,6 +465,7 @@ def unstaffed_steps(
                 node_id=node_id,
                 label=node.label or node_id,
                 reason=reason,
+                agent_ids=agent_ids,
             )
         )
     result.sort(key=lambda u: (u.label, u.node_id))
@@ -493,6 +567,7 @@ def _with_deputies(
     base: set[str],
     absent: frozenset[str],
     never: frozenset[str] = frozenset(),
+    via: dict[str, str] | None = None,
 ) -> set[str]:
     """Extend an eligible set by the deputies of *absent* agents.
 
@@ -505,6 +580,9 @@ def _with_deputies(
     ``never`` are agents a deputy edge must not lead to -- the performers a
     four-eyes rule is about (:func:`_four_eyes_performers`). The chain
     does not continue through them either.
+
+    ``via``, when given, records for each added deputy the absent agent whose
+    deputy edge added it.
     """
 
     result = set(base)
@@ -520,6 +598,8 @@ def _with_deputies(
         if agent.deputy_id not in result:
             result.add(agent.deputy_id)
             frontier.append(agent.deputy_id)
+            if via is not None:
+                via[agent.deputy_id] = agent.id
     return result
 
 

@@ -380,7 +380,7 @@ def test_main_process_runs_end_to_end_without_worker_or_connector(world: _World)
         iid,
         "Zahlung verbuchen",
         "a-bianca",
-        {"zahlbetrag": 3000.0, "offener_betrag": 0.0, "vorgangsstatus": "Abgeschlossen - bezahlt"},
+        {"zahlbetrag": 3000.0, "offener_betrag": 0.0, "vorgangsstatus": "Abgeschlossen – bezahlt"},
     )
     final = world.seeder.do(
         iid,

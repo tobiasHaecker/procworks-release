@@ -116,8 +116,13 @@ class NullMailSender:
 
     Lets the whole feature (modelling, validation, recipient resolution) work
     and be tested without a mail server, and makes an unconfigured deployment a
-    no-op rather than an error.
+    no-op rather than an error. ``delivers = False`` tells the outbox that a
+    "successful" call delivered nothing: the entry becomes ``DROPPED``, not
+    ``SENT`` (and no ``MAIL_SENT`` audit event is written).
     """
+
+    #: This sender never reaches a mail server (see :meth:`MailOutboxDispatcher._deliver`).
+    delivers = False
 
     def send(self, message: MailMessage) -> None:
         logger.info(
@@ -469,7 +474,8 @@ class MailOutboxDispatcher:
 
         Due = ``PENDING``/``FAILED`` with ``next_attempt_at`` in the past. Each is
         sent through ``sender``; success -> ``SENT``, transient failure ->
-        ``FAILED`` with a back-off, exhausted budget -> ``DEAD`` (dead-letter).
+        ``FAILED`` with a back-off, exhausted budget -> ``DEAD`` (dead-letter),
+        a sender without mail server -> ``DROPPED`` (final).
         The ``sender`` is passed per call so callers can supply the current
         process-wide sender (and tests can inject a collector) without the
         dispatcher holding a stale reference. Never raises -- a delivery problem
@@ -511,9 +517,16 @@ class MailOutboxDispatcher:
 
         entry.attempts = attempt
         entry.last_error = error
-        delivered = ok
+        # A sender without a mail server (NullMailSender) "succeeds" without
+        # delivering anything: final DROPPED, never SENT, no retry.
+        dropped = ok and getattr(sender, "delivers", True) is False
+        delivered = ok and not dropped
         dead = False
-        if ok:
+        if dropped:
+            entry.state = MailOutboxState.DROPPED
+            entry.last_error = "kein Mailserver konfiguriert"
+            entry.next_attempt_at = now
+        elif ok:
             entry.state = MailOutboxState.SENT
             entry.next_attempt_at = now
         elif attempt >= entry.max_attempts:

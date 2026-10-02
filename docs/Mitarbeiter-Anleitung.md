@@ -19,7 +19,7 @@ zwei Teilen:
 
 Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt sein:
 
-1. **Prozess ist freigegeben (RELEASED).**
+1. **Prozess ist freigegeben** (Kennzeichen „freigegeben“).
    Nur ein freigegebenes Schema lässt sich instanziieren. Status in der Sicht
    **Modellieren** prüfen.
 
@@ -37,8 +37,12 @@ Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt s
    - Rolle **Bearbeiter** (operator) auswählen — **zwingend**; ohne diese Rolle
      sieht und erledigt der Mitarbeiter keine Aufgaben.
    - Den Login-Vorschlag (`vorname.nachname`) übernehmen oder anpassen.
-   - Das **Initialpasswort** wird **einmalig** angezeigt → notieren und dem
-     Mitarbeiter sicher übermitteln.
+   - Das **Initialpasswort** wird **einmalig** angezeigt (mit Knopf
+     „Kopieren“) → notieren und dem Mitarbeiter sicher übermitteln.
+   - Hat der Agent schon einen Login, steht in der Zeile „Login: …“ statt des
+     Knopfs. Passwort vergessen oder Login nicht mehr nötig? Unter
+     **Administration → Benutzer** lässt sich das Passwort zurücksetzen (neues
+     Initialpasswort, einmalig angezeigt) oder der Login löschen.
 
 > Weil der Login direkt über den **„Login"-Button in der Agentenzeile** erzeugt
 > wird, ist er fest mit genau diesem Agenten verknüpft. Dadurch zeigt
@@ -82,10 +86,14 @@ Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt s
 
 6. **Aufgabe erledigen.**
    Klicke bei einer Aufgabe auf **„Erledigen"**, fülle ggf. die abgefragten
-   Daten aus und bestätige. Das geht auch **ohne** vorheriges Übernehmen –
+   Daten aus und bestätige. Fragt die Aufgabe nichts ab, erscheint eine kurze
+   Rückfrage – **Enter** oder **„Abschließen"** bestätigt. Das geht auch
+   **ohne** vorheriges Übernehmen –
    Übernehmen lohnt sich, sobald mehrere Personen dieselbe Liste sehen. Die
    Aufgabe verschwindet danach aus der Liste; Folgeaufgaben erscheinen
-   automatisch.
+   automatisch. Hast du gerade etwas eingetippt, aber noch nicht gespeichert
+   (z. B. eine Abwesenheit), bleibt die Liste stehen und oben erscheint
+   „Neue Daten sind da – Aktualisieren“; deine Eingabe geht nicht verloren.
    - **Anhalten:** Eine übernommene Aufgabe kannst du **anhalten** (Status
      „angehalten") und später mit **„Weiterarbeiten"** fortsetzen. In der
      Regel läuft die Frist dabei weiter – das Anhalten macht die Pause nur
@@ -105,8 +113,12 @@ Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt s
    Aufgaben **zusätzlich** – du selbst behältst sie ebenfalls, es geht also nichts
    verloren. Bestehende Einträge kannst du dort auch wieder **entfernen**.
    - Ist **keine Vertretung** hinterlegt, weist ein Hinweis darauf hin: Deine
-     Aufgaben bleiben dann während der Abwesenheit **dir** zugewiesen (die
-     Vertretung legt der Administrator in der Organisation fest).
+     Aufgaben bleiben dann während der Abwesenheit **dir** zugewiesen. Die
+     Vertretung legt die Administration in der Organisation fest – bitte dort
+     hinterlegen lassen.
+   - Bist du selbst die Vertretung einer abwesenden Kollegin oder eines
+     Kollegen, steht an deren Aufgaben in deiner Liste **„in Vertretung für
+     …"** mit dem Namen.
 
 8. **Abmelden.**
    Über **„Abmelden"** in der linken Seitenleiste. Beim nächsten Mal meldest du
@@ -127,9 +139,14 @@ Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt s
 - **Eine einzige Seite** genügt dem Mitarbeiter: die normale App-Adresse.
   Login-Fenster, Aufgabenliste und Bearbeitung sind alle dort enthalten.
 - Mit der Rolle **Bearbeiter** (operator) blendet die Navigation automatisch nur
-  **„Meine Aufgaben"** (und **Monitoring**) ein – Modellier- und Admin-Sichten
-  bleiben verborgen. Im Monitoring sieht ein Bearbeiter die Kennzahlen aller
-  Vorgänge, einzeln aber nur die Vorgänge, an denen er beteiligt ist oder war.
+  **„Meine Aufgaben"**, **„Ausführung"**, **Monitoring** und **Hilfe** ein –
+  Modellier- und Admin-Sichten bleiben verborgen. In der Ausführung startet ein
+  Bearbeiter freigegebene Prozesse und arbeitet die Schritte eines Vorgangs ab;
+  für den Alltag genügt „Meine Aufgaben". Im Monitoring sieht ein Bearbeiter die Kennzahlen aller
+  Vorgänge (Anzahl, Durchlaufzeit, Engpässe), einzeln aber nur die Vorgänge, an
+  denen er beteiligt ist oder war – ebenso zählen die Kacheln für überfällige
+  und eskalierte Aufgaben und für die Zuständigkeit nur diese. Ein Hinweis unter
+  den Kacheln sagt das.
 - Ein **Modellierer** (modeler) ist zugleich Bearbeiter: er sieht „Meine
   Aufgaben" und „Ausführung" zusätzlich zu den Modellier-Sichten und kann eigene
   **Entwürfe als Test-Instanz** starten (diese Testläufe zählen nicht ins

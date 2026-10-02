@@ -57,7 +57,25 @@ _SALT_BYTES = 16
 
 
 class PasswordPolicyError(ValueError):
-    """Raised when a chosen password violates the password policy (400)."""
+    """Raised when a chosen password or login violates the policy (400).
+
+    ``code``/``params`` name the concrete reason for clients (the web client
+    words it in its message catalogue); the English message stays the
+    technical base for logs and API users. Without them a client could only
+    guess -- "too short or identical to the old one" -- which of two
+    different rules had refused the password.
+
+    :param message: technical English description
+    :param code: stable reason code, e.g. ``PW.too-short``
+    :param params: values the reason refers to (strings)
+    """
+
+    def __init__(
+        self, message: str, *, code: str, params: dict[str, str] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.params: dict[str, str] = dict(params or {})
 
 
 def hash_password(password: str) -> str:
@@ -466,10 +484,14 @@ class PasswordAuthBackend:
             raise AuthError("invalid credentials")
         if len(new) < MIN_PASSWORD_LENGTH:
             raise PasswordPolicyError(
-                f"password must be at least {MIN_PASSWORD_LENGTH} characters"
+                f"password must be at least {MIN_PASSWORD_LENGTH} characters",
+                code="PW.too-short",
+                params={"min": str(MIN_PASSWORD_LENGTH)},
             )
         if new == current:
-            raise PasswordPolicyError("new password must differ from the current one")
+            raise PasswordPolicyError(
+                "new password must differ from the current one", code="PW.unchanged"
+            )
         self._store.put_user(
             user.model_copy(
                 update={"password_hash": hash_password(new), "must_change": False}
@@ -492,12 +514,20 @@ class PasswordAuthBackend:
         role_set = frozenset(str(r) for r in roles)
         unknown = role_set - ALL_ROLES
         if unknown:
-            raise PasswordPolicyError(f"unknown role(s): {sorted(unknown)}")
+            raise PasswordPolicyError(
+                f"unknown role(s): {sorted(unknown)}",
+                code="USERS.unknown-role",
+                params={"roles": ", ".join(sorted(unknown))},
+            )
         chosen = login or suggest_login(
             display_name or subject, {u.login for u in self._store.list_users()}
         )
         if self._store.get_user(chosen) is not None:
-            raise PasswordPolicyError(f"login '{chosen}' already exists")
+            raise PasswordPolicyError(
+                f"login '{chosen}' already exists",
+                code="USERS.login-taken",
+                params={"login": chosen},
+            )
         initial = generate_initial_password()
         user = User(
             login=chosen,

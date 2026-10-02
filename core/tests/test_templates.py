@@ -211,3 +211,29 @@ def test_gallery_lists_roles_derived_from_the_staff_rules() -> None:
     assert four_eyes["step_count"] == 3
     assert {"name": "Vorgesetzte:r von „Vorgang erfassen“",
             "steps": ["Freigabe durch Vorgesetzte"]} in four_eyes["roles"]
+
+
+def test_builtin_template_deletion_names_the_reason() -> None:
+    """Negativfall mit Grund: eingebaute Vorlagen gehören zum Produkt."""
+    resp = client.delete("/templates/tpl-urlaubsantrag")
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "built-in templates cannot be deleted"
+
+
+def test_template_deletion_requires_the_modeller_role() -> None:
+    """Negativfall: Ein Bearbeiter darf keine Vorlage löschen (403)."""
+    import procworks.api as api_module
+    from procworks.auth import Principal
+
+    sid = client.post("/schemas", json={"name": "Vorlage-Rechte"}).json()["id"]
+    client.post(f"/schemas/{sid}/serial-insert", json={"label": "A", "after_node_id": "start"})
+    tid = client.post("/templates", json={"schema_id": sid, "name": "Rechte"}).json()["id"]
+    api_module.app.dependency_overrides[api_module.get_principal] = lambda: Principal(
+        subject="op", roles=frozenset({"operator"}))
+    try:
+        resp = client.delete(f"/templates/{tid}")
+    finally:
+        api_module.app.dependency_overrides.pop(api_module.get_principal, None)
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "forbidden"
+    assert client.get(f"/templates/{tid}").status_code == 200

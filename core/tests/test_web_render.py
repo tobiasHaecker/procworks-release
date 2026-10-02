@@ -35,7 +35,7 @@ def _render_body() -> str:
     """
 
     src = APP_JS.read_text(encoding="utf-8")
-    body = re.search(r"\nfunction render\(\) \{.*?\n\}", src, re.S)
+    body = re.search(r"\nfunction render\((?:opts)?\) \{.*?\n\}", src, re.S)
     assert body, "render() nicht in app.js gefunden -- Waechter angleichen"
     return re.sub(r"//[^\n]*", "", body.group(0))
 
@@ -60,11 +60,12 @@ def test_released_schema_offers_the_way_back_into_editing() -> None:
         "ohne gewaehlten Knoten"
     )
 
-    # Kopfzeile: der Knopf steht neben „Zur Ausfuehrung" (dem Nicht-Entwurf-Zweig).
-    header = re.search(r"\"Zur Ausf\\u00FChrung\"|\"Zur Ausführung\"", src)
-    assert header, "Kopfzeilen-Knopf „Zur Ausfuehrung\" nicht gefunden"
-    around = src[max(0, header.start() - 800):header.start()]
-    assert "newRevision" in around, "Die Kopfzeile bietet keinen Weg zurueck ins Bearbeiten"
+    # Kopfzeile: der Knopf steht neben „Zur Ausfuehrung" (dem Nicht-Entwurf-Zweig),
+    # beides in der gemeinsamen Kopfzeile beider Oberflaechen.
+    header = _function_body(src, "function modelHeader(")
+    assert "Zur Ausf" in header, "Kopfzeilen-Knopf „Zur Ausfuehrung\" nicht gefunden"
+    assert "onClick: newRevision" in header, (
+        "Die Kopfzeile bietet keinen Weg zurueck ins Bearbeiten")
 
 
 def test_render_runs_are_serialised() -> None:
@@ -96,7 +97,7 @@ def test_render_lock_is_released_even_on_error() -> None:
         "renderBusy wird ausserhalb von finally() freigegeben -- ein Fehler friert die GUI ein"
     )
     # Der vorgemerkte Lauf wird genau dort nachgeholt.
-    assert "renderQueued = false; render();" in body, (
+    assert re.search(r"renderQueued = false;.*?\brender\(", body[release:], re.S), (
         "Ein vorgemerkter Lauf wird nicht nachgeholt -- der letzte Zustand fehlt"
     )
 
@@ -620,7 +621,7 @@ def test_model_hints_are_visible_in_both_surfaces() -> None:
     assert "catch" in refresh, "Der Hinweis-Abruf muss best-effort sein"
 
     bar = _fn_body("modelStatusBar")
-    assert "state.hints" in bar and "Hinweis(e)" in bar, (
+    assert "state.hints" in bar and 'countLabel(hints.length, "Hinweis", "Hinweise")' in bar, (
         "Die Statusleiste (Karten-Sicht) zeigt die Hinweise nicht"
     )
     assert 'pill-gray' in bar, "Hinweise muessen neutral wirken, nicht wie Befunde"
@@ -1270,18 +1271,19 @@ def test_monitoring_instance_list_is_filterable_and_not_called_active() -> None:
         assert key in src
 
 
-def test_insert_dialog_blocks_variants_without_their_data_element() -> None:
-    """M4: Ohne Datenelement blieb "Einfügen" aktiv und meldete Fachjargon."""
+def test_insert_dialog_never_sends_the_user_away_for_a_missing_element() -> None:
+    """M4: Ohne Datenelement blieb "Einfügen" aktiv und meldete Fachjargon.
+
+    Danach sperrte der Dialog die Variante und schickte den Nutzer in die
+    Datensicht. Seit Entscheidung *und* Schleife ein fehlendes Merkmal selbst
+    anlegen, gibt es keine gesperrte Variante mehr.
+    """
 
     src = APP_JS.read_text(encoding="utf-8")
     body = _function_body(src, "function openInsertModal(")
     assert "Kein g\\u00FCltiger Diskriminator" not in body
-    assert "function syncInsertEnabled()" in body
-    assert 'dialog = openModal("Schritt einf' in body
-    assert "dialog.confirmBtn.disabled = blocked" in body
-    # Nur noch die Schleife: Fuer die Verzweigung legt der Dialog das Merkmal
-    # selbst an, statt den Nutzer wegzuschicken.
-    assert body.count("insert-blocked") == 1
+    assert "insert-blocked" not in body
+    assert body.count("discriminatorPicker(") == 2  # Entscheidung und Schleife
 
 
 def test_xor_insert_offers_to_create_and_bind_its_discriminator() -> None:
@@ -1290,13 +1292,19 @@ def test_xor_insert_offers_to_create_and_bind_its_discriminator() -> None:
 
     src = APP_JS.read_text(encoding="utf-8")
     body = _function_body(src, "function openInsertModal(")
-    assert "Neues Merkmal anlegen" in body
+    assert "discriminatorPicker(partitionable," in body
+    assert "Neues Merkmal anlegen" in _function_body(src, "function discriminatorPicker(")
     assert "setzt dieses Merkmal (Schreibbindung ergänzen)" in body
     assert "insertConditionalWithDiscriminator(afterNodeId, branches, {" in body
     helper = _function_body(src, "async function insertConditionalWithDiscriminator(")
-    order = [helper.index(x) for x in ("/data-elements`", "/data-access`", "/conditional-insert`")]
+    # Anlegen (und dessen Aufraeumen) uebernimmt seit 2026-10 die mit der
+    # Schleife geteilte Funktion; binden laeuft ueber createDataAccess.
+    steps = ("withDiscriminator(", "createDataAccess(", "/conditional-insert`")
+    order = [helper.index(x) for x in steps]
     assert order == sorted(order)  # anlegen, binden, einfuegen
-    assert "api.del(`/schemas/${sid}/data-elements/${created.id}`)" in helper  # Aufraeumen
+    shared = _function_body(src, "async function withDiscriminator(")
+    assert "/data-elements`" in shared
+    assert "api.del(`/schemas/${sid}/data-elements/${created.id}`)" in shared  # Aufraeumen
 
 
 def test_created_schemas_open_in_the_modelling_view() -> None:
@@ -1388,7 +1396,10 @@ def test_catalog_covers_every_code_the_core_emits() -> None:
     emitted: set[str] = set()
     for py in src_dir.glob("*.py"):
         text = py.read_text(encoding="utf-8")
+        # ``code="X.y"`` (Befunde, Ausnahmen) und ``"code": "X.y"`` (Fehler-
+        # Details der API, etwa der Benutzerverwaltung) -- beide landen im Client.
         emitted |= set(re.findall(r'code="([A-Z][A-Z0-9]*\.[a-z-]+)"', text))
+        emitted |= set(re.findall(r'"code": "([A-Z][A-Z0-9]*\.[a-z-]+)"', text))
     assert emitted, "keine Befund-Codes im Kern gefunden -- Waechter angleichen"
     app = APP_JS.read_text(encoding="utf-8")
     catalog = set(re.findall(r'^  "([A-Z][A-Z0-9]*\.[a-z-]+)": ', app, re.M))
@@ -1818,9 +1829,13 @@ def test_tasks_and_instances_are_named_by_their_data() -> None:
     in der Arbeitsliste zu unterscheiden."""
 
     src = APP_JS.read_text(encoding="utf-8")
-    assert "contextTitle(t.context)" in _function_body(src, "async function viewTasks(")
+    # Seit 2026-10 ueber instanceName/instanceNameCell (Werte, sonst Startzeit).
+    assert "instanceName(t.instance_started_at, t.context)" in _function_body(
+        src, "async function viewTasks(")
     monitor = _function_body(src, "async function viewMonitor(")
-    assert 'api.get("/instance-titles")' in monitor and "contextTitle(titles[i.id])" in monitor
+    assert 'api.get("/instance-titles")' in monitor
+    assert "instanceNameCell(i.id, i.started_at, titles[i.id])" in monitor
+    assert "contextTitle(values)" in _function_body(src, "function instanceName(")
     assert "toggleDisplayField(d.id)" in _function_body(src, "function viewData(")
     assert "/display-fields`" in _function_body(src, "async function toggleDisplayField(")
 
@@ -1985,7 +2000,10 @@ def test_step_without_mask_shows_what_it_reads() -> None:
     body = _fn(src, "async function promptComplete(")
     assert "readOnlyValues(schema, nodeId, values)" in body
     # Auch ein Schritt, der nur liest, oeffnet den Dialog (sonst blind abgeschlossen).
-    assert "body.childNodes.length" in body
+    # Ohne jeden Inhalt fragt er kurz nach (``body.children``), statt per
+    # einem Klick unumkehrbar abzuschliessen.
+    assert "!body.children.length" in body
+    assert 'openModal(`Abschlie\\u00DFen: ${label}`, body, doComplete' in body
     assert 'a.mode === "READ"' in _fn(src, "function readOnlyValues(")
 
 

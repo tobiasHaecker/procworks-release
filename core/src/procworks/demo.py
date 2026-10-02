@@ -24,6 +24,7 @@ same endpoint also wipes everything back to an empty system.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
@@ -98,6 +99,93 @@ DEMO_USERS: list[tuple[str, str, frozenset[str], str | None]] = [
 #: the editor). Consumed only in demo mode by the ``/auth/config`` boundary; see
 #: ``api._demo_login_info``. Must be one of :data:`DEMO_USERS`.
 DEMO_AUTOLOGIN = "mara.modell"
+
+
+#: Felder einer Maske, die Pruefregeln tragen koennen (U2 erlaubt Grenzen nur an
+#: Zahlenfeldern, Muster und Laenge nur an Textfeldern).
+_RULE_WIDGETS = frozenset({WidgetKind.NUMBER, WidgetKind.TEXT, WidgetKind.TEXTAREA})
+
+
+@dataclasses.dataclass(frozen=True)
+class InputRule:
+    """Input checks of one data element in the example masks.
+
+    ``min_value``/``max_value`` bound a number field, ``pattern``/``max_length``
+    a text field (see :class:`procworks.model.FormField`). ``help_text``
+    explains what the rule expects, or a rule the mask cannot check itself
+    (e.g. "at most the delivered quantity"); it is put in front of the field's
+    own help text, never replaces it.
+    """
+
+    min_value: float | None = None
+    max_value: float | None = None
+    pattern: str | None = None
+    max_length: int | None = None
+    help_text: str | None = None
+
+
+def with_input_rules(
+    fields: Sequence[ops.FormFieldSpec], rules: dict[str, InputRule]
+) -> list[ops.FormFieldSpec]:
+    """Give every writable mask field the input checks of its data element.
+
+    The example data set is a showcase: its masks must refuse what no clerk
+    would enter (negative leave days, a credit score of 150, a tracking "URL"
+    that is none). The checks live in one table per data set, keyed by data
+    element, so the same element carries the same bounds in every mask.
+
+    :param fields: the fields as written in the data set
+    :param rules: the :class:`InputRule` per data element id
+    :returns: new field specs; the inputs stay untouched
+    :edge cases: READ fields and widgets without checks (dropdown, checkbox,
+        date) are passed through unchanged. A field's own help text is kept;
+        the rule's hint comes first -- a format the user must meet (e.g. the
+        tracking address) would otherwise vanish behind a general hint.
+    """
+
+    out: list[ops.FormFieldSpec] = []
+    for spec in fields:
+        rule = rules.get(spec.element_id)
+        if rule is not None and spec.mode is not AccessMode.READ and spec.widget in _RULE_WIDGETS:
+            spec = dataclasses.replace(
+                spec,
+                min_value=rule.min_value,
+                max_value=rule.max_value,
+                pattern=rule.pattern,
+                max_length=rule.max_length,
+                help_text=" ".join(t for t in (rule.help_text, spec.help_text) if t) or None,
+            )
+        out.append(spec)
+    return out
+
+
+#: Pruefregeln der Basis-Beispiele (siehe :func:`with_input_rules`).
+DEMO_INPUT_RULES: dict[str, InputRule] = {
+    "tage": InputRule(min_value=1, max_value=30),
+    "grund": InputRule(max_length=1000),
+    "mitteilung": InputRule(max_length=1000),
+    "betrag": InputRule(min_value=0.01),
+    "lieferant_nr": InputRule(min_value=1),
+}
+
+
+def _set_form(
+    schema: ProcessSchema,
+    node_id: str,
+    *,
+    title: str = "",
+    fields: list[ops.FormFieldSpec],
+    columns: int = 1,
+) -> ProcessSchema:
+    """:func:`procworks.operations.set_form` with :data:`DEMO_INPUT_RULES`."""
+
+    return ops.set_form(
+        schema,
+        node_id,
+        title=title,
+        fields=with_input_rules(fields, DEMO_INPUT_RULES),
+        columns=columns,
+    )
 
 
 def _nid(schema: ProcessSchema, label: str) -> str:
@@ -254,7 +342,7 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
     # reason. The mask *is* the data flow (a WRITE field yields a write access),
     # so "tage" stays guaranteed-written before it is read downstream.
     s = ops.add_data_element(s, "Begr\u00fcndung", DataType.STRING, element_id="grund")
-    s = ops.set_form(
+    s = _set_form(
         s,
         erfassen,
         title="Urlaubsantrag erfassen",
@@ -279,7 +367,7 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
     # Entscheidung aus einer Auswahlliste. Genau dieses Pflichtfeld schreibt den
     # XOR-Diskriminator -- der Wert "Genehmigt" trifft die Zelle des
     # Genehmigungszweigs, jeder andere landet im Auffang-Zweig (Ablehnung).
-    s = ops.set_form(
+    s = _set_form(
         s,
         genehmigung,
         title="Urlaubsantrag entscheiden",
@@ -289,7 +377,7 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
                 widget=WidgetKind.NUMBER,
                 label="Beantragte Urlaubstage",
                 mode=AccessMode.READ,
-                help_text="Entscheidungsgrundlage - hier nur zur Ansicht.",
+                help_text="Entscheidungsgrundlage \u2013 hier nur zur Ansicht.",
             ),
             ops.FormFieldSpec(
                 element_id="entscheidung",
@@ -304,7 +392,7 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
 
     # Beide Zweige schreiben den Mitteilungstext (Bestaetigung bzw. Begruendung),
     # den die Benachrichtigung am Ende liest -- garantiert gesetzt auf jedem Pfad.
-    s = ops.set_form(
+    s = _set_form(
         s,
         _nid(s, "Urlaub eintragen"),
         title="Urlaub eintragen",
@@ -317,7 +405,7 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
             )
         ],
     )
-    s = ops.set_form(
+    s = _set_form(
         s,
         _nid(s, "Ablehnung dokumentieren"),
         title="Ablehnung dokumentieren",
@@ -381,6 +469,9 @@ def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
         s, _nid(s, "Mitarbeiter benachrichtigen"), TimeConstraint(max_duration_seconds=1800)
     )
     s = ops.set_deadline(s, 3 * 86400)  # three working days
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["grund", "tage"])
     return ops.release(s)
 
 
@@ -456,7 +547,7 @@ def _build_beschaffung(org: OrgModel) -> ProcessSchema:
     # betrag/lieferant_nr/budget_ok get their values at runtime -- a person fills
     # the WRITE fields, so the whole procurement flow is completable in the GUI
     # end-to-end without any external worker.
-    s = ops.set_form(
+    s = _set_form(
         s,
         angebote,
         title="Angebote einholen",
@@ -473,7 +564,7 @@ def _build_beschaffung(org: OrgModel) -> ProcessSchema:
             ),
         ],
     )
-    s = ops.set_form(
+    s = _set_form(
         s,
         budget,
         title="Budgetpr\u00fcfung",
@@ -512,6 +603,9 @@ def _build_beschaffung(org: OrgModel) -> ProcessSchema:
     s = ops.set_time_constraint(s, budget, TimeConstraint(max_duration_seconds=3600))
     s = ops.set_time_constraint(s, freigeben, TimeConstraint(max_duration_seconds=1800))
     s = ops.set_deadline(s, 86400)  # one working day
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["lieferant_nr", "betrag"])
     return s  # left in ENTWURF on purpose: shows a draft / test-instance state
 
 
@@ -655,6 +749,31 @@ def _emit(
         agent_id=agent_id,
         detail=detail,
     )
+
+
+def stamp_seeded_start_times(instance_store: InstanceStore, audit: AuditLog) -> None:
+    """Gibt jedem geseedeten Vorgang ohne Startzeit die seines ersten Ereignisses.
+
+    Im Betrieb stempelt die API ``started_at`` beim Start; der Seed startet an
+    ihr vorbei, auch die Kind-Vorgaenge der Teilprozesse. Ohne Startzeit hiess
+    ein Vorgang ohne benennende Werte in der Oberflaeche nur „Vorgang“.
+    Genommen wird das frueheste Audit-Ereignis des Vorgangs (im Seed
+    zurueckdatiert, siehe :class:`BackdatedAudit`); ohne Ereignis bleibt das
+    Feld leer. Vorhandene Startzeiten bleiben unangetastet.
+
+    :param instance_store: Store mit den geseedeten Vorgaengen
+    :param audit: das Log, in das der Seed geschrieben hat
+    """
+
+    for instance_id in instance_store.list_ids():
+        instance = instance_store.get(instance_id)
+        if instance is None or instance.started_at is not None:
+            continue
+        events = audit.for_instance(instance_id)
+        if not events:
+            continue
+        first = min(e.timestamp for e in events)
+        instance_store.put(instance.model_copy(update={"started_at": first}))
 
 
 def _start(
@@ -884,6 +1003,7 @@ def load_demo(
     schema_store.put(dehydrate_org(beschaffung))
 
     _seed_instances(urlaub, instance_store, audit_log)
+    stamp_seeded_start_times(instance_store, audit_log)
 
     if absence_store is not None:
         _seed_absences(absence_store)

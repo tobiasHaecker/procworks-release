@@ -369,3 +369,55 @@ def test_external_task_completion_triggers_notification(monkeypatch) -> None:
     finally:
         _reset_api()
         api_module._external_tasks.clear()
+
+
+# --- ohne Mailserver: verworfen statt "zugestellt" ----------------------------
+
+
+def test_without_mail_server_entries_are_dropped_not_sent() -> None:
+    """Ohne SMTP meldete der Ausgang „zugestellt“, obwohl nichts versendet
+    wurde. Jetzt: DROPPED mit Grund, kein delivered (also kein MAIL_SENT)."""
+    from procworks.mail_runtime import NullMailSender
+
+    store = InMemoryMailOutboxStore()
+    disp = MailOutboxDispatcher(store, now=lambda: 100.0)
+    entry = disp.enqueue(_msg("d1"), "d1")
+    assert entry is not None
+
+    [result] = disp.dispatch_pending(NullMailSender())
+
+    stored = store.get_entry(entry.id)
+    assert stored.state is MailOutboxState.DROPPED
+    assert stored.last_error == "kein Mailserver konfiguriert"
+    assert not result.delivered and not result.dead
+
+
+def test_dropped_entries_are_not_flushed_once_smtp_is_configured() -> None:
+    """Grenzfall: Verworfenes ist endgültig -- ein später eingerichteter
+    Mailserver verschickt keinen Rückstau veralteter Benachrichtigungen."""
+    from procworks.mail_runtime import NullMailSender
+
+    store = InMemoryMailOutboxStore()
+    disp = MailOutboxDispatcher(store, now=lambda: 100.0)
+    disp.enqueue(_msg("d2"), "d2")
+    disp.dispatch_pending(NullMailSender())
+
+    collector = _Collector()
+    assert disp.dispatch_pending(collector) == []
+    assert collector.sent == []
+
+
+def test_status_counts_dropped_separately() -> None:
+    from procworks.mail_runtime import NullMailSender
+
+    store = InMemoryMailOutboxStore()
+    original = api_module._mail_outbox_store
+    api_module._mail_outbox_store = store
+    try:
+        disp = MailOutboxDispatcher(store, now=lambda: 100.0)
+        disp.enqueue(_msg("d3"), "d3")
+        disp.dispatch_pending(NullMailSender())
+        status = api_module._mail_outbox_status()
+    finally:
+        api_module._mail_outbox_store = original
+    assert (status.dropped, status.sent) == (1, 0)

@@ -257,9 +257,17 @@ Es erscheint direkt das **Login-Fenster**.
      (z. B. „Erika Musterfrau").
    - In der Agentenzeile auf **„Login"** klicken. Der Login-Name wird aus dem
      Namen vorgeschlagen (`erika.musterfrau`), Rollen auswählen, anlegen.
-   - Das **Initialpasswort** wird **einmalig** angezeigt – notieren und der
-     Person sicher mitteilen. Sie vergibt beim ersten Login ihr eigenes
-     Passwort.
+   - Das **Initialpasswort** wird **einmalig** angezeigt (mit Knopf
+     „Kopieren“) – notieren und der Person sicher mitteilen. Sie vergibt beim
+     ersten Login ihr eigenes Passwort.
+   - Hat eine Person schon einen Login, steht in ihrer Zeile „Login: …“ statt
+     des Knopfs.
+4. Bestehende Logins verwalten: **Administration → Benutzer** listet alle
+   Logins mit Rollen, zugeordneter Person und dem Hinweis „muss Passwort
+   ändern“. Dort lässt sich ein **Passwort zurücksetzen** (das neue
+   Initialpasswort erscheint einmalig, bestehende Anmeldungen enden) oder ein
+   Login **löschen** (die Person im Organisationsmodell bleibt erhalten). Den
+   eigenen Login und den letzten Administrator-Login kann man nicht löschen.
 
 > **Wichtig:** Aus Sicherheitsgründen nach dem ersten erfolgreichen Admin-Login
 > das Startpasswort nicht dauerhaft im Klartext belassen. Es kann nach der
@@ -269,7 +277,8 @@ Es erscheint direkt das **Login-Fenster**.
 ### 8.1 Optional: Beispieldaten zum Ausprobieren laden
 
 Damit alle Funktionen sofort sichtbar werden, kann der Administrator fertige
-Beispieldaten laden (eine Organisation, zwei Prozesse, drei laufende Instanzen):
+Beispieldaten laden (eine Organisation, zwei Prozesse, drei Vorgänge – zwei
+laufend, einer abgeschlossen):
 
 1. Als **Administrator** anmelden.
 2. In die Sicht **Administration** wechseln und zum Bereich **„Wartung"**
@@ -297,7 +306,9 @@ es nach dem Laden **einmal** an – notieren Sie es gleich:
 
 Über **„Auf Null zurücksetzen"** im selben Bereich werden alle Daten **und** die
 Testbenutzer wieder entfernt. **Vor dem Produktivbetrieb** unbedingt
-zurücksetzen, damit keine Demo-Logins bestehen bleiben.
+zurücksetzen, damit keine Demo-Logins bestehen bleiben – oder die Testbenutzer
+unter **Administration → Benutzer** einzeln löschen bzw. ihnen neue Passwörter
+geben.
 
 ---
 
@@ -358,7 +369,8 @@ docker compose -f deploy/docker-compose.full.yml up -d
 ```
 
 In der Verwaltung zeigt der Bereich **„E-Mail-Ausgang"**, ob Mails versendet
-werden. Zugänge für Worker und andere Programme (Maschinen-Tokens) werden in
+werden; ohne Mailserver erscheinen sie als „verworfen – kein Mailserver“ (und
+werden auch nach späterer Einrichtung nicht nachgeschickt). Zugänge für Worker und andere Programme (Maschinen-Tokens) werden in
 derselben Datei eingetragen, siehe README, Abschnitt „Einstellungen“.
 
 ### Update auf eine neue Version

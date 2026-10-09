@@ -1,0 +1,748 @@
+# SPDX-License-Identifier: BUSL-1.1
+"""Tests for the built-in demo data and the admin reset endpoint.
+
+Covers the pure :func:`procworks.demo.load_demo` loader (org, two schemas, three
+instances at different points, monitoring KPIs) and the ``POST /admin/reset``
+maintenance endpoint that wipes the system to zero and optionally reloads the
+demo -- including the RBAC gate and the login-preservation guarantee.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
+
+import pytest
+from fastapi.testclient import TestClient
+
+import procworks.api as api_module
+from procworks import assignment, demo, demo_o2c
+from procworks.api import app
+from procworks.audit import InMemoryAuditLog, compute_kpis, discover_process_map
+from procworks.auth import AuthError
+from procworks.auth_password import (
+    InMemoryCredentialStore,
+    PasswordAuthBackend,
+    User,
+    hash_password,
+)
+from procworks.execution import ExecutionContext, complete_activity, instantiate
+from procworks.model import (
+    AccessMode,
+    DataSourceKind,
+    DataType,
+    InstanceState,
+    LifecycleState,
+    StaffRuleKind,
+    ValueClass,
+    XorDecisionKind,
+)
+from procworks.store import (
+    InMemoryAbsenceStore,
+    InMemoryInstanceStore,
+    InMemoryOrgStore,
+    InMemorySchemaStore,
+    hydrate_org,
+    make_org_resolver,
+    make_resolver,
+)
+from procworks.validator import _possible_agents
+
+client = TestClient(app)
+
+
+# --- pure loader ----------------------------------------------------------
+
+
+def _fresh_stores() -> tuple[
+    InMemorySchemaStore, InMemoryInstanceStore, InMemoryOrgStore, InMemoryAuditLog
+]:
+    return (
+        InMemorySchemaStore(),
+        InMemoryInstanceStore(),
+        InMemoryOrgStore(),
+        InMemoryAuditLog(),
+    )
+
+
+def test_load_demo_builds_two_schemas_and_one_org() -> None:
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+
+    assert set(ss.list_ids()) == {demo.SCHEMA_URLAUB, demo.SCHEMA_BESCHAFFUNG}
+    assert orgs.list_ids() == [demo.ORG_ID]
+
+    org_resolver = make_org_resolver(orgs)
+    urlaub = hydrate_org(ss.get(demo.SCHEMA_URLAUB), org_resolver)  # type: ignore[arg-type]
+    beschaffung = ss.get(demo.SCHEMA_BESCHAFFUNG)
+    assert urlaub.lifecycle_state is LifecycleState.RELEASED
+    assert beschaffung is not None
+    assert beschaffung.lifecycle_state is LifecycleState.ENTWURF
+    # The released schema resolves its staffing against the shared org.
+    assert urlaub.org_model_id == demo.ORG_ID
+    assert "a-erika" in urlaub.org_model.agents
+
+
+def test_load_demo_creates_three_instances_at_different_points() -> None:
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+
+    states = {iid: ins.get(iid).state for iid in ins.list_ids()}  # type: ignore[union-attr]
+    assert len(states) == 3
+    assert sum(s is InstanceState.RUNNING for s in states.values()) == 2
+    assert sum(s is InstanceState.COMPLETED for s in states.values()) == 1
+    # None of the demo instances is a throw-away test instance.
+    assert all(not ins.get(iid).is_test for iid in ins.list_ids())  # type: ignore[union-attr]
+
+
+def test_load_demo_feeds_monitoring_kpis_and_process_map() -> None:
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+
+    report = compute_kpis(log.list_all())
+    assert report.total_instances == 3
+    assert report.running == 2
+    assert report.completed == 1
+    pmap = discover_process_map(log.list_all())
+    assert len(pmap.edges) >= 1
+
+
+def test_load_demo_seeds_logins_only_with_password_backend() -> None:
+    ss, ins, orgs, log = _fresh_stores()
+    backend = PasswordAuthBackend(InMemoryCredentialStore())
+    seeded = demo.load_demo(
+        schema_store=ss,
+        instance_store=ins,
+        org_store=orgs,
+        audit_log=log,
+        password_backend=backend,
+    )
+    assert seeded == len(demo.DEMO_USERS)
+    assert backend.store.get_user("erika.sander") is not None
+
+
+def test_load_demo_is_idempotent_for_users() -> None:
+    ss, ins, orgs, log = _fresh_stores()
+    backend = PasswordAuthBackend(InMemoryCredentialStore())
+    demo.load_demo(
+        schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log,
+        password_backend=backend,
+    )
+    # A second load over the same backend must not duplicate logins.
+    again = demo.load_demo(
+        schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log,
+        password_backend=backend,
+    )
+    assert again == 0
+
+
+def _node_id(schema, label):  # type: ignore[no-untyped-def]
+    return next(n.id for n in schema.nodes.values() if n.label == label)
+
+
+def _accessors(schema, element_id, mode):  # type: ignore[no-untyped-def]
+    return {
+        a.node_id
+        for a in schema.data_accesses
+        if a.element_id == element_id and a.mode is mode
+    }
+
+
+def test_demo_urlaub_branches_on_the_decision_not_on_the_days() -> None:
+    # Fachliche Regression: Ein Urlaubsantrag wird nicht abgelehnt, *weil* er
+    # viele Tage umfasst -- er wird abgelehnt, weil die vorgesetzte Person so
+    # entscheidet. Der XOR-Split haengt deshalb an "entscheidung" (ENUM), nicht
+    # an "tage"; die Tage sind nur Entscheidungsgrundlage (READ im
+    # Genehmigungsschritt).
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = ss.get(demo.SCHEMA_URLAUB)
+    assert urlaub is not None
+
+    assert len(urlaub.xor_decisions) == 1
+    decision = next(iter(urlaub.xor_decisions.values()))
+    assert decision.discriminator == "entscheidung"
+    assert decision.kind is XorDecisionKind.ENUM
+
+    # Der Diskriminator wird VOR dem Split geschrieben -- im Genehmigungsschritt.
+    genehmigung = _node_id(urlaub, "Genehmigung durch Leitung")
+    assert genehmigung in _accessors(urlaub, "entscheidung", AccessMode.WRITE)
+    assert genehmigung in _accessors(urlaub, "tage", AccessMode.READ)
+    # ... und "tage" steuert nirgends eine Verzweigung.
+    assert all(d.discriminator != "tage" for d in urlaub.xor_decisions.values())
+
+    # Genau ein Wert fuehrt in den Genehmigungszweig, alles andere in den
+    # Auffang-Zweig (total + disjunkt, K7).
+    eintragen = _node_id(urlaub, "Urlaub eintragen")
+    ablehnung = _node_id(urlaub, "Ablehnung dokumentieren")
+    cells = {b.target: b for b in decision.branches}
+    assert cells[eintragen].values == ["Genehmigt"]
+    assert cells[ablehnung].is_else is True
+
+
+def test_demo_urlaub_carries_enriched_message_object() -> None:
+    # The "mitteilung" object is filled by whichever XOR branch runs (the
+    # confirmation on approval, the reason on rejection) and read by the
+    # notification afterwards -> a data object that travels and is enriched
+    # across activities (D1 holds via the XOR-join intersection).
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = ss.get(demo.SCHEMA_URLAUB)
+    assert urlaub is not None
+
+    assert urlaub.data_elements["mitteilung"].data_type is DataType.STRING
+    eintragen = _node_id(urlaub, "Urlaub eintragen")
+    ablehnung = _node_id(urlaub, "Ablehnung dokumentieren")
+    benachrichtigen = _node_id(urlaub, "Mitarbeiter benachrichtigen")
+    # Both branches write it, the notification reads it (together with the
+    # decision itself).
+    assert {eintragen, ablehnung} <= _accessors(urlaub, "mitteilung", AccessMode.WRITE)
+    assert benachrichtigen in _accessors(urlaub, "mitteilung", AccessMode.READ)
+    assert benachrichtigen in _accessors(urlaub, "entscheidung", AccessMode.READ)
+
+
+def test_demo_completed_instance_holds_enriched_values() -> None:
+    # The finished, rejected instance must carry the captured "tage", the
+    # supervisor's "entscheidung" (which resolved the split) and the
+    # "mitteilung" written by the rejection branch (object passed along).
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+
+    finished = ins.get("urlaub-2026-003")
+    assert finished is not None
+    assert finished.state is InstanceState.COMPLETED
+    assert finished.data_values.get("tage") == 20
+    assert finished.data_values.get("entscheidung") == "Abgelehnt"
+    assert "Resturlaub" in str(finished.data_values.get("mitteilung", ""))
+
+
+def test_demo_urlaub_approval_path_completes_end_to_end() -> None:
+    # Gegenprobe zum abgelehnten Seed-Fall: entscheidet die Leitung "Genehmigt",
+    # loest der ENUM-Split in den Genehmigungszweig auf und die Instanz laeuft
+    # bis zum Ende durch. Die Entscheidungs-Maske schreibt den Diskriminator.
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = hydrate_org(ss.get(demo.SCHEMA_URLAUB), make_org_resolver(orgs))  # type: ignore[arg-type]
+
+    genehmigung = _node_id(urlaub, "Genehmigung durch Leitung")
+    mask = urlaub.forms.get(genehmigung)
+    assert mask is not None
+    entscheidungsfeld = next(f for f in mask.fields if f.element_id == "entscheidung")
+    assert entscheidungsfeld.options == ["Genehmigt", "Abgelehnt"]
+
+    ctx = ExecutionContext(make_resolver(InMemorySchemaStore()), ins)
+    inst = instantiate(urlaub, instance_id="urlaub-approve-1", context=ctx, is_test=True)
+    inst = complete_activity(
+        inst, urlaub, _node_id(urlaub, "Antrag erfassen"), {"tage": 25}, context=ctx
+    )
+    inst = complete_activity(inst, urlaub, _node_id(urlaub, "Antrag prüfen"), None, context=ctx)
+    # 25 Tage -- und trotzdem genehmigt: die Zahl entscheidet nicht, die Leitung tut es.
+    inst = complete_activity(
+        inst, urlaub, genehmigung, {"entscheidung": "Genehmigt"}, context=ctx
+    )
+    inst = complete_activity(
+        inst,
+        urlaub,
+        _node_id(urlaub, "Urlaub eintragen"),
+        {"mitteilung": "Urlaub ist eingetragen."},
+        context=ctx,
+    )
+    inst = complete_activity(
+        inst, urlaub, _node_id(urlaub, "Mitarbeiter benachrichtigen"), None, context=ctx
+    )
+    assert inst.state is InstanceState.COMPLETED
+    assert inst.data_values["entscheidung"] == "Genehmigt"
+
+
+def test_demo_beschaffung_wires_parallel_data_objects() -> None:
+    # Two objects filled on parallel branches and merged at the final activity:
+    # "betrag" (Angebote einholen) and "budget_ok" (Budget pruefen) are both
+    # read by "Bestellung freigeben".
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    besch = ss.get(demo.SCHEMA_BESCHAFFUNG)
+    assert besch is not None
+
+    assert besch.data_elements["betrag"].data_type is DataType.FLOAT
+    assert besch.data_elements["budget_ok"].data_type is DataType.BOOLEAN
+    angebote = _node_id(besch, "Angebote einholen")
+    budget = _node_id(besch, "Budget pr\u00fcfen")
+    freigeben = _node_id(besch, "Bestellung freigeben")
+    assert angebote in _accessors(besch, "betrag", AccessMode.WRITE)
+    assert budget in _accessors(besch, "budget_ok", AccessMode.WRITE)
+    assert freigeben in _accessors(besch, "betrag", AccessMode.READ)
+    assert freigeben in _accessors(besch, "budget_ok", AccessMode.READ)
+
+
+def test_demo_urlaub_showcases_mask_valueclass_priority_and_time() -> None:
+    # The released schema demonstrates the presentation/analytical features so
+    # every view (mask designer, value breakdown, worklist priority, time) has
+    # something to show.
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = ss.get(demo.SCHEMA_URLAUB)
+    assert urlaub is not None
+
+    erfassen = _node_id(urlaub, "Antrag erfassen")
+    # Input mask (form designer) with a number field and an optional text area.
+    mask = urlaub.forms.get(erfassen)
+    assert mask is not None
+    assert {f.element_id for f in mask.fields} == {"tage", "grund"}
+
+    # All three value classes appear, a priority is set and the temporal
+    # perspective is populated (per-step durations + a process deadline).
+    classes = {n.value_class for n in urlaub.nodes.values() if n.value_class is not None}
+    assert classes == {
+        ValueClass.VALUE_ADDING,
+        ValueClass.BUSINESS_NECESSARY,
+        ValueClass.NON_VALUE_ADDING,
+    }
+    assert urlaub.node_priorities  # at least one prioritised step
+    assert urlaub.time_constraints  # per-step target durations
+    assert urlaub.deadline_seconds is not None
+
+
+def test_demo_urlaub_approval_uses_supervisor_of_creator() -> None:
+    # The approval is assigned by the supervisor-relative BZR (the textbook case):
+    # whoever created the request (performer of "Antrag erfassen") is approved by
+    # their supervisor -- the manager of that performer's org unit. The rule
+    # back-references the creation step (Z3 guarantees it runs first).
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = ss.get(demo.SCHEMA_URLAUB)
+    assert urlaub is not None
+    erfassen = _node_id(urlaub, "Antrag erfassen")
+    genehmigung = _node_id(urlaub, "Genehmigung durch Leitung")
+    rule = urlaub.staff_rules[genehmigung]
+    assert rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR
+    assert rule.ref == erfassen
+
+
+def test_demo_urlaub_carries_reaction_sla() -> None:
+    # target_lead_seconds (reaction SLA, measured from activation) is set on the
+    # currently-active steps so the time-based worklist prioritisation has a
+    # basis to derive its criticality bands from.
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    urlaub = ss.get(demo.SCHEMA_URLAUB)
+    assert urlaub is not None
+    erfassen = _node_id(urlaub, "Antrag erfassen")
+    genehmigung = _node_id(urlaub, "Genehmigung durch Leitung")
+    assert urlaub.time_constraints[erfassen].target_lead_seconds == 1800
+    assert urlaub.time_constraints[genehmigung].target_lead_seconds == 43200
+
+
+def test_demo_seeds_active_absence_with_parallel_deputy() -> None:
+    # An absence is only seeded when an absence store is supplied. Erika is out of
+    # office for a window covering "now"; her deputy is Tom. While absent, her open
+    # task (the fresh instance still at "Antrag erfassen") is offered to Tom **in
+    # parallel** -- and Erika is never removed (the safety invariant).
+    ss, ins, orgs, log = _fresh_stores()
+    absences = InMemoryAbsenceStore()
+    demo.load_demo(
+        schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log,
+        absence_store=absences,
+    )
+
+    absent = assignment.absent_agent_ids(absences.list_entries(), datetime.now(UTC))
+    assert "a-erika" in absent
+
+    org_resolver = make_org_resolver(orgs)
+    urlaub = hydrate_org(ss.get(demo.SCHEMA_URLAUB), org_resolver)  # type: ignore[arg-type]
+    fresh = ins.get("urlaub-2026-001")
+    assert fresh is not None
+    erfassen = _node_id(urlaub, "Antrag erfassen")
+    eligible = assignment.eligible_agents(
+        urlaub, erfassen, fresh, absent_agents=frozenset(absent)
+    )
+    assert "a-erika" in eligible  # base agent never removed by an absence
+    assert "a-tom" in eligible  # deputy added in parallel during the absence
+
+
+def test_demo_without_absence_store_seeds_no_absence() -> None:
+    # The absence seeding is opt-in: the pure loader without an absence store
+    # (e.g. the existing test call sites) creates no absences.
+    ss, ins, orgs, log = _fresh_stores()
+    absences = InMemoryAbsenceStore()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    assert absences.list_entries() == []
+
+
+def test_demo_beschaffung_showcases_connector_and_staff_rules() -> None:
+    # The draft schema demonstrates the advanced/integration features: a
+    # connector with a CbC-safe scalar SQL binding and structured staff rules
+    # (role, org-unit + OR combinator). Every step is interactive, so the flow is
+    # completable in the GUI without an external worker.
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    besch = ss.get(demo.SCHEMA_BESCHAFFUNG)
+    assert besch is not None
+
+    # Connector + scalar SQL-bound EXTERNAL element (C1/C4-C6).
+    assert "erp" in besch.connectors
+    kreditlimit = besch.data_elements["kreditlimit"]
+    assert kreditlimit.source is DataSourceKind.EXTERNAL
+    assert kreditlimit.select is not None
+    assert kreditlimit.select.connector_id == "erp"
+
+    # The offer step is interactive (staff rule + input mask that supplies
+    # betrag/lieferant_nr), so a person can complete it -- no external worker.
+    angebote = _node_id(besch, "Angebote einholen")
+    assert angebote not in besch.service_bindings
+    assert besch.staff_rules[angebote].kind is StaffRuleKind.ROLE
+    assert {f.element_id for f in besch.forms[angebote].fields} == {"betrag", "lieferant_nr"}
+
+    # Structured staff rules: an org-unit leaf and an OR combinator.
+    budget = _node_id(besch, "Budget pr\u00fcfen")
+    freigeben = _node_id(besch, "Bestellung freigeben")
+    assert besch.staff_rules[budget].kind is StaffRuleKind.ORG_UNIT
+    assert besch.staff_rules[freigeben].kind is StaffRuleKind.OR
+
+
+def test_demo_beschaffung_flow_completes_without_worker() -> None:
+    # Regression: the procurement demo must be playable end-to-end by a person in
+    # the GUI -- no external worker. Every step is interactive; filling the input
+    # masks supplies betrag/lieferant_nr/budget_ok and the instance reaches
+    # COMPLETED (previously "Angebote einholen" was an automatic external task and
+    # the flow got stuck with the values never set).
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    besch = hydrate_org(ss.get(demo.SCHEMA_BESCHAFFUNG), make_org_resolver(orgs))  # type: ignore[arg-type]
+
+    ctx = ExecutionContext(make_resolver(InMemorySchemaStore()), ins)
+    inst = instantiate(
+        besch, instance_id="besch-test-1", context=ctx, allow_unreleased=True, is_test=True
+    )
+
+    angebote = _node_id(besch, "Angebote einholen")
+    budget = _node_id(besch, "Budget pr\u00fcfen")
+    freigeben = _node_id(besch, "Bestellung freigeben")
+
+    # A person fills the mask on the offer step -> the two values are set here.
+    inst = complete_activity(
+        inst, besch, angebote, {"betrag": 1200.0, "lieferant_nr": 42}, context=ctx
+    )
+    inst = complete_activity(inst, besch, budget, {"budget_ok": True}, context=ctx)
+    inst = complete_activity(inst, besch, freigeben, None, context=ctx)
+
+    assert inst.state is InstanceState.COMPLETED
+    assert inst.data_values["betrag"] == 1200.0
+    assert inst.data_values["lieferant_nr"] == 42
+    assert inst.data_values["budget_ok"] is True
+
+
+def test_demo_org_has_two_level_hierarchy() -> None:
+    # The shared org forms a real tree (management over sales and purchasing) so
+    # the org chart shows more than a flat list.
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    org = orgs.get(demo.ORG_ID)
+    assert org is not None
+
+    assert org.org_units["vertrieb"].parent_id == "leitung"
+    assert org.org_units["einkauf-abt"].parent_id == "leitung"
+    assert org.org_units["leitung"].manager_id == "a-sabine"
+
+
+# --- store clear ----------------------------------------------------------
+
+
+def test_in_memory_stores_clear() -> None:
+    ss, ins, orgs, log = _fresh_stores()
+    demo.load_demo(schema_store=ss, instance_store=ins, org_store=orgs, audit_log=log)
+    ss.clear()
+    ins.clear()
+    orgs.clear()
+    log.clear()
+    assert ss.list_ids() == []
+    assert ins.list_ids() == []
+    assert orgs.list_ids() == []
+    assert log.list_all() == []
+
+
+# --- admin reset endpoint -------------------------------------------------
+
+
+@pytest.fixture
+def clean_api() -> Iterator[None]:
+    """Isolate the module-global stores so a reset never touches other tests."""
+
+    saved = (
+        api_module._store,
+        api_module._instances,
+        api_module._org_store,
+        api_module._audit,
+        api_module._resolver,
+        api_module._org_resolver,
+        api_module._context,
+    )
+    api_module._store = InMemorySchemaStore()
+    api_module._instances = InMemoryInstanceStore()
+    api_module._org_store = InMemoryOrgStore()
+    api_module._audit = InMemoryAuditLog()
+    api_module._resolver = make_resolver(api_module._store)
+    api_module._org_resolver = make_org_resolver(api_module._org_store)
+    api_module._context = ExecutionContext(api_module._resolver, api_module._instances)
+    try:
+        yield
+    finally:
+        (
+            api_module._store,
+            api_module._instances,
+            api_module._org_store,
+            api_module._audit,
+            api_module._resolver,
+            api_module._org_resolver,
+            api_module._context,
+        ) = saved
+
+
+@pytest.fixture
+def clean_password_api(clean_api: None) -> Iterator[PasswordAuthBackend]:
+    """As ``clean_api`` but also swap in a fresh password backend with an admin."""
+
+    original = api_module._auth_backend
+    backend = PasswordAuthBackend(InMemoryCredentialStore())
+    backend.store.put_user(
+        User(
+            login="admin",
+            password_hash=hash_password("admin-pw1"),
+            subject="admin",
+            roles=frozenset({"admin"}),
+            display_name="Ada Admin",
+            must_change=False,
+        )
+    )
+    api_module._auth_backend = backend
+    try:
+        yield backend
+    finally:
+        api_module._auth_backend = original
+
+
+def test_admin_reset_loads_and_clears_demo(clean_api: None) -> None:
+    # Open dev mode grants admin -> load the demo, then wipe to zero.
+    loaded = client.post("/admin/reset", json={"load_demo": True})
+    assert loaded.status_code == 200
+    body = loaded.json()
+    assert body["demo_loaded"] is True
+    assert body["schemas"] == 2
+    assert body["instances"] == 3
+    assert body["org_models"] == 1
+    assert set(client.get("/schemas").json()) == {
+        demo.SCHEMA_URLAUB,
+        demo.SCHEMA_BESCHAFFUNG,
+    }
+    assert len(client.get("/instances").json()) == 3
+
+    emptied = client.post("/admin/reset", json={"load_demo": False})
+    assert emptied.status_code == 200
+    empty_body = emptied.json()
+    assert empty_body["schemas"] == 0
+    assert empty_body["instances"] == 0
+    assert empty_body["org_models"] == 0
+    assert client.get("/schemas").json() == []
+
+
+def _login(backend: PasswordAuthBackend, login: str) -> str:
+    return backend.login(login, "admin-pw1").token
+
+
+def test_admin_reset_requires_admin(clean_password_api: PasswordAuthBackend) -> None:
+    backend = clean_password_api
+    backend.store.put_user(
+        User(
+            login="vera.viewer",
+            password_hash=hash_password("admin-pw1"),
+            subject="vera.viewer",
+            roles=frozenset({"viewer"}),
+            must_change=False,
+        )
+    )
+    token = backend.login("vera.viewer", "admin-pw1").token
+    resp = client.post(
+        "/admin/reset",
+        json={"load_demo": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_admin_reset_keeps_acting_admin_login(
+    clean_password_api: PasswordAuthBackend,
+) -> None:
+    backend = clean_password_api
+    backend.store.put_user(
+        User(
+            login="leftover.user",
+            password_hash=hash_password("admin-pw1"),
+            subject="leftover.user",
+            roles=frozenset({"operator"}),
+            must_change=False,
+        )
+    )
+    token = _login(backend, "admin")
+    resp = client.post(
+        "/admin/reset",
+        json={"load_demo": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    # The acting admin survives; the unrelated login is wiped.
+    assert backend.store.get_user("admin") is not None
+    assert backend.store.get_user("leftover.user") is None
+    # The admin's session is still valid afterwards.
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
+def test_admin_reset_demo_seeds_usable_logins(
+    clean_password_api: PasswordAuthBackend,
+) -> None:
+    backend = clean_password_api
+    token = _login(backend, "admin")
+    resp = client.post(
+        "/admin/reset",
+        json={"load_demo": True},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    # Outside the public demo the example logins get a random password that the
+    # reset reports exactly once -- never the one printed on the website.
+    password = resp.json()["example_password"]
+    assert password and password != demo.DEMO_PASSWORD
+    with pytest.raises(AuthError):
+        backend.login("mara.modell", demo.DEMO_PASSWORD)
+    # With the reported password the demo operator works out of the box.
+    erika = backend.login("erika.sander", password)
+    assert "operator" in erika.principal.roles
+    assert erika.principal.agent_id == "a-erika"
+    # ... and she has an open task from the freshly loaded instances.
+    tasks = client.get(
+        "/me/tasks", headers={"Authorization": f"Bearer {erika.token}"}
+    )
+    assert tasks.status_code == 200
+    assert len(tasks.json()) >= 1
+
+
+@pytest.mark.parametrize(
+    ("loader", "users"),
+    [
+        (demo.load_demo, demo.DEMO_USERS),
+        (demo_o2c.load_o2c, demo_o2c.O2C_USERS),
+    ],
+    ids=["demo", "o2c"],
+)
+def test_every_demo_staff_rule_has_a_seeded_login(
+    loader: Callable[..., None],
+    users: list[tuple[str, str, frozenset[str], str | None]],
+) -> None:
+    """Guard: every step of the shipped demos is reachable by a seeded login.
+
+    A staff rule may be perfectly valid (Z2: it resolves to *some* agent) and the
+    step still be dead in the demo -- namely when none of those agents has a
+    login. The process then starts, activates the step and stalls: the task sits
+    in a worklist nobody can open. That is invisible to the validator, because
+    logins are a boundary concern, and it is exactly what happened with "Angebote
+    einholen" (role Einkauf -> only Paul Klein, who had no login), which made the
+    procurement draft impossible to play through.
+
+    Checked with the validator's own design-time over-approximation, so a rule
+    that only resolves at runtime (NodePerformingAgent, ``None`` = universe) is
+    correctly not flagged.
+    """
+    schemas, instances, orgs, audit = _fresh_stores()
+    loader(schema_store=schemas, instance_store=instances, org_store=orgs, audit_log=audit)
+    with_login = {agent for *_, agent in users if agent}
+
+    unreachable: list[str] = []
+    for schema_id in schemas.list_ids():
+        schema = schemas.get(schema_id)
+        assert schema is not None
+        # A shared org model leaves the embedded copy empty; resolve through the
+        # store whenever the schema references one.
+        org = orgs.get(schema.org_model_id) if schema.org_model_id else schema.org_model
+        assert org is not None
+        for node_id, rule in schema.staff_rules.items():
+            possible = _possible_agents(org, rule)
+            if possible is not None and not (possible & with_login):
+                label = schema.nodes[node_id].label or node_id
+                unreachable.append(f"{schema_id}/{label}: {sorted(possible)}")
+
+    assert not unreachable, "Schritte ohne bedienbaren Login: " + "; ".join(unreachable)
+
+
+def test_seeded_history_has_a_time_course_the_kpis_can_show() -> None:
+    """Der Datensatz schrieb seine ganze Historie in Millisekunden.
+
+    Folge: „Ø Durchlaufzeit 0.0 s" und in der Engpass-Tabelle durchweg „keine
+    Zeitdaten" -- die Zeitauswertung waere am Schaufenster nicht vorfuehrbar.
+    Deshalb liegt die Historie rueckdatiert in
+    der Vergangenheit, und jeder abgeschlossene Schritt bringt seinen
+    Bereit-Zeitpunkt mit.
+    """
+
+    from procworks.audit import EventType, compute_kpis
+
+    schemas = InMemorySchemaStore()
+    instances = InMemoryInstanceStore()
+    orgs = InMemoryOrgStore()
+    audit = InMemoryAuditLog()
+    demo.load_demo(
+        schema_store=schemas,
+        instance_store=instances,
+        org_store=orgs,
+        audit_log=audit,
+    )
+    events = audit.list_all()
+
+    stamps = [e.timestamp for e in events]
+    assert stamps == sorted(stamps), "die Historie laeuft nicht vorwaerts"
+    assert (stamps[-1] - stamps[0]).total_seconds() > 3600, (
+        "die ganze Historie liegt wieder auf derselben Stunde"
+    )
+    assert stamps[-1] < datetime.now(UTC), "die Historie liegt in der Zukunft"
+
+    # Jeder Abschluss traegt seinen Bereit-Zeitpunkt -- daraus entsteht die
+    # Schritt-Dauer der Engpass-Tabelle.
+    done = [e for e in events if e.event_type is EventType.ACTIVITY_COMPLETED]
+    assert done, "keine Abschluesse geseedet -- Waechter angleichen"
+    assert all(e.detail.get("ready_at") for e in done)
+
+    kpis = compute_kpis(events)
+    assert kpis.avg_cycle_seconds and kpis.avg_cycle_seconds > 60
+    assert kpis.activity_stats
+    assert all(s.avg_total_seconds is not None for s in kpis.activity_stats)
+
+
+
+def test_a_unit_head_s_leave_request_has_an_approver_with_a_login() -> None:
+    """Tom's request goes to the head above (Sabine, never to himself) -- she needs
+    a demo login, or the demo stalls at "Genehmigung durch Leitung"."""
+
+    from procworks.store import (
+        InMemoryInstanceStore,
+        InMemoryOrgStore,
+        InMemorySchemaStore,
+        hydrate_org,
+        make_org_resolver,
+    )
+
+    schema_store, org_store = InMemorySchemaStore(), InMemoryOrgStore()
+    demo.load_demo(
+        schema_store=schema_store,
+        instance_store=InMemoryInstanceStore(),
+        org_store=org_store,
+        audit_log=InMemoryAuditLog(),
+    )
+    stored = schema_store.get(demo.SCHEMA_URLAUB)
+    assert stored is not None
+    urlaub = hydrate_org(stored, make_org_resolver(org_store))
+    instance = instantiate(urlaub)
+    by_label = {v.label: n for n, v in urlaub.nodes.items()}
+    instance.performed_by[by_label["Antrag erfassen"]] = "a-tom"  # Tom leitet den Vertrieb
+
+    approvers = assignment.eligible_agents(urlaub, by_label["Genehmigung durch Leitung"], instance)
+
+    logins = {agent for *_, agent in demo.DEMO_USERS if agent}
+    assert approvers and approvers <= logins, approvers
+    assert "a-tom" not in approvers

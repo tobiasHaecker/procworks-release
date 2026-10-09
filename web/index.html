@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: BUSL-1.1 -->
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ProcWorks &middot; Client</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="tour/tour.css" />
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">CbC</div>
+      <div class="brand-text">
+        <b>ProcWorks</b>
+        <small>Correctness by Construction</small>
+      </div>
+      <button id="sidebar-toggle" class="side-collapse" type="button"
+              title="Men&uuml; ein-/ausklappen" aria-label="Men&uuml; ein-/ausklappen">&laquo;</button>
+    </div>
+    <nav class="nav" id="nav">
+      <button data-view="model" data-tour="nav.model" class="active" title="Modellieren"><span class="ico">&#9635;</span> <span class="lbl">Modellieren</span></button>
+      <button data-view="data" title="Datensicht"><span class="ico">&#9783;</span> <span class="lbl">Datensicht</span></button>
+      <button data-view="org" title="Ressourcensicht"><span class="ico">&#9823;</span> <span class="lbl">Ressourcensicht</span></button>
+      <button data-view="run" title="Ausf&uuml;hrung"><span class="ico">&#9654;</span> <span class="lbl">Ausf&uuml;hrung</span></button>
+      <button data-view="tasks" data-tour="nav.tasks" title="Meine Aufgaben"><span class="ico">&#9776;</span> <span class="lbl">Meine Aufgaben</span></button>
+      <button data-view="testrun" data-tour="nav.testrun" title="Pr&uuml;finstanz"><span class="ico">&#9879;</span> <span class="lbl">Pr&uuml;finstanz</span></button>
+      <button data-view="monitor" data-tour="nav.monitor" title="Monitoring"><span class="ico">&#9788;</span> <span class="lbl">Monitoring</span></button>
+      <button data-view="integration" title="Integration"><span class="ico">&#8644;</span> <span class="lbl">Integration</span></button>
+      <button data-view="admin" data-tour="nav.admin" title="Administration"><span class="ico">&#9881;</span> <span class="lbl">Administration</span></button>
+      <button data-view="help" data-tour="nav.help" title="Hilfe"><span class="ico">&#9432;</span> <span class="lbl">Hilfe</span></button>
+    </nav>
+    <div class="side-foot">
+      <div>Status: <span id="conn-pill" class="pill pill-gray">getrennt</span></div>
+      <div class="theme-switch" role="group" aria-label="Farbschema">
+        <button type="button" class="theme-btn" data-theme-choice="dark" title="Dunkles Farbschema">&#9789; Dunkel</button>
+        <button type="button" class="theme-btn" data-theme-choice="light" title="Helles Farbschema">&#9788; Hell</button>
+      </div>
+      <label class="api-field">API
+        <input id="api-base" type="text" spellcheck="false" />
+      </label>
+      <label class="api-field" id="token-field">Token
+        <input id="auth-token" type="password" spellcheck="false" autocomplete="off"
+               placeholder="Bearer-Token (optional)" />
+      </label>
+      <div id="auth-user" class="muted">Modus: offen (kein Login)</div>
+      <button id="logout-btn" class="btn ghost small" style="display:none">Abmelden</button>
+      <div class="muted">Die GUI ist ein reiner Web-Client &ndash; alle Korrektheits&shy;entscheidungen trifft der Kern.</div>
+      <div class="muted disclaimer-foot">Nutzung auf eigenes Risiko &middot; ohne Gew&auml;hr, keine Haftung &middot;
+        <a href="https://github.com/tobiasHaecker/procworks-release/blob/main/DISCLAIMER.md" target="_blank" rel="noopener">Haftungsausschluss</a></div>
+      <div id="app-version" class="muted app-version">ProcWorks</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button id="nav-burger" class="nav-burger" type="button" aria-expanded="false"
+              title="Men&uuml; &ouml;ffnen" aria-label="Men&uuml; &ouml;ffnen">&#9776;</button>
+      <h1 id="view-title">Modellieren</h1>
+      <span class="sub" id="view-sub"></span>
+      <span class="spacer"></span>
+      <!-- Abzeichen der gefuehrten Tour ("es wird nichts gespeichert"); leer,
+           solange keine Sandkasten-Tour laeuft. -->
+      <span id="tour-badge-slot"></span>
+      <span id="user-pill" class="pill pill-gray">offen</span>
+      <div id="schema-picker" class="picker"></div>
+    </header>
+    <section class="content" id="content"></section>
+  </main>
+
+  <!-- Abdunkelnder Hintergrund hinter der ausgefahrenen Mobil-Schublade; nur in
+       der mobilen Ansicht sichtbar (styles.css), schliesst das Menue per Tipp. -->
+  <div id="nav-scrim" class="nav-scrim"></div>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root" class="toast-root"></div>
+<!-- Overlay der gefuehrten Tour; leer, solange keine laeuft. -->
+<div id="tour-root"></div>
+<div id="auth-overlay" class="auth-overlay" style="display:none"></div>
+
+<!-- Der Client: Bereichsskripte in fester Reihenfolge, app.js zuletzt
+     (startet den Client und braucht dafuer alle Deklarationen davor). -->
+<script src="js/core.js"></script>
+<script src="js/findings.js"></script>
+<script src="js/client.js"></script>
+<script src="js/graph.js"></script>
+<script src="js/modelling.js"></script>
+<script src="js/subprocess.js"></script>
+<script src="js/data-resources.js"></script>
+<script src="js/execution.js"></script>
+<script src="js/monitoring.js"></script>
+<script src="js/admin.js"></script>
+<script src="js/tasks.js"></script>
+<script src="js/sandbox.js"></script>
+<script src="js/integration.js"></script>
+<script src="js/help.js"></script>
+<script src="app.js"></script>
+<!-- Gefuehrte Tour: Daten, Aufzeichnung, Engine. Nach app.js geladen, weil die
+     Engine dessen Helfer (state, render, el, ...) verwendet. -->
+<script src="tour/fixtures.js"></script>
+<script src="tour/tours.js"></script>
+<script src="tour/engine.js"></script>
+</body>
+</html>

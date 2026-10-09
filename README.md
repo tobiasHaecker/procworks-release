@@ -1,0 +1,289 @@
+<!-- SPDX-License-Identifier: BUSL-1.1 -->
+# ProcWorks · Correctness by Construction
+
+> Self-hosted Werkzeug zur **stabilen Prozessmodellierung**,
+> **Instanzerstellung/-ausführung** und **intuitiven, modernen Bedienung** –
+> auf Basis der Forschungsidee *Correctness by Construction* (ADEPT2,
+> Universität Ulm).
+
+[![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE)
+
+Dies ist das **Auslieferungs-Repository** von ProcWorks: die Codebasis
+(Backend-Kern + Web-Client), Lizenz und die Anleitung zur Inbetriebnahme.
+Entwicklung, Konzeptdokumente und Historie liegen in einem separaten,
+internen Repository.
+
+---
+
+## Schnellstart: In 15 Minuten einsatzbereit
+
+> ⚠️ **Haftungsausschluss – bitte vor der Inbetriebnahme lesen.** ProcWorks wird
+> **„wie besehen", ohne jede Gewährleistung und ohne jede Haftung**
+> bereitgestellt. Inbetriebnahme und Nutzung erfolgen **ausschließlich auf
+> eigenes Risiko**. Prüfen Sie das Werkzeug zuerst in einer **isolierten
+> Testumgebung** und legen Sie **Backups** an. Vollständiger Text:
+> [DISCLAIMER.md](DISCLAIMER.md).
+
+> Für mittelständische Unternehmen **ohne eigene IT-Abteilung**. Sie brauchen
+> kein Vorwissen – nur einen Rechner mit Internet. ProcWorks startet als ein
+> einziger, in sich geschlossener Container-Verbund (Datenbank + Server +
+> Oberfläche); Sie installieren **eine** Voraussetzung und führen **einen**
+> Befehl aus.
+
+### Standardfall: Windows Server (nichts vorinstalliert)
+
+Auf einem frischen Windows Server sind genau **drei kostenlose Programme** nötig.
+Jedes wird per Mausklick installiert – die ausführliche, bebilderte
+Schritt-für-Schritt-Anleitung steht in
+[docs/Windows-Server-Setup.md](docs/Windows-Server-Setup.md).
+
+1. **WSL2 aktivieren** – einmalig in der PowerShell (als Administrator):
+   `wsl --install`, danach den Server neu starten.
+2. **Docker Desktop** installieren – von <https://www.docker.com/products/docker-desktop/>,
+   bei der Installation „Use WSL 2" aktiviert lassen und einmal starten, bis
+   „Engine running" erscheint.
+3. **Git** installieren – von <https://git-scm.com/download/win> (Standardoptionen
+   genügen).
+
+Danach in der PowerShell **diese vier Zeilen** ausführen (holt ProcWorks und
+startet alles):
+
+```powershell
+cd C:\
+git clone https://github.com/tobiasHaecker/procworks-release.git ProcWorks
+cd C:\ProcWorks
+docker compose -f deploy/docker-compose.full.yml up -d
+```
+
+Fertig. Im Browser `http://localhost` öffnen – es erscheint das Login-Fenster.
+
+Der Stack lädt dabei die fertigen, auf Sicherheitslücken geprüften Images der
+Version dieses Checkouts von `ghcr.io` herunter; gebaut wird nichts. Wer den
+Quelltext selbst ändert, startet mit `up --build -d` und baut aus dem Checkout.
+
+#### Erste Anmeldung als Administrator
+
+- **Login:** `admin`
+- **Passwort:** ein **einmaliges Start-Passwort**, das beim allerersten Start
+  automatisch erzeugt und **ins Server-Log geschrieben** wird. Beim ersten
+  Anmelden verlangt das System sofort ein eigenes, neues Passwort.
+
+So lesen Sie das Start-Passwort aus dem Server-Log – in der **PowerShell**, aus
+dem Ordner `C:\ProcWorks`:
+
+```powershell
+docker compose -f deploy/docker-compose.full.yml logs api | Select-String "Initial admin"
+```
+
+Die gesuchte Zeile sieht so aus (das Passwort steht hinter `temporary password=`):
+
+```text
+Initial admin account created (login='admin', temporary password='…').
+```
+
+> Tipp: Wer das Passwort lieber vorab selbst festlegt, setzt es in der
+> Compose-Datei über `PROCWORKS_ADMIN_PASSWORD` (siehe
+> [Windows-Anleitung, Abschnitt 5](docs/Windows-Server-Setup.md)). Dann entfällt
+> der Blick ins Log.
+
+### macOS / Linux (zum Ausprobieren)
+
+Voraussetzung ist nur **Docker** (Docker Desktop auf macOS, Docker Engine unter
+Linux). Auf dem Mac nach der Installation Docker Desktop einmal starten und dann
+ein **neues Terminalfenster** öffnen – erst dort findet die Kommandozeile den
+Befehl `docker`. Dann:
+
+```bash
+git clone https://github.com/tobiasHaecker/procworks-release.git procworks
+cd procworks
+docker compose -f deploy/docker-compose.full.yml up -d
+# Oberfläche: http://localhost   ·   Login: admin
+# Das einmalige Start-Passwort steht im Server-Log (hinter "temporary password="):
+docker compose -f deploy/docker-compose.full.yml logs api | grep "Initial admin"
+```
+
+### Ist alles bereit? Der Selbsttest
+
+Nach dem Start prüft **ein Befehl**, ob die Installation wirklich einsatzbereit
+ist – mit Zeitangabe je Schritt: Dienste laufen, Server und Oberfläche antworten,
+das Start-Passwort liegt vor, eine Sicherung lässt sich anlegen **und** wieder
+einspielen (geprüft in einer Wegwerf-Datenbank, Ihre Daten bleiben unberührt).
+
+```bash
+sh deploy/selftest.sh
+```
+
+Unter Windows in **WSL** oder **Git Bash** aus dem Ordner `C:\ProcWorks`
+ausführen. Am Ende steht „Ergebnis: bestanden" oder, was genau fehlt.
+
+### Sofort ausprobieren: Beispieldaten laden
+
+Damit alle Funktionen **sofort greifbar** sind, bringt ProcWorks fertige
+Beispieldaten mit (eine Organisation „Acme", zwei Prozesse und drei Vorgänge –
+zwei laufend, einer abgeschlossen). So laden Sie sie:
+
+1. Als **Administrator** anmelden.
+2. In die Sicht **Administration** wechseln und zum Bereich **„Wartung"**
+   scrollen.
+3. **„Beispieldaten laden"** klicken und bestätigen.
+
+Daneben steht **„Order-to-Cash-Beispiel laden"** — ein deutlich umfangreicherer
+Datensatz, der einen kompletten Geschäftsprozess vom Angebot über Lieferung und
+Rechnung bis ins Mahnwesen abbildet (sechs Prozesse, eine eigene Beispielfirma,
+neun vorbereitete Vorgänge). Er eignet sich, wenn Sie sehen möchten, wie ein
+echter Ablauf mit mehreren Abteilungen aussieht; für den ersten Eindruck sind die
+normalen Beispieldaten die schnellere Wahl.
+
+Derselbe Bereich enthält **„Auf Null zurücksetzen"**, um jederzeit wieder mit
+einem leeren System zu starten. Alles davon ist **nur für Administratoren**
+sichtbar.
+
+Beim **allerersten Start** geht es auch ohne Anmeldung und ohne Klicks: Stellen
+Sie dem Startbefehl die beiden Schalter voran, dann sind die Beispieldaten schon
+da, sobald die Oberfläche erscheint.
+
+```bash
+PROCWORKS_LOAD_DEMO=1 PROCWORKS_LOAD_O2C=1 \
+  docker compose -f deploy/docker-compose.full.yml up -d
+```
+
+In der PowerShell entspricht das `$env:PROCWORKS_LOAD_DEMO="1"` (und dasselbe für
+`PROCWORKS_LOAD_O2C`) **vor** dem `docker compose`-Aufruf. Die Schalter greifen
+**nur, solange noch kein Prozess gespeichert ist** – eine laufende Installation
+bleibt unberührt, ein zweiter Start ändert nichts.
+
+Nach dem Laden können Sie sich mit den **Testbenutzern** anmelden. Ihr
+gemeinsames Passwort wird bei jedem Laden **neu und zufällig** vergeben – ein
+fest vorgegebenes Passwort wäre auf Ihrem Server eine offene Tür. Nach
+„Beispieldaten laden“ zeigt die Oberfläche es **einmal** an; beim Laden über die
+Startschalter steht es im Server-Log:
+
+```bash
+docker compose -f deploy/docker-compose.full.yml logs api | grep "Example accounts"
+```
+
+
+| Login | Person | Rolle | Sieht / kann |
+| --- | --- | --- | --- |
+| `mara.modell` | Mara Modell | Modellierer | Prozesse modellieren, Daten/Organisation pflegen |
+| `erika.sander` | Erika Sander | Bearbeiter | Aufgaben erledigen (hat offene Urlaubsanträge) |
+| `tom.berger` | Tom Berger | Bearbeiter (Leitung) | Genehmigungen erteilen |
+| `paul.klein` | Paul Klein | Bearbeiter (Einkauf) | Angebote einholen (Beschaffungsantrag) |
+| `sabine.chef` | Sabine Chef | Bearbeiter (Geschäftsleitung) | Toms Urlaubsantrag genehmigen (Vorgesetzte der Leitung) |
+| `vera.viewer` | Vera Viewer | Leser | Monitoring nur ansehen |
+
+> Die Testbenutzer existieren erst **nach** dem Laden der Beispieldaten und nur
+> im Login-Betrieb (Standard im mitgelieferten Stack). Bitte vor dem
+> Produktivbetrieb über **„Auf Null zurücksetzen"** entfernen.
+
+### Einstellungen: E-Mail und Anbindungen (`deploy/.env`)
+
+Zusätzliche Einstellungen gehören in eine Datei **`deploy/.env`** neben der
+Compose-Datei – Docker liest sie beim Start automatisch, die Compose-Datei
+selbst bleibt unverändert (und ein Update überschreibt die Datei nicht). Danach
+einmal `docker compose -f deploy/docker-compose.full.yml up -d` ausführen.
+
+**E-Mail-Benachrichtigungen** (modellierte Mails an Bearbeiter oder
+Gruppenpostfächer):
+
+```ini
+PROCWORKS_SMTP_HOST=smtp.ihre-firma.de
+PROCWORKS_SMTP_PORT=587
+PROCWORKS_SMTP_USER=procworks@ihre-firma.de
+PROCWORKS_SMTP_PASSWORD=geheim
+PROCWORKS_MAIL_FROM=procworks@ihre-firma.de
+# PROCWORKS_SMTP_TLS=0   nur für Server ohne STARTTLS
+```
+
+Ob es funktioniert, zeigt die Verwaltung im Bereich **„E-Mail-Ausgang"**.
+Ohne Mailserver stehen Benachrichtigungen dort als „verworfen – kein
+Mailserver“; sie werden auch später nicht nachgeschickt.
+
+**Anbindungen und Worker** (andere Programme, die Aufgaben abholen oder
+Vorgänge starten): Sie melden sich nicht mit Passwort an, sondern mit einem
+**Maschinen-Token** der Rolle `integration`. Ein langes Zufallswort als Token
+wählen und mit den nötigen Rechten eintragen:
+
+```ini
+PROCWORKS_TOKENS_JSON={"<langes-zufallswort>": {"subject": "erp-worker", "roles": ["integration"], "scopes": ["tasks:fetch", "tasks:complete"]}}
+```
+
+Welche Rechte (`scopes`) es gibt und wie ein Worker arbeitet, beschreibt der
+[Integrations-Leitfaden](docs/Integrations-Leitfaden.md). Andere Rollen als
+`integration` nimmt ProcWorks für Tokens neben den Passwort-Logins nicht an.
+
+## Versionen und Updates
+
+**Dieses Repository stellt nur die jeweils aktuelle Version bereit.** Ältere
+Versionen sind veraltet und dürfen nicht mehr installiert werden; sie
+enthalten Fehler, die in der aktuellen Version behoben sind. Sie bleiben im
+Bereich [Releases](https://github.com/tobiasHaecker/procworks-release/releases)
+aufgelistet – jeweils mit diesem Hinweis und den behobenen Fehlern, aber ohne
+herunterladbaren Code. Welche Version welchen Fehler behoben hat, steht auch
+in der [Versionshistorie](docs/Versionshistorie.md); was
+die aktuelle Version neu bringt, auf ihrer
+[Release-Seite](https://github.com/tobiasHaecker/procworks-release/releases/latest).
+
+**Bitte halten Sie Ihre Installation aktuell.** Das Update (vorher eine
+Sicherung anlegen):
+
+```bash
+git fetch origin
+git reset --hard origin/main
+docker compose -f deploy/docker-compose.full.yml pull
+docker compose -f deploy/docker-compose.full.yml up -d
+```
+
+Weil das Repository keine Historie älterer Versionen enthält, funktioniert
+`git pull` nicht; der Weg oben funktioniert von jeder älteren Version aus.
+Ihre Einstellungen in `deploy/.env` bleiben erhalten; ein dort gesetztes
+`PROCWORKS_VERSION` bitte entfernen, es hielte die alte Version fest. Details, auch für
+Windows: [Windows-Server-Setup](docs/Windows-Server-Setup.md), Abschnitt
+„Update auf eine neue Version“.
+
+## Inhalt dieses Repositories
+
+```text
+.
+- core/                        # Headless Backend-Kern (Python/FastAPI)
+- web/                         # Schlanker No-Build-Web-Client (HTML/CSS/JS)
+- deploy/                      # Caddyfile, docker-compose.full.yml, Helm-Chart
+- docs/Windows-Server-Setup.md # Ausführliche Installations- und Betriebsanleitung
+- docs/Betriebs-Backup-Leitfaden.md # Sichern & Wiederherstellen im Betrieb
+- docs/PITR-Leitfaden.md        # Optional: Point-in-Time-Recovery (fortgeschritten)
+- docs/Versionshistorie.md     # Alle Versionen mit Status und behobenen Fehlern
+- LICENSE                      # Business Source License 1.1
+- DISCLAIMER.md                # Vollständiger Haftungsausschluss
+```
+
+Details zum Backend-Kern (API-Endpunkte, lokale Entwicklung, Tests):
+[core/README.md](core/README.md).
+
+## Datensicherung
+
+Der mitgelieferte Stack sichert die Datenbank **automatisch täglich** (eigener
+`backup`-Dienst, keine Einrichtung nötig). Wie Sie Sicherungen ansehen, außer
+Haus kopieren, verschlüsseln und im Ernstfall zurückspielen, steht im
+[Betriebs-Backup-Leitfaden](docs/Betriebs-Backup-Leitfaden.md).
+
+## Lizenz
+
+Veröffentlicht unter der Business Source License 1.1 (BUSL-1.1) –
+mit einsehbarem Quellcode (source-available, kein Open Source im Sinne
+der OSI; ab dem Change Date Apache-2.0) und kostenlos zum Testen, Entwickeln und für
+nicht-konkurrierende Produktivnutzung, ohne jegliche Gewährleistung
+oder Haftung. Eine konkurrierende kommerzielle Nutzung (insbesondere
+das Anbieten als gehosteter/eingebetteter Dienst im Wettbewerb zum
+Lizenzgeber oder der Weiterverkauf als kommerzielles
+Prozessmanagement-Produkt) erfordert eine kommerzielle Lizenz des
+Lizenzgebers. Siehe [LICENSE](LICENSE). Für kommerzielle Lizenzen wende dich
+an den Lizenzgeber.
+
+### Haftungsausschluss
+
+ProcWorks wird **„wie besehen" (as is)**, **ohne jede Gewährleistung** und
+**ohne jede Haftung** bereitgestellt. Bezug, Installation, Inbetriebnahme und
+Nutzung erfolgen **ausschließlich auf eigenes Risiko und in eigener
+Verantwortung**. Vollständiger Text: [DISCLAIMER.md](DISCLAIMER.md).
+
+© 2026 Tobias Häcker – alle Rechte vorbehalten.

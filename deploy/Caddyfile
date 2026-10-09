@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: BUSL-1.1
+# Reverse proxy + TLS + static web serving for ProcWorks (roadmap step 16).
+#
+# Caddy serves the SPA static assets from /srv and reverse-proxies the API under
+# the same origin at /api/*, so the browser talks to a single host over HTTPS.
+# Caddy obtains and renews certificates automatically (Let's Encrypt) when a
+# public domain + email are configured.
+#
+# Configuration via environment variables (see deploy/docker-compose.full.yml):
+#   SITE_ADDRESS  - the site address Caddy listens on.
+#                   * ":80"            -> plain HTTP (local/demo, default)
+#                   * "example.com"    -> automatic HTTPS via Let's Encrypt
+#   API_UPSTREAM  - host:port of the API service (default "api:8000").
+#   ACME_EMAIL    - contact email for the ACME/Let's Encrypt account.
+
+{
+	# A contact email is only used for ACME/Let's Encrypt in HTTPS mode. Provide a
+	# harmless placeholder default so the config still parses when ACME_EMAIL is
+	# empty/unset (e.g. local ":80" HTTP testing). A real address overrides it.
+	email {$ACME_EMAIL:admin@example.invalid}
+}
+
+{$SITE_ADDRESS::80} {
+	encode gzip
+
+	# API: strip the /api prefix and forward to the stateless API server.
+	handle_path /api/* {
+		reverse_proxy {$API_UPSTREAM:api:8000}
+	}
+
+	# Everything else: serve the SPA static assets.
+	#
+	# Browser hardening for the app itself:
+	# CSP and X-Frame-Options sit HERE, not in the global header block, because
+	# the API's Swagger page (/api/docs) loads scripts from a CDN and would break.
+	# Keep the CSP identical to procworks.api.SPA_SECURITY_HEADERS (the demo
+	# container serves the SPA without Caddy); a test compares both.
+	#   style-src 'unsafe-inline': the client sets style attributes via el().
+	#   connect-src https:        : OIDC token endpoint and the demo feedback URL.
+	# Cache-Control no-cache: the client consists of several scripts that must
+	# come from the same version. The browser may keep them, but has to revalidate
+	# (ETag -> 304) on every load instead of reusing files of an older version.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+		header {
+			Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+			X-Frame-Options DENY
+			Cache-Control "no-cache"
+		}
+	}
+
+	header {
+		# Conservative security headers for the static app.
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

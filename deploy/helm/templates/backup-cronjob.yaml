@@ -1,0 +1,80 @@
+{{- /*
+Scheduled datensicherung. Runs backup-once.sh once per schedule against the
+external PostgreSQL (connection derived from the same DATABASE_URL secret as the
+API -- single source of truth; lib.sh parses it into PG* variables). Writes to
+the backups PVC and applies GFS retention. concurrencyPolicy: Forbid ensures two
+dumps never overlap. The scripts come from the read-only ConfigMap.
+*/ -}}
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "procworks.backup.fullname" . }}
+  labels:
+    {{- include "procworks.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: {{ .Values.backup.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "procworks.labels" . | nindent 8 }}
+        app.kubernetes.io/component: backup
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "procworks.labels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: {{ .Values.backup.image | quote }}
+              imagePullPolicy: {{ .Values.backup.pullPolicy }}
+              command: ["/bin/sh", "/opt/backup/backup-once.sh"]
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "procworks.database.secretName" . }}
+                      key: {{ .Values.database.secretKey }}
+                - name: BACKUP_DIR
+                  value: /backups
+                - name: BACKUP_KEEP_DAILY
+                  value: {{ .Values.backup.keepDaily | quote }}
+                - name: BACKUP_KEEP_WEEKLY
+                  value: {{ .Values.backup.keepWeekly | quote }}
+                - name: BACKUP_KEEP_MONTHLY
+                  value: {{ .Values.backup.keepMonthly | quote }}
+                - name: PROCWORKS_VERSION
+                  value: {{ .Chart.AppVersion | quote }}
+                {{- if .Values.backup.passphraseSecret }}
+                - name: BACKUP_PASSPHRASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.passphraseSecret }}
+                      key: passphrase
+                {{- end }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /opt/backup
+                  readOnly: true
+                - name: backups
+                  mountPath: /backups
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ include "procworks.backup.configMapName" . }}
+                defaultMode: 0555
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ include "procworks.backup.pvcName" . }}
+{{- end }}

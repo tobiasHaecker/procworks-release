@@ -1,0 +1,157 @@
+# ProcWorks – Anleitung für Mitarbeiter (Aufgaben bearbeiten)
+
+Diese Anleitung richtet sich an **Sachbearbeiter**, die sich anmelden, ihre
+persönliche Arbeitsliste sehen und Aufgaben abarbeiten sollen. Sie besteht aus
+zwei Teilen:
+
+- **Teil A** – Was der Administrator **einmalig** vorbereitet (Voraussetzungen).
+- **Teil B** – Die **fertige Anleitung zum Weitergeben** an den Mitarbeiter.
+
+> ⚠️ **Hinweis zur Haftung.** ProcWorks wird ohne jede Gewährleistung und – soweit
+> gesetzlich zulässig – **ohne jede Haftung** bereitgestellt; die Nutzung erfolgt
+> auf eigenes Risiko. Fachliche Ergebnisse, Entscheidungen und Daten liegen in der
+> Verantwortung des Betreibers und der Anwender. Details:
+> [DISCLAIMER.md](../DISCLAIMER.md).
+
+---
+
+## Teil A: Voraussetzungen (durch den Administrator)
+
+Damit ein Mitarbeiter überhaupt Aufgaben sieht, müssen diese Punkte erfüllt sein:
+
+1. **Prozess ist freigegeben** (Kennzeichen „freigegeben“).
+   Nur ein freigegebenes Schema lässt sich instanziieren. Status in der Sicht
+   **Modellieren** prüfen.
+
+2. **Mindestens eine Instanz läuft.**
+   In der Sicht **Ausführung** den Prozess starten, damit eine laufende Instanz
+   mit offenen Aufgaben existiert.
+
+3. **Der Agent ist für die Aufgabe berechtigt.**
+   Die Bearbeiterregeln (Z/A, z. B. rollenbasiert) im Organisationsmodell
+   (Sicht **Ressourcensicht**) müssen den Agenten als berechtigt ausweisen.
+   Nur dann erscheint die Aufgabe in seiner Liste.
+
+4. **Login anlegen – gebunden an den Agenten, mit Rolle „Bearbeiter".**
+   In der **Ressourcensicht** in der Zeile des Agenten auf **„Login"** klicken:
+   - Rolle **Bearbeiter** (operator) auswählen — **zwingend**; ohne diese Rolle
+     sieht und erledigt der Mitarbeiter keine Aufgaben.
+   - Den Login-Vorschlag (`vorname.nachname`) übernehmen oder anpassen.
+   - Das **Initialpasswort** wird **einmalig** angezeigt (mit Knopf
+     „Kopieren“) → notieren und dem Mitarbeiter sicher übermitteln.
+   - Hat der Agent schon einen Login, steht in der Zeile „Login: …“ statt des
+     Knopfs. Passwort vergessen oder Login nicht mehr nötig? Unter
+     **Administration → Benutzer** lässt sich das Passwort zurücksetzen (neues
+     Initialpasswort, einmalig angezeigt) oder der Login löschen.
+
+> Weil der Login direkt über den **„Login"-Button in der Agentenzeile** erzeugt
+> wird, ist er fest mit genau diesem Agenten verknüpft. Dadurch zeigt
+> „Meine Aufgaben" automatisch *seine* Aufgaben (inkl. Vertretungen) – ganz ohne
+> Personenauswahl.
+
+---
+
+## Teil B: Anleitung für den Mitarbeiter (zum Weitergeben)
+
+**ProcWorks – Anmelden und Aufgaben bearbeiten**
+
+1. **Seite öffnen.**
+   Rufe im Browser die ProcWorks-Adresse auf:
+   `http://<server-adresse>` (bzw. `https://<eure-domain>`).
+   Es erscheint sofort ein **Anmeldefenster**.
+
+2. **Anmelden.**
+   Gib deinen **Login** (Form `vorname.nachname`) und das **Initialpasswort**
+   ein, das du erhalten hast.
+
+3. **Eigenes Passwort vergeben.**
+   Beim ersten Login wirst du aufgefordert, ein **eigenes Passwort** zu setzen
+   (mindestens 8 Zeichen). Danach bist du direkt angemeldet.
+
+4. **Zur Aufgabenliste wechseln.**
+   Klicke links in der Navigation auf **„Meine Aufgaben"**.
+   - Oben siehst du „✓ Angemeldet als &lt;dein Name&gt;".
+   - Darunter stehen unter **„Offene Aufgaben"** deine Aufgaben
+     (Spalten: Aufgabe, Prozess, Fällig, Berechtigte, Status).
+
+5. **Aufgabe übernehmen (optional, empfohlen im Team).**
+   Sehen mehrere Kollegen dieselbe Aufgabe (Status **„angeboten"**), kannst du
+   sie mit **„Übernehmen"** für dich reservieren: Bei allen anderen
+   verschwindet sie aus der Liste, bei dir steht sie fortan als
+   **„übernommen"** – niemand arbeitet versehentlich doppelt. Eine übernommene
+   Aufgabe kann nur **du** erledigen. Passt es doch nicht (z. B. keine Zeit),
+   klicke auf **„Zurücklegen"** – die Aufgabe wird wieder allen Berechtigten
+   angeboten. Auch eine Führungskraft kann eine übernommene Aufgabe
+   zurücklegen, falls jemand unerwartet ausfällt.
+
+6. **Aufgabe erledigen.**
+   Klicke bei einer Aufgabe auf **„Erledigen"**, fülle ggf. die abgefragten
+   Daten aus und bestätige. Fragt die Aufgabe nichts ab, erscheint eine kurze
+   Rückfrage – **Enter** oder **„Abschließen"** bestätigt. Das geht auch
+   **ohne** vorheriges Übernehmen –
+   Übernehmen lohnt sich, sobald mehrere Personen dieselbe Liste sehen. Die
+   Aufgabe verschwindet danach aus der Liste; Folgeaufgaben erscheinen
+   automatisch. Hast du gerade etwas eingetippt, aber noch nicht gespeichert
+   (z. B. eine Abwesenheit), bleibt die Liste stehen und oben erscheint
+   „Neue Daten sind da – Aktualisieren“; deine Eingabe geht nicht verloren.
+   - **Anhalten:** Eine übernommene Aufgabe kannst du **anhalten** (Status
+     „angehalten") und später mit **„Weiterarbeiten"** fortsetzen. In der
+     Regel läuft die Frist dabei weiter – das Anhalten macht die Pause nur
+     sichtbar. Nur wenn der Prozessmodellierer für den Schritt ausdrücklich
+     **Netto-Zeit** vorgesehen hat, hält die Pause auch die Frist-Uhr an.
+   - **Problem melden:** Kommst du nicht weiter (z. B. Unterlagen fehlen),
+     melde die Aufgabe mit Begründung als **gescheitert**. Sie ist dann
+     eingefroren, bis du oder eine Führungskraft den **Wiederanlauf**
+     auslöst – danach wird sie wieder allen Berechtigten angeboten, mit
+     frischer Frist.
+
+7. **Abwesenheit eintragen (Urlaub / Vertretung).**
+   Unten in **„Meine Aufgaben"** findest du den Bereich
+   **„Abwesenheit / Vertretung"**. Trage dort einen Zeitraum ein (**Von** / **Bis**,
+   optional eine Notiz wie „Urlaub") und klicke auf **„Abwesenheit eintragen"**.
+   Solange du abwesend bist, erhält deine hinterlegte **Vertretung** deine
+   Aufgaben **zusätzlich** – du selbst behältst sie ebenfalls, es geht also nichts
+   verloren. Bestehende Einträge kannst du dort auch wieder **entfernen**.
+   - Ist **keine Vertretung** hinterlegt, weist ein Hinweis darauf hin: Deine
+     Aufgaben bleiben dann während der Abwesenheit **dir** zugewiesen. Die
+     Vertretung legt die Administration in der Organisation fest – bitte dort
+     hinterlegen lassen.
+   - Bist du selbst die Vertretung einer abwesenden Kollegin oder eines
+     Kollegen, steht an deren Aufgaben in deiner Liste **„in Vertretung für
+     …"** mit dem Namen.
+
+8. **Abmelden.**
+   Über **„Abmelden"** in der linken Seitenleiste. Beim nächsten Mal meldest du
+   dich mit deinem selbst gewählten Passwort an. Das Passwort kannst du jederzeit
+   über **„Passwort ändern"** anpassen.
+
+**Falls keine Aufgaben angezeigt werden:**
+
+- „Keine offenen Aufgaben" bedeutet, dass dir aktuell nichts zugewiesen ist –
+  das ist normal, solange nichts ansteht.
+- Steht oben „Kein Schema ausgewählt", wähle den Prozess im Auswahlfeld
+  (oben rechts) aus.
+
+---
+
+## Hinweise zur Einordnung
+
+- **Eine einzige Seite** genügt dem Mitarbeiter: die normale App-Adresse.
+  Login-Fenster, Aufgabenliste und Bearbeitung sind alle dort enthalten.
+- Mit der Rolle **Bearbeiter** (operator) blendet die Navigation automatisch nur
+  **„Meine Aufgaben"**, **„Ausführung"**, **Monitoring** und **Hilfe** ein –
+  Modellier- und Admin-Sichten bleiben verborgen. In der Ausführung startet ein
+  Bearbeiter freigegebene Prozesse und arbeitet die Schritte eines Vorgangs ab;
+  für den Alltag genügt „Meine Aufgaben". Im Monitoring sieht ein Bearbeiter die Kennzahlen aller
+  Vorgänge (Anzahl, Durchlaufzeit, Engpässe), einzeln aber nur die Vorgänge, an
+  denen er beteiligt ist oder war – ebenso zählen die Kacheln für überfällige
+  und eskalierte Aufgaben und für die Zuständigkeit nur diese. Ein Hinweis unter
+  den Kacheln sagt das.
+- Ein **Modellierer** (modeler) ist zugleich Bearbeiter: er sieht „Meine
+  Aufgaben" und „Ausführung" zusätzlich zu den Modellier-Sichten und kann eigene
+  **Entwürfe als Test-Instanz** starten (diese Testläufe zählen nicht ins
+  Monitoring). Für reine Aufgabenbearbeitung genügt die Rolle **Bearbeiter**.
+- Reine Sachbearbeiter-Aufgaben werden vollständig über **„Meine Aufgaben"**
+  erledigt. **XOR-Verzweigungen entscheidet das System automatisch** anhand der
+  erfassten Daten (vollständige, überschneidungsfreie Partition, K7) – es gibt
+  keinen manuellen „Zweig wählen"-Schritt mehr.

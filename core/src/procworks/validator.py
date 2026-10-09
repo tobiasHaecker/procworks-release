@@ -1,0 +1,5082 @@
+# SPDX-License-Identifier: BUSL-1.1
+"""Correctness Validator (Stufe A, structural rules K1-K3).
+
+The validator is called *before* committing any change operation (validate-
+before-commit). It returns precise, localized findings. Operations refuse to
+commit a schema that produces any finding, so a persisted schema always
+satisfies the structural correctness invariant.
+"""
+
+from __future__ import annotations
+
+import math
+from collections import deque
+from collections.abc import Callable, Sequence
+from typing import Protocol
+
+from pydantic import BaseModel, Field
+
+from procworks.conditions import ConditionError, referenced_names
+from procworks.model import (
+    JOIN_TYPES,
+    LOOP_TYPES,
+    READ_MODES,
+    SPLIT_JOIN_PAIR,
+    SPLIT_TYPES,
+    STAFF_COMBINATOR_KINDS,
+    STAFF_LEAF_KINDS,
+    STAFF_NODE_REF_KINDS,
+    WRITE_MODES,
+    ActivityTemplate,
+    AggregateKind,
+    AutomationKind,
+    Cardinality,
+    DataAccess,
+    DataElement,
+    DataSourceKind,
+    DataType,
+    EdgeType,
+    EscalationKind,
+    EscalationPolicy,
+    ExternalBinding,
+    FilterOperator,
+    FollowUpLink,
+    FollowUpTrigger,
+    Form,
+    FormField,
+    LifecycleState,
+    LoopDecision,
+    MailBinding,
+    MailRecipientMode,
+    Node,
+    NodeType,
+    OrgModel,
+    PartitionCell,
+    ProcessSchema,
+    QueryFilter,
+    ServiceBinding,
+    SqlSelectBinding,
+    SqlWriteBinding,
+    StaffRule,
+    StaffRuleKind,
+    SubProcessBinding,
+    WidgetKind,
+    XorDecision,
+    XorDecisionKind,
+    aggregate_result_type,
+    block_join,
+    discriminator_kind,
+    is_valid_email,
+    loop_block,
+    template_placeholders,
+    widget_matches_type,
+)
+from procworks.worklist_priority import target_seconds
+
+#: Resolves a (schema id, version) reference to a schema, or ``None`` if the
+#: version is ``None`` it resolves the latest known schema for that id. Used by
+#: the cross-schema composition rules (H1-H4, F1-F3).
+SchemaResolver = Callable[[str, "int | None"], "ProcessSchema | None"]
+
+
+class ValidationFinding(BaseModel):
+    """A single, localized correctness violation.
+
+    ``message`` is the technical (English) text; it stays the stable basis for
+    logs, tests and API consumers. ``code`` and ``params`` are an **additive**,
+    language-neutral description of the same finding for user-facing clients:
+    ``code`` names the case (``"D1.read-before-write"``), ``params`` carries the
+    variable parts the client's message catalog fills into its own wording --
+    step and element *names* where the check has them at hand, otherwise the
+    ids the ``message`` names (the client resolves those against the model it
+    shows). Language is a boundary concern -- the core stays language-neutral
+    and every existing consumer keeps working.
+
+    **Every finding carries a code**;
+    ``tests/test_every_finding_has_a_code.py`` guards it, the ``fail`` helpers of the rule
+    checks take ``code`` as a required keyword (:class:`_Fail`). ``message``
+    stays unchanged -- never edit it to improve a display text.
+    """
+
+    rule: str
+    message: str
+    node_id: str | None = None
+    code: str | None = None
+    params: dict[str, str] = Field(default_factory=dict)
+
+
+def node_name(schema: ProcessSchema, node_id: str | None) -> str:
+    """Human-readable name of a node for ``ValidationFinding.params``.
+
+    The label when there is one, otherwise a German description of the node
+    type (a gateway has no label), and the raw id only as the last resort.
+    """
+
+    if node_id is None:
+        return ""
+    node = schema.nodes.get(node_id)
+    if node is None:
+        return node_id
+    if node.label:
+        return node.label
+    return _NODE_TYPE_NAMES.get(node.type, node_id)
+
+
+#: German fallbacks for unlabelled nodes (gateways, start/end).
+_NODE_TYPE_NAMES: dict[NodeType, str] = {
+    NodeType.START: "Start",
+    NodeType.END: "Ende",
+    NodeType.AND_SPLIT: "Parallel-Verzweigung",
+    NodeType.AND_JOIN: "Parallel-Zusammenführung",
+    NodeType.XOR_SPLIT: "Entscheidung",
+    NodeType.XOR_JOIN: "Entscheidungs-Zusammenführung",
+    NodeType.LOOP_START: "Schleifenanfang",
+    NodeType.LOOP_END: "Schleifenende",
+}
+
+
+class CorrectnessError(Exception):
+    """Raised when an operation would produce an incorrect schema."""
+
+    def __init__(self, findings: list[ValidationFinding]) -> None:
+        self.findings = findings
+        super().__init__("; ".join(f"[{f.rule}] {f.message}" for f in findings))
+
+
+def validate(
+    schema: ProcessSchema, resolver: SchemaResolver | None = None
+) -> list[ValidationFinding]:
+    """Run structural rules K1-K3/K6/K7, data-flow D1-D4, resource rules Z1-Z4,
+    activity-repository rules A1-A3, composition rules H1-H4/F1-F4, the
+    integration rules I1-I4, the temporal rules T1-T2 and the input-mask rules
+    U1-U3.
+
+    ``resolver`` enables the cross-schema composition checks (target must be
+    RELEASED, type-conformant mappings, acyclic hierarchy). Without it only the
+    local well-formedness of sub-process/follow-up references is checked.
+
+    The integration rules I1-I4 are silent unless a service binding declares an
+    ``automation`` other than ``MANUAL_NONE``; the temporal rules T1-T2 are
+    silent unless the schema carries temporal annotations. Both groups never
+    affect integration-free / time-free models.
+
+    Returns all findings (an empty list means the schema is correct).
+    """
+
+    findings: list[ValidationFinding] = []
+    findings += _check_k2_endpoints_and_degrees(schema)
+    findings += _check_k1_gateways(schema)
+    findings += _check_k6_loops(schema)
+    findings += _check_k4_sync_edges(schema)
+    findings += _check_k7_xor_decisions(schema)
+    findings += _check_k3_reachability(schema)
+    findings += _check_data_flow(schema)
+    findings += _check_forms(schema)
+    findings += _check_display_fields(schema)
+    findings += _check_label_lengths(schema)
+    findings += _check_connectors(schema)
+    findings += _check_scalar_queries(schema)
+    findings += _check_scalar_writes(schema)
+    findings += _check_resources(schema)
+    findings += _check_integration(schema)
+    findings += _check_composition(schema, resolver)
+    findings += _check_temporal(schema)
+    findings += _check_t3_escalations(schema)
+    findings += _check_mail(schema)
+    return findings
+
+
+def raise_if_invalid(
+    schema: ProcessSchema, resolver: SchemaResolver | None = None
+) -> ProcessSchema:
+    """Return the schema if correct, otherwise raise CorrectnessError."""
+
+    findings = validate(schema, resolver)
+    if findings:
+        raise CorrectnessError(findings)
+    return schema
+
+
+# --- B2: release readiness / executability (Stufe B) ---------------------
+
+
+def check_executable(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Stufe-B check: is the schema not merely *correct* but also *runnable*?
+
+    Deliberately **not** part of :func:`validate`. Stufe A (K/D/Z/…) holds after
+    every single operation, so a half-finished draft stays editable; Stufe B is
+    the additional bar a schema must clear to be **released**.
+    Calling it from ``validate`` would make an incomplete draft
+    unmodellable, which is exactly the "Verbotsmodell" the architecture rejects.
+
+    Implemented rule:
+
+    * **B2 -- Bearbeiterzuordnung.** Every *interactive* ACTIVITY carries a staff
+      rule (BZR). Without one the step is activated at runtime but appears in no
+      worklist (:func:`procworks.assignment.open_tasks` skips nodes without a
+      rule), so the instance cannot be driven forward by the people meant to work
+      it. An **automatic** step is exempt -- rule Z4 even forbids a BZR there.
+
+    Not enforced here, on purpose:
+
+    * **B1 -- Dienstzuordnung** as literally worded in the original rule catalogue ("every
+      activity node is linked to an executable ActivityTemplate") does not match
+      how the product is actually used: an interactive step with an input mask
+      needs no service, and *none* of the shipped example processes or built-in
+      templates binds one. Enforcing it would reject the product's own corpus.
+      The original wording is the outdated part; B2 is what is enforced.
+    * **B3 -- Vollständige Datenbindung** is already guaranteed by Stufe A: D1
+      supplies every mandatory input on every path and K7 makes each branch
+      partition total, both checked on every commit. A separate gate would only
+      re-assert what cannot be violated.
+
+    Returns an empty list when the schema is releasable.
+    """
+
+    findings: list[ValidationFinding] = []
+    for node in schema.nodes.values():
+        if node.type is not NodeType.ACTIVITY:
+            continue
+        binding = schema.service_bindings.get(node.id)
+        if binding is not None and binding.automatic:
+            continue  # automatic step: no performer needed (and Z4 forbids one)
+        if node.id in schema.staff_rules:
+            continue
+        findings.append(
+            ValidationFinding(
+                rule="B2",
+                node_id=node.id,
+                message=(
+                    f"interactive step '{node.label or node.id}' has no staff rule "
+                    f"(BZR); it would be activated but appear in nobody's worklist"
+                ),
+                code="B2.no-staff",
+                params={"step": node_name(schema, node.id)},
+            )
+        )
+    return findings
+
+
+# --- K2: single start/end, well-formed in/out degrees --------------------
+
+
+#: Widgets that take free text -- the only ones a pattern or length can bound.
+_TEXT_WIDGETS = frozenset({WidgetKind.TEXT, WidgetKind.TEXTAREA})
+
+
+def _check_field_constraints(node_id: str, field: FormField) -> list[ValidationFinding]:
+    """U2 for the optional input checks of a mask field.
+
+    ``min_value``/``max_value`` only on a NUMBER field, finite and not
+    crossed; ``pattern`` and ``max_length`` only on TEXT/TEXTAREA, the pattern
+    a valid regular expression, the length at least 1. The checks themselves
+    run on every completion (U4, :func:`form_value_findings`).
+
+    A bound must be a finite number: every comparison with NaN is false, so a
+    NaN bound would be stored yet never enforced, and an infinite bound is no
+    bound at all. A non-finite bound is reported once
+    (``U2.bounds-not-finite``) and the crossed-bounds check is skipped for it.
+    """
+
+    import re
+
+    findings: list[ValidationFinding] = []
+
+    def fail(message: str, *, code: str) -> None:
+        findings.append(
+            ValidationFinding(
+                rule="U2",
+                node_id=node_id,
+                message=f"field '{field.id}': {message}",
+                code=code,
+                params={"field": field.label or field.id},
+            )
+        )
+
+    bounded = field.min_value is not None or field.max_value is not None
+    if bounded and field.widget is not WidgetKind.NUMBER:
+        fail("bounds are only allowed on a number field", code="U2.bounds-not-number")
+    bounds = [b for b in (field.min_value, field.max_value) if b is not None]
+    if not all(math.isfinite(b) for b in bounds):
+        fail("bounds must be finite numbers", code="U2.bounds-not-finite")
+    elif (
+        field.min_value is not None
+        and field.max_value is not None
+        and field.min_value > field.max_value
+    ):
+        fail("min_value is greater than max_value", code="U2.bounds-order")
+    textual = field.pattern is not None or field.max_length is not None
+    if textual and field.widget not in _TEXT_WIDGETS:
+        fail(
+            "pattern/max_length are only allowed on a text field",
+            code="U2.text-rule-not-text",
+        )
+    if field.pattern is not None:
+        try:
+            re.compile(field.pattern)
+        except re.error:
+            fail("pattern is not a valid regular expression", code="U2.pattern-invalid")
+    if field.max_length is not None and field.max_length < 1:
+        fail("max_length must be at least 1", code="U2.length-invalid")
+    return findings
+
+
+def form_value_findings(
+    schema: ProcessSchema, node_id: str, values: dict[str, object]
+) -> list[ValidationFinding]:
+    """U4: check submitted values against the input checks of the step's mask.
+
+    Runs at the boundary on every completion (web and ``/v1`` alike), so a
+    bound cannot be bypassed by calling the API directly. Only
+    values that are present are checked -- whether a required field must be
+    present stays the client's matter, as before. Values of the wrong type
+    are left to D3.
+    """
+
+    import re
+
+    form = schema.forms.get(node_id)
+    if form is None:
+        return []
+    findings: list[ValidationFinding] = []
+    for field in form.fields:
+        if field.element_id not in values:
+            continue
+        value = values[field.element_id]
+        params = {"field": field.label or field.id}
+
+        def fail(message: str, *, code: str, extra: dict[str, str]) -> None:
+            findings.append(
+                ValidationFinding(
+                    rule="U4",
+                    node_id=node_id,
+                    message=message,
+                    code=code,
+                    params={**params, **extra},  # noqa: B023 - used right away
+                )
+            )
+
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if field.min_value is not None and value < field.min_value:
+                fail(
+                    f"'{field.id}' is below {field.min_value}",
+                    code="U4.below-min",
+                    extra={"min": f"{field.min_value:g}"},
+                )
+            if field.max_value is not None and value > field.max_value:
+                fail(
+                    f"'{field.id}' is above {field.max_value}",
+                    code="U4.above-max",
+                    extra={"max": f"{field.max_value:g}"},
+                )
+        if isinstance(value, str):
+            if field.max_length is not None and len(value) > field.max_length:
+                fail(
+                    f"'{field.id}' is longer than {field.max_length}",
+                    code="U4.too-long",
+                    extra={"max": str(field.max_length)},
+                )
+            if field.pattern is not None:
+                try:
+                    matches = re.fullmatch(field.pattern, value) is not None
+                except re.error:
+                    matches = True  # U2 rejects such a pattern at modelling time
+                if not matches:
+                    fail(
+                        f"'{field.id}' does not match the required pattern",
+                        code="U4.pattern",
+                        extra={},
+                    )
+    return findings
+
+def _check_k2_endpoints_and_degrees(schema: ProcessSchema) -> list[ValidationFinding]:
+    """K2: exactly one START and one END, and every node has its kind's degrees.
+
+    Parameters:
+        schema: The schema to check.
+
+    Returns:
+        The endpoint-count findings (START before END), followed by one
+        ``K2.degree`` finding per node whose in/out degree does not fit its
+        node type, in node order.
+    """
+
+    findings = _check_k2_endpoint_counts(schema)
+    for node in schema.nodes.values():
+        finding = _k2_degree_finding(schema, node)
+        if finding is not None:
+            findings.append(finding)
+    return findings
+
+
+def _check_k2_endpoint_counts(schema: ProcessSchema) -> list[ValidationFinding]:
+    """K2: the schema has exactly one START and exactly one END node.
+
+    Parameters:
+        schema: The schema to check.
+
+    Returns:
+        ``K2.start-count`` and/or ``K2.end-count`` (in that order) when the
+        respective count is not one; the actual count is in ``params``.
+    """
+
+    findings: list[ValidationFinding] = []
+    starts = [n for n in schema.nodes.values() if n.type is NodeType.START]
+    ends = [n for n in schema.nodes.values() if n.type is NodeType.END]
+    if len(starts) != 1:
+        findings.append(
+            ValidationFinding(
+                rule="K2",
+                message=f"expected exactly one START, found {len(starts)}",
+                code="K2.start-count",
+                params={"count": str(len(starts))},
+            )
+        )
+    if len(ends) != 1:
+        findings.append(
+            ValidationFinding(
+                rule="K2",
+                message=f"expected exactly one END, found {len(ends)}",
+                code="K2.end-count",
+                params={"count": str(len(ends))},
+            )
+        )
+    return findings
+
+
+def _k2_degree_finding(schema: ProcessSchema, node: Node) -> ValidationFinding | None:
+    """K2: the control-flow in/out degree of ``node`` fits its node type.
+
+    Only CONTROL edges count (``incoming``/``outgoing`` ignore SYNC edges).
+
+    Parameters:
+        schema: The schema that owns ``node``.
+        node: The node to check.
+
+    Returns:
+        A ``K2.degree`` finding (see :func:`_deg`) when the degrees violate
+        the node type's requirement, otherwise ``None``.
+
+    Edge cases:
+        A node type without a degree requirement here yields ``None``.
+    """
+
+    ind = len(schema.incoming(node.id))
+    outd = len(schema.outgoing(node.id))
+    if node.type is NodeType.START:
+        if ind != 0 or outd != 1:
+            return _deg(node.id, "START must have in=0, out=1", ind, outd)
+    elif node.type is NodeType.END:
+        if ind != 1 or outd != 0:
+            return _deg(node.id, "END must have in=1, out=0", ind, outd)
+    elif node.type is NodeType.ACTIVITY:
+        if ind != 1 or outd != 1:
+            return _deg(node.id, "ACTIVITY must have in=1, out=1", ind, outd)
+    elif node.type is NodeType.SUBPROCESS:
+        if ind != 1 or outd != 1:
+            return _deg(node.id, "SUBPROCESS must have in=1, out=1", ind, outd)
+    elif node.type in SPLIT_TYPES:
+        if ind != 1 or outd < 2:
+            msg = f"{node.type.value} must have in=1, out>=2"
+            return _deg(node.id, msg, ind, outd)
+    elif node.type in JOIN_TYPES:
+        if ind < 2 or outd != 1:
+            msg = f"{node.type.value} must have in>=2, out=1"
+            return _deg(node.id, msg, ind, outd)
+    elif node.type in LOOP_TYPES:
+        # Loop delimiters are serial nodes on the stored (acyclic) graph;
+        # the back edge is implicit in the K6 pairing, never a stored edge.
+        if ind != 1 or outd != 1:
+            msg = f"{node.type.value} must have in=1, out=1"
+            return _deg(node.id, msg, ind, outd)
+    return None
+
+
+def _deg(node_id: str, msg: str, ind: int, outd: int) -> ValidationFinding:
+    """K2 degree finding; ``msg`` reads ``"<KIND> must have <expected>"``.
+
+    The params split it into the node kind and the expected degrees, so the
+    client can word it ("ACTIVITY must have in=1, out=1" was shown raw).
+    """
+
+    kind, _, expected = msg.partition(" must have ")
+    return ValidationFinding(
+        rule="K2",
+        node_id=node_id,
+        message=f"{msg} (in={ind}, out={outd})",
+        code="K2.degree",
+        params={"node_type": kind, "expected": expected, "in": str(ind), "out": str(outd)},
+    )
+
+
+# --- K1: balanced, matching gateways -------------------------------------
+
+
+def _check_k1_gateways(schema: ProcessSchema) -> list[ValidationFinding]:
+    """K1: gateways are balanced **and** form properly nested, same-type blocks.
+
+    Two stages, because they fail differently:
+
+    1. **Counting.** Per gateway kind the number of splits must equal the number
+       of joins. Catches the coarse cases (a split with no join at all).
+    2. **Pairing/nesting.** Every split must be closed by *one* join, reached at
+       nesting depth 0 on **all** of its branches, of the matching type, and no
+       join may close two splits. This is what makes the graph block-structured
+       in the ADEPT sense -- counting alone does not: two crossed blocks
+       (``s1 -> s2 -> ... -> j1 -> j2``) have perfectly balanced counts.
+
+    Stage 2 is the guarantee the rest of the system *relies* on and therefore may
+    not merely assume: the engine's join semantics (a join is skipped when an
+    incoming branch was deselected) are sound only on properly nested blocks. A
+    crossed block lets an XOR-deselected branch skip an AND join, which cascades
+    ``SKIPPED`` to the END node -- the instance can then never complete and never
+    appears in a worklist again (K5 "option to complete" and "proper completion"
+    both lost). The same holds for the must-write analysis behind D1, which
+    unions at an AND join and intersects elsewhere, and for the K4 branch
+    relation. Stage 2 is why those assumptions hold.
+
+    Stage 2 is skipped while stage 1 or the K2 degree rules already report
+    findings -- on a graph whose degrees are broken the walk would only add
+    noise on top of a diagnosis the user already has.
+    """
+
+    findings: list[ValidationFinding] = []
+    for split_type, join_type in SPLIT_JOIN_PAIR.items():
+        n_splits = sum(1 for n in schema.nodes.values() if n.type is split_type)
+        n_joins = sum(1 for n in schema.nodes.values() if n.type is join_type)
+        if n_splits != n_joins:
+            findings.append(
+                ValidationFinding(
+                    rule="K1",
+                    message=(
+                        f"unbalanced gateways: {n_splits} x {split_type.value} "
+                        f"vs {n_joins} x {join_type.value}"
+                    ),
+                    code="K1.unbalanced",
+                    params={
+                        "splits": str(n_splits),
+                        "joins": str(n_joins),
+                        "kind": _NODE_TYPE_NAMES.get(split_type, split_type.value),
+                    },
+                )
+            )
+    if findings or _check_k2_endpoints_and_degrees(schema):
+        return findings
+
+    claimed_by: dict[str, str] = {}
+    for node in schema.nodes.values():
+        if node.type not in SPLIT_TYPES:
+            continue
+        try:
+            join_id, _ = block_join(schema, node.id)
+        except ValueError as exc:
+            findings.append(
+                ValidationFinding(
+                    rule="K1",
+                    node_id=node.id,
+                    message=str(exc),
+                    code="K1.unpaired",
+                    params={"step": node_name(schema, node.id)},
+                )
+            )
+            continue
+        expected = SPLIT_JOIN_PAIR[node.type]
+        actual = schema.nodes[join_id].type
+        if actual is not expected:
+            findings.append(
+                ValidationFinding(
+                    rule="K1",
+                    node_id=node.id,
+                    message=(
+                        f"{node.type.value} '{node.id}' is closed by "
+                        f"{actual.value} '{join_id}', expected {expected.value}"
+                    ),
+                    code="K1.wrong-join",
+                    params={
+                        "split": node_name(schema, node.id),
+                        "join": node_name(schema, join_id),
+                    },
+                )
+            )
+        if join_id in claimed_by:
+            findings.append(
+                ValidationFinding(
+                    rule="K1",
+                    node_id=join_id,
+                    message=(
+                        f"join '{join_id}' closes two splits "
+                        f"('{claimed_by[join_id]}' and '{node.id}')"
+                    ),
+                    code="K1.shared-join",
+                    params={"join": node_name(schema, join_id)},
+                )
+            )
+            continue
+        claimed_by[join_id] = node.id
+    # No "join closes no split" check needed: the counts balance per kind and
+    # every split claims a distinct join, so an unclaimed join is impossible
+    # unless one of the findings above already fired.
+    return findings
+
+
+# --- K6: structured REPEAT-UNTIL loops ------------------------------------
+
+
+def _check_k6_loops(schema: ProcessSchema) -> list[ValidationFinding]:
+    """K6: loops are properly paired and decidable per iteration.
+
+    Fully additive -- a schema without LOOP nodes produces no findings. The
+    sub-rules:
+
+    - K6a: LOOP_START/LOOP_END occur only as properly nested pairs.
+    - K6b: every LOOP_END carries exactly one ``LoopDecision`` over an
+      existing BOOLEAN INSTANCE element; no stale decisions elsewhere.
+    - K6c: the discriminator is mandatorily written on **every** path through
+      the loop body, so each iteration decides on fresh data (D1-analog,
+      block-local must-write analysis).
+    - K6d: the body is non-empty (an empty loop is meaningless).
+
+    The former stage-S1 restriction K6e (no SUBPROCESS / automatic activity in
+    the body) was lifted in stage S3: the loop reset clears the body's
+    child-instance links so a repeated SUBPROCESS spawns a fresh child, and the
+    external-task machinery is iteration-safe by construction (an *open* task
+    keeps its step uncompleted, so no open task can ever cross a reset, while a
+    COMPLETED one does not block re-materialisation).
+    """
+
+    findings: list[ValidationFinding] = []
+    fail = _collecting_fail("K6", findings)
+
+    starts = [n.id for n in schema.nodes.values() if n.type is NodeType.LOOP_START]
+    ends = {n.id for n in schema.nodes.values() if n.type is NodeType.LOOP_END}
+    if not starts and not ends and not schema.loop_decisions:
+        return findings
+
+    for node_id in schema.loop_decisions:
+        node = schema.nodes.get(node_id)
+        if node is None or node.type is not NodeType.LOOP_END:
+            fail(
+                "loop decision references a node that is not a LOOP_END",
+                node_id,
+                code="K6.decision-not-loop-end",
+            )
+
+    if len(starts) != len(ends):
+        fail(
+            f"unbalanced loops: {len(starts)} x LOOP_START vs {len(ends)} x LOOP_END",
+            code="K6.unbalanced",
+            params={"starts": str(len(starts)), "ends": str(len(ends))},
+        )
+
+    claimed: dict[str, str] = {}
+    blocks: list[tuple[str, str, set[str]]] = []
+    for start_id in starts:
+        try:
+            end_id, body = loop_block(schema, start_id)
+        except ValueError:
+            fail(
+                "LOOP_START has no matching LOOP_END",
+                start_id,
+                code="K6.start-unpaired",
+            )
+            continue
+        if end_id in claimed:
+            fail(
+                f"LOOP_END '{end_id}' is claimed by two loop starts "
+                f"('{claimed[end_id]}' and '{start_id}')",
+                end_id,
+                code="K6.end-claimed-twice",
+                params={
+                    "node": str(end_id),
+                    "other": str(claimed[end_id]),
+                    "other_start": str(start_id),
+                },
+            )
+            continue
+        claimed[end_id] = start_id
+        blocks.append((start_id, end_id, body))
+        findings += _check_single_loop(schema, start_id, end_id, body)
+
+    for end_id in ends - set(claimed):
+        fail(
+            "LOOP_END has no matching LOOP_START",
+            end_id,
+            code="K6.end-unpaired",
+        )
+
+    if not findings and not _check_k1_gateways(schema):
+        findings += _check_loop_branch_nesting(schema, blocks)
+    return findings
+
+
+def _check_loop_branch_nesting(
+    schema: ProcessSchema, loops: list[tuple[str, str, set[str]]]
+) -> list[ValidationFinding]:
+    """K6a (mutual nesting): loop blocks and split/join blocks never cross.
+
+    K1 pairs splits with joins and K6a pairs LOOP_START with LOOP_END -- but
+    each pairing only looks at its own node kinds, because for the other walk a
+    node of the other kind is an ordinary serial node. So neither notices a
+    loop that *straddles* a branch block: a LOOP_START inside one branch whose
+    LOOP_END sits behind the join (or before the split, or the reverse). Both
+    pairings succeed, yet the structure is not block-structured.
+
+    Found on 2026-09-24 via ``POST /bpmn-import`` -- the operations never build
+    this (``insert_loop`` wraps a serial position, a branch block is always
+    inserted whole). The damage is the K1 kind again, only worse: when the
+    instance takes the *other* branch, the loop start is skipped, the join
+    still activates from the other branch, and the LOOP_END is reached with no
+    iteration having run. Its decision then either fails on an unwritten
+    discriminator (the instance can never complete) or says "repeat" on a stale
+    value -- the reset re-skips the body, the join re-activates and the engine
+    spins in ``_advance`` forever (a request that never returns).
+
+    The check: for every paired loop and every paired split, the loop body must
+    contain either both gateways of the block or neither, and every branch of
+    the block must contain either both loop delimiters or neither. Runs only on
+    a graph K1 and the rest of K6 already accept -- on a broken structure the
+    pairings it relies on are not defined.
+    """
+
+    findings: list[ValidationFinding] = []
+    gateway_blocks: list[tuple[str, str, list[set[str]]]] = []
+    for node in schema.nodes.values():
+        if node.type not in SPLIT_TYPES:
+            continue
+        try:
+            join_id, branches = block_join(schema, node.id)
+        except ValueError:  # pragma: no cover - K1 is clean when this runs
+            continue
+        gateway_blocks.append((node.id, join_id, branches))
+
+    for start_id, end_id, body in loops:
+        for split_id, join_id, branches in gateway_blocks:
+            crosses = (split_id in body) != (join_id in body) or any(
+                (start_id in members) != (end_id in members) for members in branches
+            )
+            if not crosses:
+                continue
+            findings.append(
+                ValidationFinding(
+                    rule="K6",
+                    node_id=start_id,
+                    message=(
+                        f"loop '{start_id}'..'{end_id}' crosses the block "
+                        f"'{split_id}'..'{join_id}' -- a loop must lie entirely "
+                        "inside one branch or enclose the whole block (K6a)"
+                    ),
+                    code="K6.crosses-branch",
+                    params={
+                        "loop": node_name(schema, start_id),
+                        "split": node_name(schema, split_id),
+                    },
+                )
+            )
+    return findings
+
+
+def _check_single_loop(
+    schema: ProcessSchema, start_id: str, end_id: str, body: set[str]
+) -> list[ValidationFinding]:
+    """K6b-K6d for one paired loop block (see :func:`_check_k6_loops`).
+
+    Parameters:
+        schema: The schema that owns the loop.
+        start_id: The LOOP_START of the block.
+        end_id: The paired LOOP_END; it carries the loop decision.
+        body: The nodes strictly between the two delimiters.
+
+    Returns:
+        The K6 findings in check order: empty body (K6d), decision and
+        discriminator (K6b; boolean shorthand or partition), iteration bound,
+        then the per-iteration write of the discriminator (K6c).
+
+    Edge cases:
+        An empty body, a missing decision or a missing discriminator element
+        ends the check with that single finding -- every later check depends
+        on what is missing.
+    """
+
+    findings: list[ValidationFinding] = []
+    fail = _collecting_fail("K6", findings)
+
+    if not body:
+        fail(
+            "loop body is empty (K6d)",
+            start_id,
+            code="K6.empty-body",
+        )
+        return findings
+
+    decision = schema.loop_decisions.get(end_id)
+    if decision is None:
+        fail(
+            "LOOP_END has no loop decision (K6b)",
+            end_id,
+            code="K6.no-decision",
+        )
+        return findings
+    element = schema.data_elements.get(decision.discriminator)
+    if element is None:
+        fail(
+            f"loop discriminator '{decision.discriminator}' does not exist (K6b)",
+            end_id,
+            code="K6.discriminator-missing",
+            params={"element": str(decision.discriminator)},
+        )
+        return findings
+    if element.source is not DataSourceKind.INSTANCE:
+        fail(
+            f"loop discriminator '{element.name}' must be an INSTANCE element (K6b)",
+            end_id,
+            code="K6.discriminator-not-instance",
+            params={"element": str(element.name)},
+        )
+    if not decision.cells:
+        _check_boolean_loop_decision(end_id, decision, element, fail)
+    else:
+        _check_partitioned_loop_decision(end_id, decision, element, fail)
+
+    if decision.max_iterations is not None and decision.max_iterations < 2:
+        # A bound of 1 (or less) would forbid every repetition -- the loop
+        # would be pure ballast, which K6 rejects like an empty body (K6d).
+        fail(
+            f"max_iterations must allow at least one repetition (>= 2), "
+            f"got {decision.max_iterations} (K6b)",
+            end_id,
+            code="K6.max-iterations",
+            params={"value": str(decision.max_iterations)},
+        )
+
+    if decision.discriminator not in _written_through_body(schema, start_id, end_id, body):
+        fail(
+            f"loop discriminator '{element.name}' is not written on every path "
+            f"through the loop body (K6c)",
+            end_id,
+            code="K6.discriminator-not-written",
+            params={"element": str(element.name)},
+        )
+    return findings
+
+
+def _check_boolean_loop_decision(
+    end_id: str, decision: LoopDecision, element: DataElement, fail: _Fail
+) -> None:
+    """K6b for a loop decision in boolean shorthand (no cells).
+
+    Boolean shorthand (stage S1): repeat while value == repeat_value. That is
+    only well-defined for a BOOLEAN discriminator and a BOOLEAN decision kind.
+
+    Parameters:
+        end_id: The LOOP_END carrying the decision (finding location).
+        decision: The loop decision, known to have no cells.
+        element: The existing discriminator element.
+        fail: Collects the K6 findings (see :func:`_collecting_fail`).
+
+    Edge cases:
+        Element type and decision kind are checked independently, so both
+        findings can occur together.
+    """
+
+    if element.data_type is not DataType.BOOLEAN:
+        fail(
+            f"loop discriminator '{element.name}' must be BOOLEAN "
+            f"(is {element.data_type.value}; K6b)",
+            end_id,
+            code="K6.discriminator-not-boolean",
+            params={"element": str(element.name), "type": str(element.data_type.value)},
+        )
+    if decision.kind is not XorDecisionKind.BOOLEAN:
+        fail(
+            "a loop decision without cells must be of kind BOOLEAN (K6b)",
+            end_id,
+            code="K6.cells-need-boolean",
+        )
+
+
+def _check_partitioned_loop_decision(
+    end_id: str, decision: LoopDecision, element: DataElement, fail: _Fail
+) -> None:
+    """K6b for a loop decision given as a repeat/exit partition (with cells).
+
+    Partitioned decision (stage S3): the cells must tile the domain like
+    a K7 partition and classify it into at least one repeat and one exit
+    cell -- otherwise the loop could never terminate (all repeat) or
+    never repeat (all exit), both of which K6 rejects by construction.
+
+    Parameters:
+        end_id: The LOOP_END carrying the decision (finding location).
+        decision: The loop decision, known to have at least one cell.
+        element: The existing discriminator element.
+        fail: Collects the K6 findings (see :func:`_collecting_fail`).
+
+    Edge cases:
+        The partition shape is checked through :func:`_check_partition`, so
+        its findings carry K7 codes but the K6 rule of ``fail``. An unusable
+        discriminator type suppresses only the kind comparison.
+    """
+
+    expected_kind = discriminator_kind(element.data_type)
+    if expected_kind is None:
+        fail(
+            f"data type {element.data_type.value} cannot be used as a "
+            "loop discriminator (K6b)",
+            end_id,
+            code="K6.discriminator-type",
+            params={
+                "type": str(element.data_type.value),
+                "element": str(decision.discriminator),
+            },
+        )
+    elif expected_kind is not decision.kind:
+        fail(
+            f"loop decision kind {decision.kind.value} does not match "
+            f"discriminator type {element.data_type.value} (K6b)",
+            end_id,
+            code="K6.kind-mismatch",
+            params={
+                "kind": str(decision.kind.value),
+                "type": str(element.data_type.value),
+                "element": str(decision.discriminator),
+            },
+        )
+    _check_partition(end_id, decision.kind, decision.cells, fail, noun="loop")
+    if all(cell.repeat for cell in decision.cells):
+        fail(
+            "a loop partition needs at least one exit cell (K6b)",
+            end_id,
+            code="K6.no-exit-cell",
+        )
+    if all(not cell.repeat for cell in decision.cells):
+        fail(
+            "a loop partition needs at least one repeat cell (K6b)",
+            end_id,
+            code="K6.no-repeat-cell",
+        )
+
+
+def _written_through_body(
+    schema: ProcessSchema, start_id: str, end_id: str, body: set[str]
+) -> set[str]:
+    """Elements guaranteed written on all paths from LOOP_START to LOOP_END.
+
+    Block-local variant of :func:`_must_written_before`: the analysis is seeded
+    empty at the loop start, so only writes *inside* the body count -- exactly
+    the K6c requirement that every iteration re-decides on fresh data. Same
+    join semantics as the global analysis (AND_JOIN unions, everything else
+    intersects).
+    """
+
+    mandatory_writes = _mandatory_writes(schema)
+    block = body | {start_id, end_id}
+    available_after: dict[str, set[str]] = {start_id: set()}
+    for node_id in _topological_order(schema):
+        if node_id not in block or node_id == start_id:
+            continue
+        preds = [
+            e.source for e in schema.incoming(node_id) if e.source in block
+        ]
+        guaranteed = _meet_at(
+            schema, node_id, [available_after.get(p, set()) for p in preds]
+        )
+        if node_id == end_id:
+            return guaranteed
+        available_after[node_id] = guaranteed | mandatory_writes.get(node_id, set())
+    return set()
+
+
+# --- K4: cross-branch synchronisation edges --------------------------------
+
+
+def _check_k4_sync_edges(schema: ProcessSchema) -> list[ValidationFinding]:
+    """K4: sync edges only between activities of different AND branches.
+
+    Fully additive -- a schema without SYNC edges produces no findings. A
+    SYNC edge is an *ordering-only* wait (its target additionally waits until
+    the source is completed or deselected); it never routes tokens, so the
+    structural rules ignore it entirely (``incoming``/``outgoing`` are
+    control-only). Checked here:
+
+    - endpoints exist and are interactive ACTIVITY nodes,
+    - source and target lie in **different branches of the same AND block**
+      (the ADEPT constraint MR5 -- synchronising within one branch is plain
+      control flow, across XOR branches it could dead-wait on a deselected
+      path; the AND restriction plus the engine's completed-or-skipped
+      resolution make a deadlock impossible),
+    - the combined CONTROL+SYNC graph stays acyclic (two opposing sync edges
+      would otherwise wait on each other forever).
+    """
+
+    findings: list[ValidationFinding] = []
+    fail = _collecting_fail("K4", findings)
+
+    syncs = [e for e in schema.edges if e.type is EdgeType.SYNC]
+    if not syncs:
+        return findings
+
+    for edge in syncs:
+        source = schema.nodes.get(edge.source)
+        target = schema.nodes.get(edge.target)
+        if source is None or target is None:
+            fail(
+                "sync edge references an unknown node",
+                edge.source,
+                code="K4.unknown-node",
+            )
+            continue
+        if source.type is not NodeType.ACTIVITY or target.type is not NodeType.ACTIVITY:
+            fail(
+                "a sync edge connects only ACTIVITY nodes (K4)",
+                edge.source,
+                code="K4.not-activity",
+            )
+            continue
+        if not _in_different_and_branches(schema, edge.source, edge.target):
+            fail(
+                "sync edge must connect activities of different branches of "
+                "the same AND block (K4)",
+                edge.source,
+                code="K4.not-parallel",
+            )
+
+    if _cycle_with_sync(schema):
+        fail(
+            "sync edges must not create a cycle with the control flow (K4)",
+            code="K4.cycle",
+        )
+    return findings
+
+
+def _and_branches(schema: ProcessSchema, split_id: str) -> list[set[str]]:
+    """The node sets of each branch of an AND split (depth-counted walk).
+
+    Same nesting-aware forward walk as :func:`procworks.model.loop_block`:
+    a branch ends at the join that closes *this* split (depth 0). Only
+    meaningful on K1-valid structures -- K4 runs after K1, and on a broken
+    structure the resulting findings are noise on top of K1's anyway.
+    """
+
+    branches: list[set[str]] = []
+    for edge in schema.outgoing(split_id):
+        members: set[str] = set()
+        stack: list[tuple[str, int]] = [(edge.target, 0)]
+        while stack:
+            node_id, depth = stack.pop()
+            node = schema.nodes.get(node_id)
+            if node is None or node_id in members:
+                continue
+            if node.type in JOIN_TYPES and depth == 0:
+                continue  # the matching join closes the branch
+            members.add(node_id)
+            next_depth = depth
+            if node.type in SPLIT_TYPES:
+                next_depth += 1
+            elif node.type in JOIN_TYPES:
+                next_depth -= 1
+            for out in schema.outgoing(node_id):
+                stack.append((out.target, next_depth))
+        branches.append(members)
+    return branches
+
+
+def _in_different_and_branches(schema: ProcessSchema, a: str, b: str) -> bool:
+    """True when some AND split holds ``a`` and ``b`` in different branches."""
+
+    for node in schema.nodes.values():
+        if node.type is not NodeType.AND_SPLIT:
+            continue
+        branches = _and_branches(schema, node.id)
+        index_a = next((i for i, m in enumerate(branches) if a in m), None)
+        index_b = next((i for i, m in enumerate(branches) if b in m), None)
+        if index_a is not None and index_b is not None and index_a != index_b:
+            return True
+    return False
+
+
+def _cycle_with_sync(schema: ProcessSchema) -> bool:
+    """True when CONTROL+SYNC together contain a cycle (Kahn over both)."""
+
+    indegree = {nid: 0 for nid in schema.nodes}
+    succ: dict[str, list[str]] = {nid: [] for nid in schema.nodes}
+    for edge in schema.edges:
+        if edge.source in indegree and edge.target in indegree:
+            succ[edge.source].append(edge.target)
+            indegree[edge.target] += 1
+    queue: deque[str] = deque(nid for nid, deg in indegree.items() if deg == 0)
+    visited = 0
+    while queue:
+        current = queue.popleft()
+        visited += 1
+        for nxt in succ[current]:
+            indegree[nxt] -= 1
+            if indegree[nxt] == 0:
+                queue.append(nxt)
+    return visited != len(schema.nodes)
+
+
+# --- K7: complete, overlap-free XOR branch partitions ---------------------
+
+
+def _check_k7_xor_decisions(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Every XOR_SPLIT carries a total, disjoint, decidable branch partition.
+
+    This is the constructive guarantee that an exclusive split can never
+    deadlock (the partition is *total*: some branch always matches) nor activate
+    several paths at once (it is *disjoint*: at most one branch matches). The
+    partition is expressed over a typed discriminator element whose value is
+    guaranteed to be set before the split is reached, so the property is decided
+    at modelling time and preserved under every evolution step.
+    """
+
+    findings: list[ValidationFinding] = []
+    fail = _collecting_fail("K7", findings)
+
+    splits = {n.id for n in schema.nodes.values() if n.type is NodeType.XOR_SPLIT}
+
+    # Stale decisions for nodes that are not (or no longer) XOR splits.
+    for node_id in schema.xor_decisions:
+        if node_id not in splits:
+            fail(
+                "branch decision references a node that is not an XOR split",
+                node_id,
+                code="K7.decision-not-split",
+            )
+
+    # A branch predicate may only ever sit on an edge leaving an XOR split.
+    for edge in schema.edges:
+        if edge.condition is not None and edge.source not in splits:
+            fail(
+                "only edges leaving an XOR split may carry a branch condition",
+                edge.source,
+                code="K7.condition-not-on-split",
+            )
+
+    written_before = _must_written_before(schema)
+
+    for split_id in splits:
+        _check_xor_split(schema, split_id, written_before, fail)
+
+    return findings
+
+
+def _check_xor_split(
+    schema: ProcessSchema,
+    split_id: str,
+    written_before: dict[str, set[str]],
+    fail: _Fail,
+) -> None:
+    """K7 for one XOR split: decision present, branches, discriminator, partition.
+
+    Parameters:
+        schema: The schema that owns the split.
+        split_id: The XOR_SPLIT node to check.
+        written_before: Must-written analysis (:func:`_must_written_before`).
+        fail: Collects the K7 findings (see :func:`_collecting_fail`).
+
+    Edge cases:
+        Without a decision only ``K7.no-decision`` is reported. With a missing
+        discriminator element the branch-shape findings are still reported,
+        but discriminator and partition checks are skipped -- their meaning
+        depends on the element's type.
+    """
+
+    decision = schema.xor_decisions.get(split_id)
+    if decision is None:
+        fail(
+            "XOR split has no branch decision",
+            split_id,
+            code="K7.no-decision",
+        )
+        return
+
+    _check_xor_branches(schema, split_id, decision, fail)
+
+    element = schema.data_elements.get(decision.discriminator)
+    if element is None:
+        fail(
+            "discriminator data element does not exist",
+            split_id,
+            code="K7.discriminator-missing",
+            # The element id lets a client name what the split still
+            # depends on -- after a rejected deletion it is still in the
+            # unchanged model the user looks at.
+            params={"element": str(decision.discriminator)},
+        )
+        return
+    _check_xor_discriminator(split_id, decision, element, written_before, fail)
+
+    _check_partition(split_id, decision.kind, decision.branches, fail)
+
+
+def _check_xor_branches(
+    schema: ProcessSchema, split_id: str, decision: XorDecision, fail: _Fail
+) -> None:
+    """K7: the decision's branches match the split's outgoing edges.
+
+    Parameters:
+        schema: The schema that owns the split.
+        split_id: The XOR_SPLIT node (finding location).
+        decision: Its branch decision.
+        fail: Collects the K7 findings (see :func:`_collecting_fail`).
+
+    Edge cases:
+        Branch targets are compared as sorted multisets, so the order of the
+        branches does not matter but a duplicated target does.
+    """
+
+    out_targets = sorted(e.target for e in schema.outgoing(split_id))
+    branch_targets = sorted(b.target for b in decision.branches)
+    if branch_targets != out_targets:
+        fail(
+            "branch targets do not match the split's outgoing edges",
+            split_id,
+            code="K7.targets-mismatch",
+        )
+    if len(decision.branches) < 2:
+        fail(
+            "an XOR split needs at least two branches",
+            split_id,
+            code="K7.too-few-branches",
+        )
+
+    # An *empty* branch is a direct split -> join edge (its body was deleted
+    # but its partition cell is kept). At most one is allowed: the runtime
+    # keys edges by source+target, so two empty branches would collide on the
+    # same split -> join edge. This also guarantees at least one non-empty
+    # branch survives (a split with >= 2 branches can be at most all-but-one
+    # empty). Enforced here as the No-Bypass backstop for every path (edit,
+    # BPMN import, ad-hoc, migration).
+    empty_branches = [
+        b
+        for b in decision.branches
+        if (target := schema.nodes.get(b.target)) is not None
+        and target.type is NodeType.XOR_JOIN
+    ]
+    if len(empty_branches) > 1:
+        fail(
+            "an XOR split may carry at most one empty branch",
+            split_id,
+            code="K7.two-empty-branches",
+        )
+
+
+def _check_xor_discriminator(
+    split_id: str,
+    decision: XorDecision,
+    element: DataElement,
+    written_before: dict[str, set[str]],
+    fail: _Fail,
+) -> None:
+    """K7: the discriminator is a typed INSTANCE element, set before the split.
+
+    Parameters:
+        split_id: The XOR_SPLIT node (finding location).
+        decision: Its branch decision.
+        element: The existing discriminator element of ``decision``.
+        written_before: Must-written analysis (:func:`_must_written_before`).
+        fail: Collects the K7 findings (see :func:`_collecting_fail`).
+
+    Edge cases:
+        All three aspects (source, type/kind, prior write) are checked
+        independently; an unusable data type suppresses only the kind
+        comparison, which would be meaningless for it.
+    """
+
+    if element.source is not DataSourceKind.INSTANCE:
+        fail(
+            "discriminator must be an instance data element",
+            split_id,
+            code="K7.discriminator-not-instance",
+            params={"element": str(decision.discriminator)},
+        )
+    expected_kind = discriminator_kind(element.data_type)
+    if expected_kind is None:
+        fail(
+            f"data type {element.data_type.value} cannot be used as an XOR discriminator",
+            split_id,
+            code="K7.discriminator-type",
+            params={
+                "type": str(element.data_type.value),
+                "element": str(decision.discriminator),
+            },
+        )
+    elif expected_kind is not decision.kind:
+        fail(
+            f"decision kind {decision.kind.value} does not match "
+            f"discriminator type {element.data_type.value}",
+            split_id,
+            code="K7.kind-mismatch",
+            params={
+                "kind": str(decision.kind.value),
+                "type": str(element.data_type.value),
+                "element": str(decision.discriminator),
+            },
+        )
+    if decision.discriminator not in written_before.get(split_id, set()):
+        fail(
+            "discriminator may be unset when the split is reached "
+            "(no guaranteed prior write)",
+            split_id,
+            code="K7.discriminator-unset",
+        )
+
+
+class _Fail(Protocol):
+    """The ``fail`` callback of a rule check: every finding carries a ``code``.
+
+    ``code`` is keyword-only and required, so mypy rejects a finding without
+    one -- the client words every finding from its catalogue.
+    """
+
+    def __call__(
+        self,
+        message: str,
+        node_id: str | None = None,
+        *,
+        code: str,
+        params: dict[str, str] | None = None,
+    ) -> None: ...
+
+
+def _collecting_fail(rule: str, findings: list[ValidationFinding]) -> _Fail:
+    """Baut den ``fail``-Rückruf einer Regelprüfung, der in ``findings`` sammelt.
+
+    K4, K6 (samt :func:`_check_single_loop`) und K7 trugen je eine wörtlich
+    gleiche lokale ``fail``-Funktion; sie unterschieden sich nur in ``rule``.
+
+    Parameter:
+        rule: Regelgruppe, die jeder erzeugte Befund trägt (``"K6"`` …).
+        findings: Liste des Aufrufers; der Rückruf hängt **an diese** an, die
+            Reihenfolge der Befunde bleibt also die der ``fail``-Aufrufe.
+
+    Rückgabe:
+        Ein Rückruf mit der Signatur von :class:`_Fail` -- ``code`` ist
+        keyword-only und Pflicht, fehlende ``params`` werden zu ``{}``.
+    """
+
+    def fail(
+        message: str,
+        node_id: str | None = None,
+        *,
+        code: str,
+        params: dict[str, str] | None = None,
+    ) -> None:
+        findings.append(
+            ValidationFinding(
+                rule=rule, node_id=node_id, message=message, code=code, params=params or {}
+            )
+        )
+
+    return fail
+
+
+def _check_partition(
+    node_id: str,
+    kind: XorDecisionKind,
+    cells: Sequence[PartitionCell],
+    fail: _Fail,
+    *,
+    noun: str = "split",
+) -> None:
+    """Check that ``cells`` tile the discriminator's domain (total + disjoint).
+
+    Shared partition wellformedness for XOR branches (K7) and loop repeat/exit
+    cells (K6b) -- both carry the same cell shape (:class:`PartitionCell`).
+    ``noun`` only flavours the finding texts ("split" vs. "loop").
+    """
+
+    if kind is XorDecisionKind.THRESHOLD:
+        _check_threshold_cells(node_id, cells, fail)
+    elif kind is XorDecisionKind.BOOLEAN:
+        _check_boolean_cells(node_id, cells, fail, noun=noun)
+    else:  # ENUM
+        _check_enum_cells(node_id, cells, fail, noun=noun)
+
+
+def _check_threshold_cells(
+    node_id: str, cells: Sequence[PartitionCell], fail: _Fail
+) -> None:
+    """THRESHOLD partition: ascending upper bounds, only the last one unbounded.
+
+    Cells are read as consecutive half-open ranges ``[previous upper, upper)``
+    (``upper`` is exclusive, as in :func:`procworks.model.matching_partition_cell`).
+    The first cell has no previous upper and starts at -inf; the last cell
+    has ``upper is None`` and runs to +inf. The unbounded last cell makes the
+    tiling total, strictly ascending bounds make it disjoint.
+
+    Parameters:
+        node_id: The split or LOOP_END carrying the decision (finding location).
+        cells: The partition cells in their stored order.
+        fail: Collects the findings (see :func:`_collecting_fail`).
+
+    Edge cases:
+        An unbounded cell before the last one is reported and does not take
+        part in the ascending check; the comparison continues with the last
+        *bounded* cell seen. An empty cell list produces no finding here.
+        A bound must be a finite number: NaN compares false with everything
+        (the cell would never match, the ascending check would never fire),
+        and an infinite bound makes a cell empty or unreachable. Such a bound
+        is reported once (``K7.threshold-not-finite``) and, like an unbounded
+        cell, skipped by the ascending check; on the last cell the
+        "must be unbounded" finding is reported as well.
+    """
+
+    last = len(cells) - 1
+    prev: float | None = None
+    for i, cell in enumerate(cells):
+        if cell.upper is not None and not math.isfinite(cell.upper):
+            fail(
+                "threshold bounds must be finite numbers",
+                node_id,
+                code="K7.threshold-not-finite",
+            )
+            if i != last:
+                continue
+        if i == last:
+            if cell.upper is not None:
+                fail(
+                    "the last threshold branch must be unbounded (+inf)",
+                    node_id,
+                    code="K7.threshold-last-unbounded",
+                )
+        elif cell.upper is None:
+            fail(
+                "only the last threshold branch may be unbounded",
+                node_id,
+                code="K7.threshold-only-last-unbounded",
+            )
+        else:
+            if prev is not None and cell.upper <= prev:
+                fail(
+                    "threshold bounds must be strictly ascending",
+                    node_id,
+                    code="K7.threshold-ascending",
+                )
+            prev = cell.upper
+
+
+def _check_boolean_cells(
+    node_id: str, cells: Sequence[PartitionCell], fail: _Fail, *, noun: str
+) -> None:
+    """BOOLEAN partition: exactly two cells, covering ``True`` and ``False``.
+
+    Parameters:
+        node_id: The split or LOOP_END carrying the decision (finding location).
+        cells: The partition cells.
+        fail: Collects the findings (see :func:`_collecting_fail`).
+        noun: ``"split"`` or ``"loop"``; only flavours the finding text.
+
+    Edge cases:
+        Both checks run independently: two cells with the same truth value
+        pass the count but fail the coverage check.
+    """
+
+    if len(cells) != 2:
+        fail(
+            f"a boolean {noun} must have exactly two branches",
+            node_id,
+            code="K7.boolean-two-branches",
+            params={"noun": str(noun)},
+        )
+    truths = {c.bool_value for c in cells}
+    if truths != {True, False}:
+        fail(
+            "boolean branches must cover both true and false exactly once",
+            node_id,
+            code="K7.boolean-cover",
+        )
+
+
+def _check_enum_cells(
+    node_id: str, cells: Sequence[PartitionCell], fail: _Fail, *, noun: str
+) -> None:
+    """ENUM partition: one catch-all cell, the others list disjoint values.
+
+    The catch-all (otherwise) cell makes the partition total; values listed
+    by at most one cell make it disjoint.
+
+    Parameters:
+        node_id: The split or LOOP_END carrying the decision (finding location).
+        cells: The partition cells in their stored order.
+        fail: Collects the findings (see :func:`_collecting_fail`).
+        noun: ``"split"`` or ``"loop"``; only flavours the finding text.
+
+    Edge cases:
+        A value repeated within one cell is reported as a duplicate as well.
+        A catch-all cell's values are reported but not entered into the
+        duplicate check.
+    """
+
+    else_count = sum(1 for c in cells if c.is_else)
+    if else_count != 1:
+        fail(
+            f"an enum {noun} must have exactly one catch-all (otherwise) branch",
+            node_id,
+            code="K7.enum-one-otherwise",
+            params={"noun": str(noun)},
+        )
+    seen: set[str] = set()
+    for cell in cells:
+        if cell.is_else:
+            if cell.values:
+                fail(
+                    "the catch-all branch must not list values",
+                    node_id,
+                    code="K7.otherwise-values",
+                )
+            continue
+        if not cell.values:
+            fail(
+                "each enum branch must list at least one value",
+                node_id,
+                code="K7.enum-empty-branch",
+            )
+        for value in cell.values:
+            if value in seen:
+                fail(
+                    f"enum value {value!r} is matched by more than one branch",
+                    node_id,
+                    code="K7.enum-duplicate",
+                    params={"value": str(value)},
+                )
+            seen.add(value)
+
+
+# --- K3: reachability (no isolated nodes, no dead ends) -------------------
+
+
+def _check_k3_reachability(schema: ProcessSchema) -> list[ValidationFinding]:
+    findings: list[ValidationFinding] = []
+    if not schema.nodes:
+        return findings
+
+    starts = [n for n in schema.nodes.values() if n.type is NodeType.START]
+    ends = [n for n in schema.nodes.values() if n.type is NodeType.END]
+    if len(starts) != 1 or len(ends) != 1:
+        # Endpoint cardinality already reported by K2; skip to avoid noise.
+        return findings
+
+    forward = _bfs({s.id for s in starts}, _succ_map(schema))
+    backward = _bfs({e.id for e in ends}, _pred_map(schema))
+
+    for node in schema.nodes.values():
+        if node.id not in forward:
+            findings.append(
+                ValidationFinding(
+                    rule="K3",
+                    node_id=node.id,
+                    message="node not reachable from START",
+                    code="K3.unreachable",
+                    params={"step": node_name(schema, node.id)},
+                )
+            )
+        if node.id not in backward:
+            findings.append(
+                ValidationFinding(
+                    rule="K3",
+                    node_id=node.id,
+                    message="node cannot reach END (dead end)",
+                    code="K3.dead-end",
+                    params={"step": node_name(schema, node.id)},
+                )
+            )
+    return findings
+
+
+def _succ_map(schema: ProcessSchema) -> dict[str, list[str]]:
+    # Control flow only: SYNC edges (K4) are ordering-only and must never
+    # influence reachability, blocks or the must-analyses (conservative).
+    out: dict[str, list[str]] = {nid: [] for nid in schema.nodes}
+    for e in schema.edges:
+        if e.type is EdgeType.CONTROL:
+            out.setdefault(e.source, []).append(e.target)
+    return out
+
+
+def _pred_map(schema: ProcessSchema) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {nid: [] for nid in schema.nodes}
+    for e in schema.edges:
+        if e.type is EdgeType.CONTROL:
+            out.setdefault(e.target, []).append(e.source)
+    return out
+
+
+def _bfs(starts: set[str], adjacency: dict[str, list[str]]) -> set[str]:
+    seen: set[str] = set(starts)
+    queue: deque[str] = deque(starts)
+    while queue:
+        current = queue.popleft()
+        for nxt in adjacency.get(current, []):
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+    return seen
+
+
+# --- D1-D4: data-flow correctness ----------------------------------------
+
+
+def _check_data_flow(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Run data-flow rules D4 (well-formedness), D3 (types), D2 and D1."""
+
+    findings: list[ValidationFinding] = []
+    findings += _check_d4_wellformed(schema)
+    findings += _check_d3_types(schema)
+    # D1/D2 rely on a well-formed control graph; skip if the structure or the
+    # data accesses are already broken to avoid noisy follow-up errors.
+    if findings or _structure_broken(schema):
+        return findings
+    findings += _check_d2_concurrent_writes(schema)
+    findings += _check_d1_supply(schema)
+    return findings
+
+
+def _structure_broken(schema: ProcessSchema) -> bool:
+    """True if structural rules already fail (then D1/D2 are not meaningful)."""
+
+    return bool(
+        _check_k2_endpoints_and_degrees(schema)
+        or _check_k1_gateways(schema)
+        or _check_k3_reachability(schema)
+    )
+
+
+def _check_d4_wellformed(schema: ProcessSchema) -> list[ValidationFinding]:
+    """D4: data accesses only on ACTIVITY nodes and to existing elements."""
+
+    findings: list[ValidationFinding] = []
+    for access in schema.data_accesses:
+        node = schema.nodes.get(access.node_id)
+        if node is None:
+            findings.append(
+                ValidationFinding(
+                    rule="D4",
+                    node_id=access.node_id,
+                    message=f"data access references unknown node '{access.node_id}'",
+                    code="D4.unknown-node",
+                    params={"node": str(access.node_id)},
+                )
+            )
+        elif node.type is not NodeType.ACTIVITY:
+            findings.append(
+                ValidationFinding(
+                    rule="D4",
+                    node_id=access.node_id,
+                    message=f"only ACTIVITY nodes may access data, not {node.type.value}",
+                    code="D4.not-activity",
+                    params={"node_type": str(node.type.value)},
+                )
+            )
+        if access.element_id not in schema.data_elements:
+            findings.append(
+                ValidationFinding(
+                    rule="D4",
+                    node_id=access.node_id,
+                    message=f"data access references unknown element '{access.element_id}'",
+                    code="D4.unknown-element",
+                    params={"element": str(access.element_id)},
+                )
+            )
+    return findings
+
+
+def _check_d3_types(schema: ProcessSchema) -> list[ValidationFinding]:
+    """D3: declared parameter type must match the data element type."""
+
+    findings: list[ValidationFinding] = []
+    for access in schema.data_accesses:
+        element = schema.data_elements.get(access.element_id)
+        if element is None or access.param_type is None:
+            continue
+        if access.param_type != element.data_type:
+            findings.append(
+                ValidationFinding(
+                    rule="D3",
+                    node_id=access.node_id,
+                    message=f"parameter type {access.param_type.value} does not match "
+                        f"element '{element.name}' type {element.data_type.value}",
+                    code="D3.param-type",
+                    params={
+                        "param_type": str(access.param_type.value),
+                        "element": str(element.name),
+                        "type": str(element.data_type.value),
+                    },
+                )
+            )
+    return findings
+
+
+def _connector_supplied(element: DataElement) -> bool:
+    """Is this element's value produced by a connector rather than by the process?
+
+    An EXTERNAL element bound for **reading** -- record-bound (``external``,
+    C1-C3) or scalar-select-bound (``select``, C4-C6) -- is resolved by the DAL
+    when the reading node runs (:meth:`procworks.dal.DataAccessLayer.read`).
+    There is no process step that writes it, so demanding a prior mandatory
+    write (D1) would make such an element **impossible** to read as a mandatory
+    input. Its supply guarantee is carried instead by the connector rules: the
+    lookup key / filter sources must be must-written before every reader
+    (C2 and C5 -- "das Schlüssel-Datenelement muss vorher gesetzt
+    sein").
+
+    A ``write``-bound element (C7-C9) is the opposite case: the *process*
+    produces the value and it is flushed outward, so a mandatory read of it does
+    require a prior write and is deliberately **not** exempted here.
+    """
+
+    return element.source is DataSourceKind.EXTERNAL and (
+        element.external is not None or element.select is not None
+    )
+
+
+def _check_d1_supply(schema: ProcessSchema) -> list[ValidationFinding]:
+    """D1: every mandatory read is supplied by a mandatory write on all paths."""
+
+    findings: list[ValidationFinding] = []
+    written_before = _must_written_before(schema)
+    for access in schema.data_accesses:
+        if access.mode not in READ_MODES or not access.mandatory:
+            continue
+        element = schema.data_elements.get(access.element_id)
+        if element is None:
+            continue
+        if _connector_supplied(element):
+            continue  # supplied by the connector; key coverage is C2/C5
+        if access.element_id not in written_before.get(access.node_id, set()):
+            findings.append(
+                ValidationFinding(
+                    rule="D1",
+                    node_id=access.node_id,
+                    message=(
+                        f"mandatory input '{element.name}' may be read before it is "
+                        f"written on some execution path"
+                    ),
+                    code="D1.read-before-write",
+                    params={
+                        "step": node_name(schema, access.node_id),
+                        "element": element.name,
+                    },
+                )
+            )
+    return findings
+
+
+def _subprocess_output_writes(schema: ProcessSchema) -> dict[str, set[str]]:
+    """Parent elements each SUBPROCESS node writes back via its output mapping.
+
+    At runtime :func:`execution._join_subprocess` copies the child's mapped
+    outputs into these parent elements, so they behave like a mandatory write of
+    the sub-process node in the parent's data-flow analysis. Only mappings whose
+    parent element actually exists are counted (H2 reports unknown ones).
+    """
+
+    writes: dict[str, set[str]] = {}
+    for node_id, binding in schema.sub_process_bindings.items():
+        node = schema.nodes.get(node_id)
+        if node is None or node.type is not NodeType.SUBPROCESS:
+            continue
+        for parent_eid in binding.output_mapping.values():
+            if parent_eid in schema.data_elements:
+                writes.setdefault(node_id, set()).add(parent_eid)
+    return writes
+
+
+def _must_written_before(schema: ProcessSchema) -> dict[str, set[str]]:
+    """For each node, the elements guaranteed written on all paths before it.
+
+    Forward must-analysis over the (acyclic) control graph: at an AND_JOIN all
+    branches run, so contributions are unioned; at an XOR_JOIN only one branch
+    runs, so contributions are intersected.
+    """
+
+    mandatory_writes = _mandatory_writes(schema)
+    # A SUBPROCESS writes its mapped outputs back into the parent when it joins
+    # (Datenübergabe), so those parent elements are guaranteed available once the
+    # sub-process node completes -- exactly like a mandatory write.
+    for node_id, produced in _subprocess_output_writes(schema).items():
+        mandatory_writes.setdefault(node_id, set()).update(produced)
+    return _must_hold_before(schema, mandatory_writes)
+
+
+def _mandatory_writes(schema: ProcessSchema) -> dict[str, set[str]]:
+    """Die Datenelemente, die jeder Knoten per Pflicht-Schreibzugriff setzt.
+
+    Gemeinsame Grundlage der Must-Analysen D1 (:func:`_must_written_before`)
+    und K6c (:func:`_written_through_body`). Gezählt wird nur ein Zugriff mit
+    Schreibmodus (``WRITE_MODES``) **und** ``mandatory`` -- ein optionaler
+    Schreibzugriff garantiert keinen Wert.
+
+    Parameter:
+        schema: Das zu prüfende Schema.
+
+    Rückgabe:
+        Knoten-ID -> Menge der Element-IDs. Knoten ohne Pflicht-Schreibzugriff
+        fehlen (Aufrufer lesen per ``.get(node_id, set())``). Jeder Aufruf
+        liefert ein frisches Dict, der Aufrufer darf es erweitern.
+    """
+
+    writes: dict[str, set[str]] = {}
+    for access in schema.data_accesses:
+        if access.mode in WRITE_MODES and access.mandatory:
+            writes.setdefault(access.node_id, set()).add(access.element_id)
+    return writes
+
+
+def _meet_at(
+    schema: ProcessSchema, node_id: str, contributions: list[set[str]]
+) -> set[str]:
+    """Verknüpft die Beiträge der Vorgänger eines Knotens (Must-Analyse).
+
+    Die eine Join-Semantik aller Vorwärts-Must-Analysen (D1, K6c, Z3): An einem
+    AND_JOIN laufen alle Zweige, die Beiträge werden **vereinigt**; an jedem
+    anderen Knoten (XOR_JOIN oder seriell mit genau einem Vorgänger) wird
+    **geschnitten**, weil nur garantiert ist, was auf jedem Weg gilt.
+
+    Parameter:
+        schema: Das Schema, dem ``node_id`` angehört.
+        node_id: Der Knoten, an dem die Beiträge zusammenlaufen.
+        contributions: Je Vorgänger die Menge, die nach ihm garantiert gilt.
+
+    Rückgabe:
+        Eine neue Menge; ohne Beiträge (Startknoten bzw. Blockanfang) leer.
+        Der Knotentyp wird nur bei vorhandenen Beiträgen nachgeschlagen.
+    """
+
+    if not contributions:
+        return set()
+    if schema.nodes[node_id].type is NodeType.AND_JOIN:
+        return set().union(*contributions)
+    return set(contributions[0]).intersection(*contributions[1:])
+
+
+def _must_hold_before(
+    schema: ProcessSchema, produced: dict[str, set[str]]
+) -> dict[str, set[str]]:
+    """Globale Vorwärts-Must-Analyse über den (azyklischen) Kontrollfluss.
+
+    Gemeinsamer Kern von :func:`_must_written_before` (erzeugt werden
+    geschriebene Elemente) und :func:`_must_executed_before` (erzeugt wird der
+    Knoten selbst). Läuft in topologischer Reihenfolge, verknüpft an jedem
+    Knoten die Beiträge seiner CONTROL-Vorgänger über :func:`_meet_at` und
+    ergänzt danach, was der Knoten selbst erzeugt.
+
+    Parameter:
+        schema: Das zu analysierende Schema.
+        produced: Knoten-ID -> was der Knoten erzeugt; fehlende Knoten
+            erzeugen nichts.
+
+    Rückgabe:
+        Für jeden Knoten des Schemas die Menge, die auf **allen** Wegen vor
+        ihm garantiert gilt. Knoten, die die topologische Sortierung nicht
+        erreicht (Zyklus auf kaputtem Graphen), behalten die leere Menge.
+    """
+
+    pred = _pred_map(schema)
+    before: dict[str, set[str]] = {nid: set() for nid in schema.nodes}
+    holds_after: dict[str, set[str]] = {}
+    for node_id in _topological_order(schema):
+        guaranteed = _meet_at(
+            schema, node_id, [holds_after.get(p, set()) for p in pred.get(node_id, [])]
+        )
+        before[node_id] = guaranteed
+        holds_after[node_id] = guaranteed | produced.get(node_id, set())
+    return before
+
+
+def _check_d2_concurrent_writes(schema: ProcessSchema) -> list[ValidationFinding]:
+    """D2: no two mandatory writes to the same element on parallel AND branches."""
+
+    findings: list[ValidationFinding] = []
+    succ = _succ_map(schema)
+    reachable = {nid: _bfs(set(succ.get(nid, [])), succ) for nid in schema.nodes}
+
+    writers: dict[str, list[str]] = {}
+    for access in schema.data_accesses:
+        if access.mode in WRITE_MODES and access.mandatory:
+            writers.setdefault(access.element_id, []).append(access.node_id)
+    # Sub-process output write-backs count as mandatory writes too (D2 must see
+    # them so two parallel sub-processes cannot race on the same parent element).
+    for node_id, produced in _subprocess_output_writes(schema).items():
+        for element_id in produced:
+            writers.setdefault(element_id, []).append(node_id)
+
+    for element_id, nodes in writers.items():
+        unique = sorted(set(nodes))
+        for i in range(len(unique)):
+            for j in range(i + 1, len(unique)):
+                a, b = unique[i], unique[j]
+                if b in reachable[a] or a in reachable[b]:
+                    continue  # sequentially ordered -> not concurrent
+                if _parallel_under_and(schema, a, b, reachable):
+                    element = schema.data_elements.get(element_id)
+                    name = element.name if element else element_id
+                    findings.append(
+                        ValidationFinding(
+                            rule="D2",
+                            node_id=a,
+                            message=(
+                                f"concurrent writes to data element '{name}' on "
+                                f"parallel AND branches ({a}, {b})"
+                            ),
+                            code="D2.parallel-writes",
+                            params={
+                                "element": name,
+                                "a": node_name(schema, a),
+                                "b": node_name(schema, b),
+                            },
+                        )
+                    )
+    return findings
+
+
+def _parallel_under_and(
+    schema: ProcessSchema, a: str, b: str, reachable: dict[str, set[str]]
+) -> bool:
+    """True if a and b sit on different branches of a common AND_SPLIT."""
+
+    common_splits = [
+        nid
+        for nid, node in schema.nodes.items()
+        if node.type in SPLIT_TYPES and a in reachable[nid] and b in reachable[nid]
+    ]
+    if not common_splits:
+        return False
+    # Innermost common split: the one reachable from all other common splits.
+    for candidate in common_splits:
+        if all(other == candidate or candidate in reachable[other] for other in common_splits):
+            return schema.nodes[candidate].type is NodeType.AND_SPLIT
+    return False
+
+
+def _topological_order(schema: ProcessSchema) -> list[str]:
+    succ = _succ_map(schema)
+    indegree = {nid: 0 for nid in schema.nodes}
+    for edge in schema.edges:
+        if edge.type is not EdgeType.CONTROL:
+            continue  # SYNC is ordering-only (K4), not part of the structure
+        indegree[edge.target] = indegree.get(edge.target, 0) + 1
+    queue: deque[str] = deque(nid for nid, deg in indegree.items() if deg == 0)
+    order: list[str] = []
+    while queue:
+        node_id = queue.popleft()
+        order.append(node_id)
+        for nxt in succ.get(node_id, []):
+            indegree[nxt] -= 1
+            if indegree[nxt] == 0:
+                queue.append(nxt)
+    return order
+
+
+def performer_reference_candidates(schema: ProcessSchema, node_id: str) -> list[str]:
+    """ACTIVITY nodes a staff rule on ``node_id`` may reference.
+
+    Exactly the nodes Z3 accepts: guaranteed to have run on every path before
+    ``node_id`` (:func:`_must_executed_before`). The web dialog offered every
+    step, including those of another XOR branch, and only the click brought
+    the Z3 rejection. Read-only; Z3 stays the rule that decides.
+    """
+
+    before = _must_executed_before(schema).get(node_id, set())
+    return sorted(
+        nid for nid in before if schema.nodes[nid].type is NodeType.ACTIVITY
+    )
+
+
+def _must_executed_before(schema: ProcessSchema) -> dict[str, set[str]]:
+    """For each node, the nodes guaranteed to have executed on all prior paths.
+
+    Same must-analysis as the data flow (AND_JOIN unions branches, XOR_JOIN
+    intersects them), but tracking node execution instead of data writes. Used
+    by Z3 to validate NodePerformingAgent back-references.
+    """
+
+    return _must_hold_before(schema, {nid: {nid} for nid in schema.nodes})
+
+
+# --- U1-U3: input-mask (form designer) well-formedness -------------------
+
+
+#: Longest name/label any input may set. Long enough for every real
+#: caption, short enough to keep dialogs, lanes and worklists readable.
+MAX_LABEL_LENGTH = 200
+
+
+def clean_label(value: str, *, what: str) -> str:
+    """Trim a name/label and reject an empty or overlong one.
+
+    Empty labels, labels of only blanks and 5000-character labels are refused.
+    Every operation that sets a name calls this, so
+    the rule holds for web, API and scripts alike; ``what`` names the kind of
+    object for the client's wording (``OP_KIND_NAMES``). The *length* bound is
+    additionally part of ``validate()`` (U6), so the BPMN import honours it
+    too; emptiness is not -- foreign BPMN and stored models may carry unnamed
+    steps, and every later operation on them would fail.
+    """
+
+    text = value.strip()
+    if not text:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"{what} needs a non-empty name",
+                    code="OP.label-empty",
+                    params={"kind": what},
+                )
+            ]
+        )
+    if len(text) > MAX_LABEL_LENGTH:
+        raise CorrectnessError(
+            [
+                ValidationFinding(
+                    rule="OP",
+                    message=f"{what} name is longer than {MAX_LABEL_LENGTH} characters",
+                    code="OP.label-too-long",
+                    params={"kind": what, "max": str(MAX_LABEL_LENGTH)},
+                )
+            ]
+        )
+    return text
+
+
+def _check_label_lengths(schema: ProcessSchema) -> list[ValidationFinding]:
+    """U6: no node label or data element name exceeds ``MAX_LABEL_LENGTH``.
+
+    Part of ``validate()`` so that also the BPMN import -- which builds nodes
+    without the operations -- cannot store a 5000-character caption.
+    """
+
+    findings: list[ValidationFinding] = []
+    for node in schema.nodes.values():
+        if node.label and len(node.label) > MAX_LABEL_LENGTH:
+            findings.append(
+                ValidationFinding(
+                    rule="U6",
+                    node_id=node.id,
+                    message=f"label of '{node.id}' is longer than {MAX_LABEL_LENGTH}",
+                    code="U6.label-too-long",
+                    params={"max": str(MAX_LABEL_LENGTH)},
+                )
+            )
+    for element in schema.data_elements.values():
+        if len(element.name) > MAX_LABEL_LENGTH:
+            findings.append(
+                ValidationFinding(
+                    rule="U6",
+                    message=f"name of data element '{element.id}' is too long",
+                    code="U6.label-too-long",
+                    params={"max": str(MAX_LABEL_LENGTH)},
+                )
+            )
+    return findings
+
+
+#: How many data elements may name an instance -- more no longer fits
+#: a worklist row.
+MAX_DISPLAY_FIELDS = 2
+
+
+def _check_display_fields(schema: ProcessSchema) -> list[ValidationFinding]:
+    """U5: the elements that name an instance exist and are INSTANCE data.
+
+    Presentation only: the check keeps the list meaningful, no rule
+    depends on the values. EXTERNAL elements are excluded because their value
+    is fetched per step and is not part of the instance data a worklist shows.
+    """
+
+    findings: list[ValidationFinding] = []
+    if len(schema.display_fields) > MAX_DISPLAY_FIELDS:
+        findings.append(
+            ValidationFinding(
+                rule="U5",
+                message=f"at most {MAX_DISPLAY_FIELDS} display fields are allowed",
+                code="U5.too-many",
+                params={"max": str(MAX_DISPLAY_FIELDS)},
+            )
+        )
+    for element_id in schema.display_fields:
+        element = schema.data_elements.get(element_id)
+        if element is None:
+            findings.append(
+                ValidationFinding(
+                    rule="U5",
+                    message=f"display field '{element_id}' is no data element",
+                    code="U5.unknown-element",
+                    params={"element": element_id},
+                )
+            )
+        elif element.source is not DataSourceKind.INSTANCE:
+            findings.append(
+                ValidationFinding(
+                    rule="U5",
+                    message=f"display field '{element_id}' must be an INSTANCE element",
+                    code="U5.not-instance",
+                    params={"element": element.name},
+                )
+            )
+    return findings
+
+
+def _check_forms(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Input-mask rules U1-U3 (additive; silent for models without masks).
+
+    A form is a presentation layer over ``data_accesses``: every field mirrors a
+    read/write link. These rules keep mask and data flow consistent so that the
+    Correct-by-Construction guarantee -- in particular D1 (no read without a
+    write on every path) -- also holds for masks. U-rules never fire unless a
+    schema carries at least one mask.
+    """
+
+    findings: list[ValidationFinding] = []
+    if not schema.forms:
+        return findings
+
+    for node_id, form in schema.forms.items():
+        findings += _check_form(schema, node_id, form)
+    return findings
+
+
+def _check_form(schema: ProcessSchema, node_id: str, form: Form) -> list[ValidationFinding]:
+    """U1-U3 for the input mask of one node.
+
+    Parameters:
+        schema: The schema that owns the mask.
+        node_id: The node the mask is attached to (finding location).
+        form: The input mask.
+
+    Returns:
+        The carrier-node findings (U1) first, then per field -- in field
+        order -- its uniqueness/label findings (U2) followed by the findings
+        of :func:`_check_form_field_binding`.
+
+    Edge cases:
+        A mask on an unknown node yields only ``U1.unknown-node``: without the
+        node there are no data accesses the fields could be matched against.
+        A mask on a non-ACTIVITY node is reported but its fields are still
+        checked, so all problems surface at once.
+    """
+
+    findings: list[ValidationFinding] = []
+    node = schema.nodes.get(node_id)
+    if node is None:
+        findings.append(
+            ValidationFinding(
+                rule="U1",
+                node_id=node_id,
+                message=f"input mask references unknown node '{node_id}'",
+                code="U1.unknown-node",
+                params={"node": str(node_id)},
+            )
+        )
+        return findings
+    if node.type is not NodeType.ACTIVITY:
+        findings.append(
+            ValidationFinding(
+                rule="U1",
+                node_id=node_id,
+                message="input masks are only allowed on ACTIVITY nodes",
+                code="U1.not-activity",
+            )
+        )
+
+    accesses = schema.accesses_of(node_id)
+    seen_field_ids: set[str] = set()
+    seen_elements: set[str] = set()
+    for field in form.fields:
+        if field.id in seen_field_ids:
+            findings.append(
+                ValidationFinding(
+                    rule="U2",
+                    node_id=node_id,
+                    message=f"duplicate field id '{field.id}' in input mask",
+                    code="U2.duplicate-field",
+                    params={"field": str(field.id)},
+                )
+            )
+        seen_field_ids.add(field.id)
+        if field.element_id in seen_elements:
+            findings.append(
+                ValidationFinding(
+                    rule="U2",
+                    node_id=node_id,
+                    message=f"element '{field.element_id}' is bound by more than one "
+                        "field in the same mask",
+                    code="U2.element-twice",
+                    params={"element": str(field.element_id)},
+                )
+            )
+        seen_elements.add(field.element_id)
+        if not field.label.strip():
+            findings.append(
+                ValidationFinding(
+                    rule="U2",
+                    node_id=node_id,
+                    message=f"field '{field.id}' has an empty label",
+                    code="U2.empty-label",
+                    params={"field": str(field.id)},
+                )
+            )
+
+        findings += _check_form_field_binding(schema, node_id, field, accesses)
+    return findings
+
+
+def _check_form_field_binding(
+    schema: ProcessSchema, node_id: str, field: FormField, accesses: list[DataAccess]
+) -> list[ValidationFinding]:
+    """U1-U3 for how one mask field binds its data element.
+
+    Parameters:
+        schema: The schema that owns the element.
+        node_id: The node carrying the mask (finding location).
+        field: The mask field to check.
+        accesses: The data accesses of ``node_id`` (``schema.accesses_of``).
+
+    Returns:
+        In order: unknown element (U1), widget/type mismatch and option
+        problems (U2), the field's input-check findings (U2, see
+        :func:`_check_field_constraints`), then the access coupling (U3).
+
+    Edge cases:
+        An unknown element yields only ``U1.unknown-element``: widget, input
+        checks and accesses all depend on the element's type and identity.
+    """
+
+    element = schema.data_elements.get(field.element_id)
+    if element is None:
+        return [
+            ValidationFinding(
+                rule="U1",
+                node_id=node_id,
+                message=f"field '{field.id}' references unknown data element "
+                    f"'{field.element_id}'",
+                code="U1.unknown-element",
+                params={"field": str(field.id), "element": str(field.element_id)},
+            )
+        ]
+
+    findings: list[ValidationFinding] = []
+    if not widget_matches_type(field.widget, element.data_type):
+        findings.append(
+            ValidationFinding(
+                rule="U2",
+                node_id=node_id,
+                message=f"widget '{field.widget}' cannot present element "
+                    f"'{field.element_id}' of type '{element.data_type}'",
+                code="U2.widget-type",
+                params={
+                    "widget": str(field.widget),
+                    "element": str(field.element_id),
+                    "type": str(element.data_type),
+                },
+            )
+        )
+
+    findings += _check_form_field_options(node_id, field)
+
+    # U2: input checks fit the field -- bounds on a number,
+    # pattern/length on text, bounds in order, pattern compiles.
+    findings += _check_field_constraints(node_id, field)
+
+    findings += _check_form_field_access(node_id, field, accesses)
+    return findings
+
+
+def _check_form_field_options(node_id: str, field: FormField) -> list[ValidationFinding]:
+    """U2: only a dropdown carries options, and a dropdown carries usable ones.
+
+    Parameters:
+        node_id: The node carrying the mask (finding location).
+        field: The mask field to check.
+
+    Returns:
+        At most one finding: a dropdown with fewer than two options or a
+        blank option (``U2.dropdown-options``), a dropdown with duplicate
+        options after trimming (``U2.duplicate-options``), or options on a
+        non-dropdown widget (``U2.options-not-dropdown``).
+    """
+
+    if field.widget is WidgetKind.DROPDOWN:
+        options = [o.strip() for o in field.options]
+        if len(field.options) < 2 or any(not o for o in options):
+            return [
+                ValidationFinding(
+                    rule="U2",
+                    node_id=node_id,
+                    message=f"dropdown field '{field.id}' needs at least two "
+                        "non-empty options",
+                    code="U2.dropdown-options",
+                    params={"field": str(field.id)},
+                )
+            ]
+        if len(set(options)) != len(options):
+            return [
+                ValidationFinding(
+                    rule="U2",
+                    node_id=node_id,
+                    message=f"dropdown field '{field.id}' has duplicate options",
+                    code="U2.duplicate-options",
+                    params={"field": str(field.id)},
+                )
+            ]
+        return []
+    if field.options:
+        return [
+            ValidationFinding(
+                rule="U2",
+                node_id=node_id,
+                message=f"field '{field.id}' carries options but its widget is "
+                    f"not a dropdown",
+                code="U2.options-not-dropdown",
+                params={"field": str(field.id)},
+            )
+        ]
+    return []
+
+
+def _check_form_field_access(
+    node_id: str, field: FormField, accesses: list[DataAccess]
+) -> list[ValidationFinding]:
+    """U3: the field must be backed by a matching data access of its node.
+
+    This is the bridge that lets D1 govern "no read without a prior write":
+    the mask itself never reads or writes, its node's data accesses do.
+
+    Parameters:
+        node_id: The node carrying the mask (finding location).
+        field: The mask field to check.
+        accesses: The data accesses of ``node_id``.
+
+    Returns:
+        ``U3.input-no-write`` when an input field lacks a write access, then
+        ``U3.display-no-read`` when a display field lacks a read access. A
+        field whose mode is both reading and writing can produce both.
+    """
+
+    findings: list[ValidationFinding] = []
+    modes = {a.mode for a in accesses if a.element_id == field.element_id}
+    if field.mode in WRITE_MODES and not any(m in WRITE_MODES for m in modes):
+        findings.append(
+            ValidationFinding(
+                rule="U3",
+                node_id=node_id,
+                message=f"input field '{field.id}' has no write access for element "
+                    f"'{field.element_id}'",
+                code="U3.input-no-write",
+                params={"field": str(field.id), "element": str(field.element_id)},
+            )
+        )
+    if field.mode in READ_MODES and not any(m in READ_MODES for m in modes):
+        findings.append(
+            ValidationFinding(
+                rule="U3",
+                node_id=node_id,
+                message=f"display field '{field.id}' has no read access for element "
+                    f"'{field.element_id}'",
+                code="U3.display-no-read",
+                params={"field": str(field.id), "element": str(field.element_id)},
+            )
+        )
+    return findings
+
+
+# --- C1-C3: external data connectors -------------------------------------
+
+
+def _check_connectors(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Connector rules C1-C3 for EXTERNAL data elements (Section 9).
+
+    C1: an EXTERNAL element carries an ``external`` binding to a registered
+        connector (and an INSTANCE element carries none).
+    C2: the binding's key references an existing INSTANCE data element (the
+        process supplies the lookup key; it is not itself external) and is not
+        the element itself.
+    C3: the bound entity name is non-empty.
+    """
+
+    findings: list[ValidationFinding] = []
+    for element in schema.data_elements.values():
+        findings += _check_connector_element(schema, element)
+    return findings
+
+
+def _check_connector_element(
+    schema: ProcessSchema, element: DataElement
+) -> list[ValidationFinding]:
+    """C1-C3 for one data element: decide which binding rules apply, then check.
+
+    Parameters:
+        schema: The schema that owns ``element``.
+        element: The data element to check.
+
+    Returns:
+        At most one C1 finding about the binding *kind* (INSTANCE with a
+        binding, several binding kinds, EXTERNAL without a binding), or the
+        findings of :func:`_check_record_binding` for a record-bound element.
+
+    Edge cases:
+        Scalar-bound EXTERNAL elements (``select``/``write``) yield nothing
+        here -- C4-C6 and C7-C9 check them. A malformed combination of binding
+        kinds stops the check, because the record rules would judge a binding
+        whose role is unclear.
+    """
+
+    bindings = [
+        b for b in (element.external, element.select, element.write) if b is not None
+    ]
+    if element.source is DataSourceKind.INSTANCE:
+        if bindings:
+            return [
+                ValidationFinding(
+                    rule="C1",
+                    message=f"INSTANCE element '{element.id}' must not carry an "
+                        f"external binding",
+                    code="C1.instance-with-binding",
+                    params={"element": str(element.id)},
+                )
+            ]
+        return []
+    if len(bindings) > 1:
+        return [
+            ValidationFinding(
+                rule="C1",
+                message=f"element '{element.id}' must carry exactly one external "
+                    f"binding kind (record, scalar-select or scalar-write)",
+                code="C1.binding-kinds",
+                params={"element": str(element.id)},
+            )
+        ]
+    if element.select is not None or element.write is not None:
+        # Scalar-bound EXTERNAL element: the record rules C1-C3 do not apply;
+        # well-formedness/typing is checked by C4-C6 (select) / C7-C9 (write).
+        return []
+    binding = element.external
+    if binding is None:
+        return [
+            ValidationFinding(
+                rule="C1",
+                message=f"EXTERNAL element '{element.id}' is missing its external binding",
+                code="C1.binding-missing",
+                params={"element": str(element.id)},
+            )
+        ]
+    return _check_record_binding(schema, element, binding)
+
+
+def _check_record_binding(
+    schema: ProcessSchema, element: DataElement, binding: ExternalBinding
+) -> list[ValidationFinding]:
+    """C1-C3 for the record binding of one EXTERNAL element.
+
+    Parameters:
+        schema: The schema that owns ``element`` (connectors, key element).
+        element: The EXTERNAL, record-bound data element.
+        binding: Its ``external`` binding.
+
+    Returns:
+        In order: unknown connector (C1), empty entity (C3), then the lookup
+        key checks (C2) -- self-reference, unknown key, non-INSTANCE key, or,
+        for a sound key, the findings of :func:`_check_key_supplied_before_readers`.
+
+    Edge cases:
+        A self-referencing key ends the check: there is no separate key
+        element whose kind or supply could be judged.
+    """
+
+    findings: list[ValidationFinding] = []
+    if binding.connector_id not in schema.connectors:
+        findings.append(
+            ValidationFinding(
+                rule="C1",
+                message=f"element '{element.id}' references unknown connector "
+                    f"'{binding.connector_id}'",
+                code="C1.unknown-connector",
+                params={"element": str(element.id), "connector": str(binding.connector_id)},
+            )
+        )
+    if not binding.entity.strip():
+        findings.append(
+            ValidationFinding(
+                rule="C3",
+                message=f"element '{element.id}' has an empty connector entity",
+                code="C3.empty-entity",
+                params={"element": str(element.id)},
+            )
+        )
+    if binding.key_element_id == element.id:
+        findings.append(
+            ValidationFinding(
+                rule="C2",
+                message=f"element '{element.id}' uses itself as its lookup key",
+                code="C2.self-key",
+                params={"element": str(element.id)},
+            )
+        )
+        return findings
+    key_element = schema.data_elements.get(binding.key_element_id)
+    if key_element is None:
+        findings.append(
+            ValidationFinding(
+                rule="C2",
+                message=f"element '{element.id}' uses unknown key element "
+                    f"'{binding.key_element_id}'",
+                code="C2.unknown-key",
+                params={"element": str(element.id), "key": str(binding.key_element_id)},
+            )
+        )
+    elif key_element.source is not DataSourceKind.INSTANCE:
+        findings.append(
+            ValidationFinding(
+                rule="C2",
+                message=f"key element '{binding.key_element_id}' of '{element.id}' must be "
+                    f"an INSTANCE element",
+                code="C2.key-not-instance",
+                params={"key": str(binding.key_element_id), "element": str(element.id)},
+            )
+        )
+    else:
+        findings += _check_key_supplied_before_readers(
+            schema, element.id, binding.key_element_id
+        )
+    return findings
+
+
+def _check_key_supplied_before_readers(
+    schema: ProcessSchema, element_id: str, key_element_id: str
+) -> list[ValidationFinding]:
+    """C2 (D1 coupling): the lookup key is set before anything reads the element.
+
+    The record-bound counterpart of the coupling C5 already performs for
+    scalar-select filters. Because a connector-supplied element is exempt from
+    the D1 write requirement (:func:`_connector_supplied`), *this* is what keeps
+    the supply guarantee intact: when the DAL resolves the element it reads the
+    key from the instance values, so the key must be must-written on every path
+    to every reading node -- otherwise the lookup would run with a missing key
+    and fail at runtime instead of at modelling time.
+
+    Skipped on a structurally broken schema, where the must-analysis is not
+    meaningful (same guard as D1/D2).
+    """
+
+    findings: list[ValidationFinding] = []
+    readers = [
+        a.node_id
+        for a in schema.data_accesses
+        if a.element_id == element_id and a.mode in READ_MODES
+    ]
+    if not readers or _structure_broken(schema):
+        return findings
+    written_before = _must_written_before(schema)
+    for node_id in sorted(set(readers)):
+        if key_element_id not in written_before.get(node_id, set()):
+            key = schema.data_elements.get(key_element_id)
+            findings.append(
+                ValidationFinding(
+                    rule="C2",
+                    node_id=node_id,
+                    message=f"lookup key '{key.name if key else key_element_id}' of external "
+                        f"element '{element_id}' is not guaranteed to be set on every "
+                        f"path to this reader",
+                    code="C2.key-not-set",
+                    params={
+                        "key": str(key.name if key else key_element_id),
+                        "element": str(element_id),
+                    },
+                )
+            )
+    return findings
+
+
+# --- C4-C6: structured scalar SQL-select bindings ------------------------
+
+#: Filter operators that require an orderable type (numeric or date).
+_ORDER_OPERATORS = frozenset(
+    {FilterOperator.LT, FilterOperator.LE, FilterOperator.GT, FilterOperator.GE}
+)
+#: Data types that support ordering comparisons.
+_ORDERABLE_TYPES = frozenset(
+    {DataType.INTEGER, DataType.FLOAT, DataType.DECIMAL, DataType.DATE}
+)
+
+
+def _operator_matches_type(operator: FilterOperator, data_type: DataType) -> bool:
+    """Whether a filter ``operator`` is valid for a column of ``data_type`` (C5)."""
+
+    if operator is FilterOperator.LIKE:
+        return data_type is DataType.STRING
+    if operator in _ORDER_OPERATORS:
+        return data_type in _ORDERABLE_TYPES
+    return True  # EQ / NE / IN apply to any type
+
+
+def _check_query_cardinality(
+    element_id: str, binding: SqlSelectBinding
+) -> list[ValidationFinding]:
+    """C6: the select must structurally guarantee at most one result row."""
+
+    findings: list[ValidationFinding] = []
+    if binding.cardinality is Cardinality.KEY_UNIQUE:
+        if not binding.unique_column.strip():
+            findings.append(
+                ValidationFinding(
+                    rule="C6",
+                    message=f"element '{element_id}' uses KEY_UNIQUE but declares no "
+                        f"unique column",
+                    code="C6.no-unique-column",
+                    params={"element": str(element_id)},
+                )
+            )
+        elif not any(
+            f.operator is FilterOperator.EQ and f.column == binding.unique_column
+            for f in binding.filters
+        ):
+            findings.append(
+                ValidationFinding(
+                    rule="C6",
+                    message=f"element '{element_id}' uses KEY_UNIQUE but has no equality "
+                        f"filter on unique column '{binding.unique_column}'",
+                    code="C6.no-unique-filter",
+                    params={"element": str(element_id), "column": str(binding.unique_column)},
+                )
+            )
+    elif binding.cardinality is Cardinality.AGGREGATE:
+        if binding.aggregate is AggregateKind.NONE:
+            findings.append(
+                ValidationFinding(
+                    rule="C6",
+                    message=f"element '{element_id}' uses AGGREGATE cardinality but "
+                        f"projects a plain column",
+                    code="C6.aggregate-plain-column",
+                    params={"element": str(element_id)},
+                )
+            )
+    elif not binding.order_by:  # FIRST_ORDERED
+        findings.append(
+            ValidationFinding(
+                rule="C6",
+                message=f"element '{element_id}' uses FIRST_ORDERED but has an empty "
+                    f"ORDER BY",
+                code="C6.empty-order",
+                params={"element": str(element_id)},
+            )
+        )
+    return findings
+
+
+def _check_scalar_queries(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Structured scalar SQL-select rules C4-C6.
+
+    Silent unless a data element carries a ``select`` binding, so it never
+    affects models without scalar SQL bindings (fully additive).
+
+    C4: the select projection's result type (derived via
+        :func:`aggregate_result_type`) matches the element's declared type -- the
+        result *fits* the data element it fills.
+    C5: connector/entity/column are well-formed; every filter references an
+        existing INSTANCE source element of matching type with a type-compatible
+        operator; and each filter source is guaranteed written on every path
+        before any node that reads the element (D1 coupling, like the K7
+        discriminator).
+    C6: the select structurally yields at most one row (see
+        :func:`_check_query_cardinality`).
+    """
+
+    if not any(el.select is not None for el in schema.data_elements.values()):
+        return []
+
+    findings: list[ValidationFinding] = []
+    written_before = _must_written_before(schema)
+    for element in schema.data_elements.values():
+        binding = element.select
+        if binding is None or element.source is not DataSourceKind.EXTERNAL:
+            # INSTANCE elements carrying a select are already reported by C1.
+            continue
+
+        # C4: the projection result type must match the element type.
+        result_type = aggregate_result_type(binding.aggregate, binding.column_type)
+        if result_type is not element.data_type:
+            findings.append(
+                ValidationFinding(
+                    rule="C4",
+                    message=f"element '{element.id}' is {element.data_type.value} but its "
+                        f"select projection yields {result_type.value}",
+                    code="C4.type-mismatch",
+                    params={
+                        "element": str(element.id),
+                        "type": str(element.data_type.value),
+                        "result_type": str(result_type.value),
+                    },
+                )
+            )
+
+        # C5: connector / entity / column well-formedness.
+        findings += _check_select_target(schema, element.id, binding)
+
+        # C5: filters -- source existence/type, operator compatibility, D1 coupling.
+        reading_nodes = [
+            access.node_id
+            for access in schema.data_accesses
+            if access.element_id == element.id and access.mode in READ_MODES
+        ]
+        for item in binding.filters:
+            findings += _check_select_filter(
+                schema, element.id, item, reading_nodes, written_before
+            )
+
+        # C6: cardinality guarantee.
+        findings += _check_query_cardinality(element.id, binding)
+    return findings
+
+
+def _check_select_target(
+    schema: ProcessSchema, element_id: str, binding: SqlSelectBinding
+) -> list[ValidationFinding]:
+    """C5 (target part): connector, entity and column of a select are well-formed.
+
+    Parameters:
+        schema: The schema whose registered connectors are consulted.
+        element_id: The EXTERNAL element carrying ``binding``.
+        binding: The scalar select binding.
+
+    Returns:
+        Findings for an unknown connector, an empty entity and an empty
+        projection column -- in that order, each independent of the others.
+    """
+
+    findings: list[ValidationFinding] = []
+    if binding.connector_id not in schema.connectors:
+        findings.append(
+            ValidationFinding(
+                rule="C5",
+                message=f"element '{element_id}' references unknown connector "
+                    f"'{binding.connector_id}'",
+                code="C5.unknown-connector",
+                params={"element": str(element_id), "connector": str(binding.connector_id)},
+            )
+        )
+    if not binding.entity.strip():
+        findings.append(
+            ValidationFinding(
+                rule="C5",
+                message=f"element '{element_id}' has an empty select entity",
+                code="C5.empty-entity",
+                params={"element": str(element_id)},
+            )
+        )
+    if not binding.column.strip():
+        findings.append(
+            ValidationFinding(
+                rule="C5",
+                message=f"element '{element_id}' has an empty projection column",
+                code="C5.empty-column",
+                params={"element": str(element_id)},
+            )
+        )
+    return findings
+
+
+def _check_select_filter(
+    schema: ProcessSchema,
+    element_id: str,
+    item: QueryFilter,
+    reading_nodes: list[str],
+    written_before: dict[str, set[str]],
+) -> list[ValidationFinding]:
+    """C5 (filter part) for one filter of a scalar select binding.
+
+    Parameters:
+        schema: The schema that owns the element and the filter source.
+        element_id: The EXTERNAL element carrying the select binding.
+        item: The filter to check.
+        reading_nodes: Nodes that read the element, i.e. trigger the select
+            (one entry per read access, duplicates possible).
+        written_before: Must-written analysis (:func:`_must_written_before`).
+
+    Returns:
+        In order: an operator/column-type mismatch, then problems with the
+        filter source (unknown, not INSTANCE, type mismatch), then one
+        ``C5.source-unset`` finding per reading node the source may still be
+        unset at (D1 coupling).
+
+    Edge cases:
+        An unknown or non-INSTANCE source stops the check of this filter: its
+        type and supply cannot be judged meaningfully, so the D1 coupling is
+        skipped for it (as it always was).
+    """
+
+    findings: list[ValidationFinding] = []
+    if not _operator_matches_type(item.operator, item.column_type):
+        findings.append(
+            ValidationFinding(
+                rule="C5",
+                message=f"element '{element_id}' uses operator {item.operator.value} "
+                    f"on a {item.column_type.value} filter column",
+                code="C5.operator-type",
+                params={
+                    "element": str(element_id),
+                    "operator": str(item.operator.value),
+                    "column_type": str(item.column_type.value),
+                },
+            )
+        )
+    source = schema.data_elements.get(item.key_element_id)
+    if source is None:
+        findings.append(
+            ValidationFinding(
+                rule="C5",
+                message=f"element '{element_id}' uses unknown filter source "
+                    f"'{item.key_element_id}'",
+                code="C5.unknown-source",
+                params={"element": str(element_id), "source": str(item.key_element_id)},
+            )
+        )
+        return findings
+    if source.source is not DataSourceKind.INSTANCE:
+        findings.append(
+            ValidationFinding(
+                rule="C5",
+                message=f"filter source '{item.key_element_id}' of '{element_id}' "
+                    f"must be an INSTANCE element",
+                code="C5.source-not-instance",
+                params={"source": str(item.key_element_id), "element": str(element_id)},
+            )
+        )
+        return findings
+    if source.data_type is not item.column_type:
+        findings.append(
+            ValidationFinding(
+                rule="C5",
+                message=f"filter column type {item.column_type.value} of "
+                    f"'{element_id}' does not match source "
+                    f"'{item.key_element_id}' ({source.data_type.value})",
+                code="C5.source-type",
+                params={
+                    "column_type": str(item.column_type.value),
+                    "element": str(element_id),
+                    "source": str(item.key_element_id),
+                    "source_type": str(source.data_type.value),
+                },
+            )
+        )
+    for node_id in reading_nodes:
+        if item.key_element_id not in written_before.get(node_id, set()):
+            findings.append(
+                ValidationFinding(
+                    rule="C5",
+                    node_id=node_id,
+                    message=f"filter source '{item.key_element_id}' of "
+                        f"'{element_id}' may be read before it is written on "
+                        f"some execution path",
+                    code="C5.source-unset",
+                    params={"source": str(item.key_element_id), "element": str(element_id)},
+                )
+            )
+    return findings
+
+
+# --- C7-C9: structured scalar SQL write-back bindings --------------------
+
+
+def _check_scalar_writes(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Structured scalar SQL write-back rules C7-C9 (Q4).
+
+    Silent unless a data element carries a ``write`` binding (fully additive).
+
+    C7: the target column's declared type matches the element's type -- the
+        written scalar *fits* the column it updates.
+    C8: connector/entity/column are well-formed; every filter references an
+        existing INSTANCE source element of matching type with a type-compatible
+        operator; and each filter source is guaranteed written on every path
+        before any node that writes the element (D1 coupling).
+    C9: the write targets exactly one row -- a declared ``unique_column`` with an
+        equality filter on it (an UPDATE never fans out to many rows).
+    """
+
+    if not any(el.write is not None for el in schema.data_elements.values()):
+        return []
+
+    findings: list[ValidationFinding] = []
+    written_before = _must_written_before(schema)
+    for element in schema.data_elements.values():
+        binding = element.write
+        if binding is None or element.source is not DataSourceKind.EXTERNAL:
+            continue
+
+        # C7: the target column type must match the element type.
+        if binding.column_type is not element.data_type:
+            findings.append(
+                ValidationFinding(
+                    rule="C7",
+                    message=f"element '{element.id}' is {element.data_type.value} but its "
+                        f"write target column is {binding.column_type.value}",
+                    code="C7.type-mismatch",
+                    params={
+                        "element": str(element.id),
+                        "type": str(element.data_type.value),
+                        "column_type": str(binding.column_type.value),
+                    },
+                )
+            )
+
+        # C8: connector / entity / column well-formedness.
+        findings += _check_write_target(schema, element.id, binding)
+
+        # C8: filters -- source existence/type, operator compatibility, D1 coupling.
+        writing_nodes = [
+            access.node_id
+            for access in schema.data_accesses
+            if access.element_id == element.id and access.mode in WRITE_MODES
+        ]
+        for item in binding.filters:
+            findings += _check_write_filter(
+                schema, element.id, item, writing_nodes, written_before
+            )
+
+        # C9: single-row write guarantee.
+        findings += _check_write_single_row(element.id, binding)
+    return findings
+
+
+def _check_write_target(
+    schema: ProcessSchema, element_id: str, binding: SqlWriteBinding
+) -> list[ValidationFinding]:
+    """C8 (target part): connector, entity and column of a write are well-formed.
+
+    Parameters:
+        schema: The schema whose registered connectors are consulted.
+        element_id: The EXTERNAL element carrying ``binding``.
+        binding: The scalar write-back binding.
+
+    Returns:
+        Findings for an unknown connector, an empty entity and an empty target
+        column -- in that order, each independent of the others.
+    """
+
+    findings: list[ValidationFinding] = []
+    if binding.connector_id not in schema.connectors:
+        findings.append(
+            ValidationFinding(
+                rule="C8",
+                message=f"element '{element_id}' references unknown connector "
+                    f"'{binding.connector_id}'",
+                code="C8.unknown-connector",
+                params={"element": str(element_id), "connector": str(binding.connector_id)},
+            )
+        )
+    if not binding.entity.strip():
+        findings.append(
+            ValidationFinding(
+                rule="C8",
+                message=f"element '{element_id}' has an empty write entity",
+                code="C8.empty-entity",
+                params={"element": str(element_id)},
+            )
+        )
+    if not binding.column.strip():
+        findings.append(
+            ValidationFinding(
+                rule="C8",
+                message=f"element '{element_id}' has an empty target column",
+                code="C8.empty-column",
+                params={"element": str(element_id)},
+            )
+        )
+    return findings
+
+
+def _check_write_filter(
+    schema: ProcessSchema,
+    element_id: str,
+    item: QueryFilter,
+    writing_nodes: list[str],
+    written_before: dict[str, set[str]],
+) -> list[ValidationFinding]:
+    """C8 (filter part) for one filter of a scalar write-back binding.
+
+    Parameters:
+        schema: The schema that owns the element and the filter source.
+        element_id: The EXTERNAL element carrying the write binding.
+        item: The filter to check.
+        writing_nodes: Nodes that write the element, i.e. trigger the UPDATE
+            (one entry per write access, duplicates possible).
+        written_before: Must-written analysis (:func:`_must_written_before`).
+
+    Returns:
+        In order: an operator/column-type mismatch, then problems with the
+        filter source (unknown, not INSTANCE, type mismatch), then one
+        ``C8.source-unset`` finding per writing node the source may still be
+        unset at (D1 coupling).
+
+    Edge cases:
+        An unknown or non-INSTANCE source stops the check of this filter: its
+        type and supply cannot be judged meaningfully, so the D1 coupling is
+        skipped for it (as it always was).
+    """
+
+    findings: list[ValidationFinding] = []
+    if not _operator_matches_type(item.operator, item.column_type):
+        findings.append(
+            ValidationFinding(
+                rule="C8",
+                message=f"element '{element_id}' uses operator {item.operator.value} "
+                    f"on a {item.column_type.value} filter column",
+                code="C8.operator-type",
+                params={
+                    "element": str(element_id),
+                    "operator": str(item.operator.value),
+                    "column_type": str(item.column_type.value),
+                },
+            )
+        )
+    source = schema.data_elements.get(item.key_element_id)
+    if source is None:
+        findings.append(
+            ValidationFinding(
+                rule="C8",
+                message=f"element '{element_id}' uses unknown filter source "
+                    f"'{item.key_element_id}'",
+                code="C8.unknown-source",
+                params={"element": str(element_id), "source": str(item.key_element_id)},
+            )
+        )
+        return findings
+    if source.source is not DataSourceKind.INSTANCE:
+        findings.append(
+            ValidationFinding(
+                rule="C8",
+                message=f"filter source '{item.key_element_id}' of '{element_id}' "
+                    f"must be an INSTANCE element",
+                code="C8.source-not-instance",
+                params={"source": str(item.key_element_id), "element": str(element_id)},
+            )
+        )
+        return findings
+    if source.data_type is not item.column_type:
+        findings.append(
+            ValidationFinding(
+                rule="C8",
+                message=f"filter column type {item.column_type.value} of "
+                    f"'{element_id}' does not match source "
+                    f"'{item.key_element_id}' ({source.data_type.value})",
+                code="C8.source-type",
+                params={
+                    "column_type": str(item.column_type.value),
+                    "element": str(element_id),
+                    "source": str(item.key_element_id),
+                    "source_type": str(source.data_type.value),
+                },
+            )
+        )
+    for node_id in writing_nodes:
+        if item.key_element_id not in written_before.get(node_id, set()):
+            findings.append(
+                ValidationFinding(
+                    rule="C8",
+                    node_id=node_id,
+                    message=f"filter source '{item.key_element_id}' of "
+                        f"'{element_id}' may be used before it is written on "
+                        f"some execution path",
+                    code="C8.source-unset",
+                    params={"source": str(item.key_element_id), "element": str(element_id)},
+                )
+            )
+    return findings
+
+
+def _check_write_single_row(
+    element_id: str, binding: SqlWriteBinding
+) -> list[ValidationFinding]:
+    """C9: a scalar write-back structurally targets exactly one row.
+
+    Parameters:
+        element_id: The EXTERNAL element carrying ``binding``.
+        binding: The scalar write-back binding.
+
+    Returns:
+        ``C9.no-unique-column`` when no unique column is declared, otherwise
+        ``C9.no-unique-filter`` when no equality filter pins that column;
+        empty when the UPDATE can hit at most one row.
+    """
+
+    if not binding.unique_column.strip():
+        return [
+            ValidationFinding(
+                rule="C9",
+                message=f"write of '{element_id}' declares no unique column -- an "
+                    f"UPDATE must target exactly one row",
+                code="C9.no-unique-column",
+                params={"element": str(element_id)},
+            )
+        ]
+    if not any(
+        f.operator is FilterOperator.EQ and f.column == binding.unique_column
+        for f in binding.filters
+    ):
+        return [
+            ValidationFinding(
+                rule="C9",
+                message=f"write of '{element_id}' has no equality filter on unique "
+                    f"column '{binding.unique_column}'",
+                code="C9.no-unique-filter",
+                params={"element": str(element_id), "column": str(binding.unique_column)},
+            )
+        ]
+    return []
+
+
+# --- Z1-Z4: resource / staff-assignment correctness ----------------------
+
+
+def _check_resources(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Run resource rules Z1 (well-formed), Z4 (service), the activity
+    repository rules A1-A3, and (if well-formed) Z2 and Z3."""
+
+    findings: list[ValidationFinding] = []
+    findings += _check_z1_wellformed(schema)
+    findings += _check_org_master_data(schema)
+    findings += _check_z4_service(schema)
+    findings += _check_activity_repository(schema)
+    # Z2/Z3 evaluate the rule and the control graph; only run them when the
+    # rules are well-formed (Z1) and the structure is intact.
+    if findings or _structure_broken(schema):
+        return findings
+    findings += _check_z2_resolvable(schema)
+    findings += _check_z3_backrefs(schema)
+    return findings
+
+
+def _check_org_master_data(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Z1: referential integrity of org master data (managers and deputies).
+
+    A unit's ``manager_id`` and an agent's ``deputy_id`` must reference an
+    existing agent; an agent cannot be its own deputy. Deputy chains may form
+    cycles in principle -- runtime resolution follows them with a visited
+    guard, so cycles are tolerated rather than rejected here.
+    """
+
+    findings: list[ValidationFinding] = []
+    org = schema.org_model
+    for unit in org.org_units.values():
+        if unit.manager_id is not None and unit.manager_id not in org.agents:
+            findings.append(
+                ValidationFinding(
+                    rule="Z1",
+                    message=f"org unit '{unit.id}' has unknown manager '{unit.manager_id}'",
+                    code="Z1.unknown-manager",
+                    params={"unit": str(unit.id), "manager": str(unit.manager_id)},
+                )
+            )
+    for agent in org.agents.values():
+        if agent.deputy_id is None:
+            continue
+        if agent.deputy_id == agent.id:
+            findings.append(
+                ValidationFinding(
+                    rule="Z1",
+                    message=f"agent '{agent.id}' cannot be its own deputy",
+                    code="Z1.own-deputy",
+                    params={"agent": str(agent.id)},
+                )
+            )
+        elif agent.deputy_id not in org.agents:
+            findings.append(
+                ValidationFinding(
+                    rule="Z1",
+                    message=f"agent '{agent.id}' has unknown deputy '{agent.deputy_id}'",
+                    code="Z1.unknown-deputy",
+                    params={"agent": str(agent.id), "deputy": str(agent.deputy_id)},
+                )
+            )
+    return findings
+
+
+def _check_z1_wellformed(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Z1: staff rules are well-formed and reference existing elements."""
+
+    findings: list[ValidationFinding] = []
+    for node_id, rule in schema.staff_rules.items():
+        node = schema.nodes.get(node_id)
+        if node is None:
+            findings.append(
+                ValidationFinding(
+                    rule="Z1",
+                    node_id=node_id,
+                    message=f"staff rule on unknown node '{node_id}'",
+                    code="Z1.unknown-node",
+                    params={"node": str(node_id)},
+                )
+            )
+        elif node.type is not NodeType.ACTIVITY:
+            findings.append(
+                ValidationFinding(
+                    rule="Z1",
+                    node_id=node_id,
+                    message=f"staff rules are only allowed on ACTIVITY nodes, "
+                        f"not {node.type.value}",
+                    code="Z1.not-activity",
+                    params={"node_type": str(node.type.value)},
+                )
+            )
+        findings += _check_staff_rule_node(schema, node_id, rule)
+    return findings
+
+
+def _check_staff_rule_node(
+    schema: ProcessSchema, node_id: str, rule: StaffRule
+) -> list[ValidationFinding]:
+    findings: list[ValidationFinding] = []
+    if rule.kind in STAFF_LEAF_KINDS:
+        if rule.operands:
+            findings.append(
+                ValidationFinding(
+                    rule="Z1",
+                    node_id=node_id,
+                    message=f"{rule.kind.value} term must have no operands",
+                    code="Z1.no-operands-allowed",
+                    params={"rule_kind": str(rule.kind.value)},
+                )
+            )
+        if rule.ref is None:
+            findings.append(
+                ValidationFinding(
+                    rule="Z1",
+                    node_id=node_id,
+                    message=f"{rule.kind.value} term requires a reference",
+                    code="Z1.reference-missing",
+                    params={"rule_kind": str(rule.kind.value)},
+                )
+            )
+        else:
+            findings += _check_staff_ref(schema, node_id, rule)
+    elif rule.kind in STAFF_COMBINATOR_KINDS:
+        min_operands = 2 if rule.kind is StaffRuleKind.EXCEPT else 1
+        if rule.kind is StaffRuleKind.EXCEPT and len(rule.operands) != 2:
+            findings.append(
+                ValidationFinding(
+                    rule="Z1",
+                    node_id=node_id,
+                    message="EXCEPT requires exactly two operands",
+                    code="Z1.except-two",
+                )
+            )
+        elif len(rule.operands) < min_operands:
+            findings.append(
+                ValidationFinding(
+                    rule="Z1",
+                    node_id=node_id,
+                    message=f"{rule.kind.value} requires at least {min_operands} operand(s)",
+                    code="Z1.too-few-operands",
+                    params={"rule_kind": str(rule.kind.value), "count": str(min_operands)},
+                )
+            )
+        for operand in rule.operands:
+            findings += _check_staff_rule_node(schema, node_id, operand)
+    return findings
+
+
+def _check_staff_ref(
+    schema: ProcessSchema, node_id: str, rule: StaffRule
+) -> list[ValidationFinding]:
+    org = schema.org_model
+    ref = rule.ref
+    if rule.kind is StaffRuleKind.ROLE and ref not in org.roles:
+        return [
+            ValidationFinding(
+                rule="Z1",
+                node_id=node_id,
+                message=f"unknown role '{ref}'",
+                code="Z1.unknown-role",
+                params={"ref": str(ref)},
+            )
+        ]
+    if rule.kind is StaffRuleKind.ORG_UNIT and ref not in org.org_units:
+        return [
+            ValidationFinding(
+                rule="Z1",
+                node_id=node_id,
+                message=f"unknown org unit '{ref}'",
+                code="Z1.unknown-unit",
+                params={"ref": str(ref)},
+            )
+        ]
+    if rule.kind is StaffRuleKind.AGENT and ref not in org.agents:
+        return [
+            ValidationFinding(
+                rule="Z1",
+                node_id=node_id,
+                message=f"unknown agent '{ref}'",
+                code="Z1.unknown-agent",
+                params={"ref": str(ref)},
+            )
+        ]
+    if rule.kind in STAFF_NODE_REF_KINDS and ref not in schema.nodes:
+        return [
+            ValidationFinding(
+                rule="Z1",
+                node_id=node_id,
+                message=f"{rule.kind.value} references unknown node '{ref}'",
+                code="Z1.unknown-node-ref",
+                params={"rule_kind": str(rule.kind.value), "ref": str(ref)},
+            )
+        ]
+    return []
+
+
+def _check_z4_service(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Z4: service bindings are well-formed; automatic steps carry no staff rule."""
+
+    findings: list[ValidationFinding] = []
+    for node_id, binding in schema.service_bindings.items():
+        node = schema.nodes.get(node_id)
+        if node is None or node.type is not NodeType.ACTIVITY:
+            findings.append(
+                ValidationFinding(
+                    rule="Z4",
+                    node_id=node_id,
+                    message="service binding is only allowed on ACTIVITY nodes",
+                    code="Z4.not-activity",
+                )
+            )
+            continue
+        if binding.automatic and node_id in schema.staff_rules:
+            findings.append(
+                ValidationFinding(
+                    rule="Z4",
+                    node_id=node_id,
+                    message="automatic step must not carry a staff rule (BZR)",
+                    code="Z4.automatic-with-staff",
+                    params={"step": node_name(schema, node_id)},
+                )
+            )
+    return findings
+
+
+def _check_activity_repository(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Activity Repository rules A1-A3 for template-bound services.
+
+    A1: a referenced template must exist in the repository.
+    A2: the binding's ``automatic`` flag must match the template's executor.
+    A3: the template interface must be bound type-conformantly -- every
+        mandatory parameter is mapped, mapped names belong to the template, and
+        each mapped data element exists with a matching type.
+    Free-form bindings (no ``template_id``) are left untouched.
+    """
+
+    findings: list[ValidationFinding] = []
+    for node_id, binding in schema.service_bindings.items():
+        if binding.template_id is None:
+            continue
+        template = schema.activity_templates.get(binding.template_id)
+        if template is None:
+            findings.append(
+                ValidationFinding(
+                    rule="A1",
+                    node_id=node_id,
+                    message=f"service binding references unknown template '{binding.template_id}'",
+                    code="A1.unknown-template",
+                    params={"template": str(binding.template_id)},
+                )
+            )
+            continue
+        if binding.automatic != template.is_automatic:
+            findings.append(
+                ValidationFinding(
+                    rule="A2",
+                    node_id=node_id,
+                    message=f"binding 'automatic' ({binding.automatic}) does not match the "
+                        f"{template.executor.value} executor of template '{template.id}'",
+                    code="A2.executor-mismatch",
+                    params={
+                        "automatic": str(binding.automatic),
+                        "executor": str(template.executor.value),
+                        "template": str(template.id),
+                    },
+                )
+            )
+        findings += _check_template_interface(schema, node_id, binding, template)
+    return findings
+
+
+def _check_template_interface(
+    schema: ProcessSchema,
+    node_id: str,
+    binding: ServiceBinding,
+    template: ActivityTemplate,
+) -> list[ValidationFinding]:
+    """A3: the parameter mapping conforms to the template interface."""
+
+    findings: list[ValidationFinding] = []
+    parameters = {p.name: p for p in [*template.inputs, *template.outputs]}
+    for param in parameters.values():
+        if param.mandatory and param.name not in binding.parameter_mapping:
+            findings.append(
+                ValidationFinding(
+                    rule="A3",
+                    node_id=node_id,
+                    message=f"mandatory parameter '{param.name}' is not bound",
+                    code="A3.param-unbound",
+                    params={"param": str(param.name)},
+                )
+            )
+    for param_name, element_id in binding.parameter_mapping.items():
+        mapped_param = parameters.get(param_name)
+        if mapped_param is None:
+            findings.append(
+                ValidationFinding(
+                    rule="A3",
+                    node_id=node_id,
+                    message=f"template '{template.id}' has no parameter '{param_name}'",
+                    code="A3.unknown-param",
+                    params={"template": str(template.id), "param": str(param_name)},
+                )
+            )
+            continue
+        element = schema.data_elements.get(element_id)
+        if element is None:
+            findings.append(
+                ValidationFinding(
+                    rule="A3",
+                    node_id=node_id,
+                    message=f"parameter '{param_name}' is bound to unknown element '{element_id}'",
+                    code="A3.unknown-element",
+                    params={"param": str(param_name), "element": str(element_id)},
+                )
+            )
+        elif element.data_type is not mapped_param.data_type:
+            findings.append(
+                ValidationFinding(
+                    rule="A3",
+                    node_id=node_id,
+                    message=(
+                        f"parameter '{param_name}' ({mapped_param.data_type.value}) "
+                        f"does not match element '{element_id}' ({element.data_type.value})"
+                    ),
+                    code="A3.type-mismatch",
+                    params={
+                        "param": str(param_name),
+                        "param_type": str(mapped_param.data_type.value),
+                        "element": str(element_id),
+                        "type": str(element.data_type.value),
+                    },
+                )
+            )
+    return findings
+
+
+# --- I1-I4: integration bindings (automatic, tool-driven services) -------
+
+
+def _check_integration(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Integration rules I1-I4 for automatic, tool-driven service bindings.
+
+    Silent unless a service binding sets ``automation`` to something other than
+    ``MANUAL_NONE`` -- a model without integration bindings produces no
+    findings, so the group is fully additive (like the temporal group).
+
+    * I1: the binding is well-formed -- ``EXTERNAL_TASK`` needs a non-empty
+      topic, ``HTTP_PUSH`` a non-empty endpoint reference.
+    * I2: automation is consistent -- an automated binding is marked
+      ``automatic`` and carries exactly one execution pattern (topic XOR
+      endpoint). The "no interactive staff rule" half is covered by Z4.
+    * I3: every parameter-mapping target references an existing data element
+      (the deeper written-before/type guarantees stay with D1/D3/A3).
+    * I4: the model carries no inline secrets -- topic/endpoint_ref are bare
+      references, never a credential-bearing URL.
+    """
+
+    findings: list[ValidationFinding] = []
+    for node_id, binding in schema.service_bindings.items():
+        if binding.automation is AutomationKind.MANUAL_NONE:
+            continue
+        findings += _check_integration_binding(schema, node_id, binding)
+    return findings
+
+
+def _check_integration_binding(
+    schema: ProcessSchema, node_id: str, binding: ServiceBinding
+) -> list[ValidationFinding]:
+    findings: list[ValidationFinding] = []
+    kind = binding.automation
+
+    # I1 + I2: the right execution pattern is present and is the only one.
+    if kind is AutomationKind.EXTERNAL_TASK:
+        if not (binding.topic or "").strip():
+            findings.append(
+                ValidationFinding(
+                    rule="I1",
+                    node_id=node_id,
+                    message="EXTERNAL_TASK binding requires a non-empty topic",
+                    code="I1.no-topic",
+                )
+            )
+        if binding.endpoint_ref is not None:
+            findings.append(
+                ValidationFinding(
+                    rule="I2",
+                    node_id=node_id,
+                    message="EXTERNAL_TASK binding must not set an endpoint_ref",
+                    code="I2.topic-with-endpoint",
+                )
+            )
+    elif kind is AutomationKind.HTTP_PUSH:
+        if not (binding.endpoint_ref or "").strip():
+            findings.append(
+                ValidationFinding(
+                    rule="I1",
+                    node_id=node_id,
+                    message="HTTP_PUSH binding requires a non-empty endpoint_ref",
+                    code="I1.no-endpoint",
+                )
+            )
+        if binding.topic is not None:
+            findings.append(
+                ValidationFinding(
+                    rule="I2",
+                    node_id=node_id,
+                    message="HTTP_PUSH binding must not set a topic",
+                    code="I2.endpoint-with-topic",
+                )
+            )
+
+    # I2: an automated binding is also flagged automatic (never interactive).
+    if not binding.automatic:
+        findings.append(
+            ValidationFinding(
+                rule="I2",
+                node_id=node_id,
+                message="automated binding must be marked automatic",
+                code="I2.automated-not-automatic",
+            )
+        )
+
+    # I3: parameter-mapping targets must reference existing data elements.
+    for param, element_id in binding.parameter_mapping.items():
+        if element_id not in schema.data_elements:
+            findings.append(
+                ValidationFinding(
+                    rule="I3",
+                    node_id=node_id,
+                    message=f"parameter '{param}' maps to unknown data element "
+                        f"'{element_id}'",
+                    code="I3.unknown-element",
+                    params={"param": str(param), "element": str(element_id)},
+                )
+            )
+
+    # I4: no inline secrets -- topic/endpoint_ref are bare references.
+    findings += _check_no_inline_secret(node_id, "topic", binding.topic)
+    findings += _check_no_inline_secret(
+        node_id, "endpoint_ref", binding.endpoint_ref
+    )
+    return findings
+
+
+def _check_no_inline_secret(
+    node_id: str, field: str, value: str | None
+) -> list[ValidationFinding]:
+    """I4: a reference field must not embed a URL scheme or credentials."""
+
+    if value is None:
+        return []
+    if "://" in value or "@" in value:
+        return [
+            ValidationFinding(
+                rule="I4",
+                node_id=node_id,
+                message=f"{field} must be a bare reference without an inline URL or "
+                    f"credentials",
+                code="I4.inline-reference",
+                params={"field_name": str(field)},
+            )
+        ]
+    return []
+
+
+def _check_t3_escalations(schema: ProcessSchema) -> list[ValidationFinding]:
+    """T3: every modelled overdue reaction is well-formed and decidable.
+
+    Fully additive -- a schema without escalation policies produces no
+    findings:
+
+    - T3a: the policy sits on an existing, *interactive* ACTIVITY with a
+      resolvable target time (otherwise the due instant -- and thus every
+      stage's trigger -- would be undefined).
+    - T3b: at least one stage; offsets >= 0 and strictly ascending.
+    - T3c: every stage rule is structurally well-formed (Z1-checked), free of
+      node-referencing kinds (an escalation targets a role/unit, never a
+      relative performer) and resolves to at least one possible agent
+      (Z2-analog over the design-time over-approximation).
+    """
+
+    findings: list[ValidationFinding] = []
+    for node_id, policy in schema.escalation_policies.items():
+        findings += _check_escalation_policy(schema, node_id, policy)
+    return findings
+
+
+def _check_escalation_policy(
+    schema: ProcessSchema, node_id: str, policy: EscalationPolicy
+) -> list[ValidationFinding]:
+    """T3a-T3c for the escalation policy of one node.
+
+    Parameters:
+        schema: The schema that owns the policy.
+        node_id: The node the policy is attached to (finding location).
+        policy: The escalation policy to check.
+
+    Returns:
+        The T3 findings in check order: carrier node (T3a), then per stage its
+        offset (T3b) followed by its target rule (Z1 findings, T3c).
+
+    Edge cases:
+        A policy on a missing or non-ACTIVITY node yields only
+        ``T3.not-activity`` -- without an activity there is no due instant, so
+        the remaining checks would only add noise. The stage checks stay
+        interleaved per stage (offset, then target) so the finding order is
+        stable for the client. A non-finite offset (NaN, +-inf) yields only
+        ``T3.offset-not-finite`` for that stage -- no sign or ascending finding
+        -- and does not become the reference for the next stage's ascending
+        check; its target rule is still checked.
+    """
+
+    findings: list[ValidationFinding] = []
+    fail = _collecting_fail("T3", findings)
+
+    node = schema.nodes.get(node_id)
+    if node is None or node.type is not NodeType.ACTIVITY:
+        fail(
+            "escalation policy must sit on an ACTIVITY node (T3a)",
+            node_id,
+            code="T3.not-activity",
+        )
+        return findings
+    binding = schema.service_bindings.get(node_id)
+    if binding is not None and binding.automatic:
+        fail(
+            "an automatic activity cannot carry an escalation policy "
+            "(incidents/retries cover machines; T3a)",
+            node_id,
+            code="T3.automatic",
+        )
+    if target_seconds(schema.time_constraints.get(node_id)) is None:
+        fail(
+            "escalation requires a resolvable target time on the node "
+            "(target_lead_seconds or max_duration_seconds; T3a)",
+            node_id,
+            code="T3.no-target-time",
+        )
+    if not policy.stages:
+        fail(
+            "escalation policy needs at least one stage (T3b)",
+            node_id,
+            code="T3.no-stages",
+        )
+    previous: float | None = None
+    for stage in policy.stages:
+        # NaN compares false with everything (it would pass both checks below
+        # and the sweep would never fire), an infinite offset never arrives.
+        if not math.isfinite(stage.after_seconds):
+            fail(
+                "stage offset must be a finite number of seconds (T3b)",
+                node_id,
+                code="T3.offset-not-finite",
+            )
+            findings += _check_escalation_target(schema, node_id, stage.rule)
+            continue
+        if stage.after_seconds < 0:
+            fail(
+                "stage offset must be >= 0 seconds (T3b)",
+                node_id,
+                code="T3.negative-offset",
+            )
+        if previous is not None and stage.after_seconds <= previous:
+            fail(
+                "stage offsets must be strictly ascending (T3b)",
+                node_id,
+                code="T3.offsets-ascending",
+            )
+        previous = stage.after_seconds
+        findings += _check_escalation_target(schema, node_id, stage.rule)
+    return findings
+
+
+def _check_escalation_target(
+    schema: ProcessSchema, node_id: str, rule: StaffRule
+) -> list[ValidationFinding]:
+    """T3c for one escalation stage target: well-formed, no node refs, not empty.
+
+    Parameters:
+        schema: The schema whose org model resolves the rule.
+        node_id: The node carrying the escalation policy (finding location).
+        rule: The stage's target staff rule.
+
+    Returns:
+        The Z1 well-formedness findings of the rule, followed by at most one
+        T3 finding: ``T3.node-ref-target`` or ``T3.nobody``.
+
+    Edge cases:
+        A rule with a node-referencing kind is not checked for emptiness: an
+        escalation targets a role or unit, never a relative performer, so its
+        agent set is meaningless here. ``_possible_agents`` returning ``None``
+        (no static bound) does not count as empty -- emptiness must be proven.
+    """
+
+    findings = _check_staff_rule_node(schema, node_id, rule)
+    fail = _collecting_fail("T3", findings)
+    if _contains_node_ref(rule):
+        fail(
+            "escalation targets must not use node-referencing staff "
+            "rule kinds (T3c)",
+            node_id,
+            code="T3.node-ref-target",
+        )
+        return findings
+    possible = _possible_agents(schema.org_model, rule)
+    if possible is not None and not possible:
+        fail(
+            "escalation target cannot resolve to any agent in the "
+            "org model (T3c)",
+            node_id,
+            code="T3.nobody",
+        )
+    return findings
+
+
+def _contains_node_ref(rule: StaffRule) -> bool:
+    """True when a rule tree uses a node-referencing kind (forbidden in T3c)."""
+
+    if rule.kind in STAFF_NODE_REF_KINDS:
+        return True
+    return any(_contains_node_ref(op) for op in rule.operands)
+
+
+def _check_z2_resolvable(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Z2: each staff rule can potentially resolve to at least one agent."""
+
+    findings: list[ValidationFinding] = []
+    for node_id, rule in schema.staff_rules.items():
+        possible = _possible_agents(schema.org_model, rule)
+        if possible is not None and not possible:
+            findings.append(
+                ValidationFinding(
+                    rule="Z2",
+                    node_id=node_id,
+                    message="staff rule cannot resolve to any agent in the org model",
+                    code="Z2.nobody",
+                    params={"step": node_name(schema, node_id)},
+                )
+            )
+    return findings
+
+
+def _possible_agents(org: OrgModel, rule: StaffRule) -> set[str] | None:
+    """Over-approximation of the agents a rule could resolve to (for Z2).
+
+    Returns ``None`` for the unbounded 'universe' (a NodePerformingAgent is
+    bound to some agent at runtime, so it is always potentially non-empty,
+    even against an empty org model). A concrete empty set means the rule is
+    definitely unsatisfiable.
+
+    EXCEPT: removing agents cannot add any, so the left operand's bound is
+    always safe. It used to be the *whole* answer -- and an over-approximation
+    can never prove emptiness, so ``EXCEPT(ROLE x, ROLE x)`` passed Z2, was
+    released, and its step stood in nobody's worklist. When the right operand depends on the org
+    model only, its runtime set is known exactly (:func:`_exact_agents`), and ``left − right`` is
+    still a sound upper bound: nothing in that exact set can ever survive the subtraction. With a
+    runtime leaf on the right (a performer reference) the removed set is unknown, and the bound
+    stays at the left operand.
+
+    Callers besides Z2 (N3 recipients, T3 stage targets, the licensing
+    guard's ``_required_agent_ids``) only gain from the tighter bound -- it is
+    still an over-approximation.
+    """
+
+    if rule.kind is StaffRuleKind.ROLE:
+        return {a.id for a in org.agents.values() if rule.ref in a.role_ids}
+    if rule.kind is StaffRuleKind.ORG_UNIT:
+        units = {rule.ref} | _descendant_units(org, rule.ref, rule.recursive)
+        return {a.id for a in org.agents.values() if a.org_unit_id in units}
+    if rule.kind is StaffRuleKind.AGENT:
+        # A single named agent: the bound is exactly that agent (empty if the
+        # agent is unknown, which also makes Z2 flag it as unsatisfiable).
+        return {rule.ref} if rule.ref in org.agents else set()
+    if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT:
+        return None  # universe: resolved at runtime
+    if rule.kind is StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR:
+        # The resolved supervisor is always the manager of *some* org unit, so
+        # the set of all org-unit managers is a safe (bounded) over-approximation.
+        # An empty bound (no unit has a manager) means the rule can never resolve
+        # -> Z2 rejects it; a bounded set also lets N3 check every recipient.
+        return {
+            u.manager_id for u in org.org_units.values() if u.manager_id is not None
+        }
+    operand_sets = [_possible_agents(org, op) for op in rule.operands]
+    if rule.kind is StaffRuleKind.AND:
+        return _intersect_bounds(operand_sets)
+    if rule.kind is StaffRuleKind.OR:
+        return _union_bounds(operand_sets)
+    # EXCEPT: upper bound is the left operand minus whatever the right operand
+    # removes for certain (only known when the right side is exact).
+    left = operand_sets[0]
+    removed = _exact_agents(org, rule.operands[1]) if len(rule.operands) >= 2 else None
+    if left is None or removed is None:
+        return left
+    return left - removed
+
+
+def _exact_agents(org: OrgModel, rule: StaffRule) -> set[str] | None:
+    """The exact agent set a rule resolves to, if the org model alone decides it.
+
+    ROLE, ORG_UNIT and AGENT, and any AND/OR/EXCEPT built only from them,
+    resolve at runtime exactly as here (same formulas as
+    ``assignment._resolve``, including its handling of operand-less
+    combinations). As soon as a runtime leaf is involved
+    (``NODE_PERFORMING_AGENT[_SUPERVISOR]``) the result depends on who performed
+    an earlier step, and the answer is ``None`` -- "not statically known".
+
+    Deputies and FUNCTIONAL escalation stages only ever *add* agents at runtime
+    and are deliberately not part of this set; Z2 asks whether the rule itself
+    can find anyone.
+    """
+
+    if rule.kind in STAFF_NODE_REF_KINDS:
+        return None
+    if rule.kind in (StaffRuleKind.ROLE, StaffRuleKind.ORG_UNIT, StaffRuleKind.AGENT):
+        return _possible_agents(org, rule)  # exact for these leaf kinds
+    operands: list[set[str]] = []
+    for op in rule.operands:
+        exact = _exact_agents(org, op)
+        if exact is None:
+            return None
+        operands.append(exact)
+    if not operands:
+        return set()
+    if rule.kind is StaffRuleKind.AND:
+        return set.intersection(*operands)
+    if rule.kind is StaffRuleKind.OR:
+        return set.union(*operands)
+    return operands[0] - operands[1] if len(operands) >= 2 else operands[0]
+
+
+def _intersect_bounds(bounds: list[set[str] | None]) -> set[str] | None:
+    result: set[str] | None = None  # None == universe
+    for bound in bounds:
+        if bound is None:
+            continue
+        result = bound if result is None else (result & bound)
+    return result
+
+
+def _union_bounds(bounds: list[set[str] | None]) -> set[str] | None:
+    result: set[str] = set()
+    for bound in bounds:
+        if bound is None:
+            return None  # union with universe is universe
+        result |= bound
+    return result
+
+
+def _descendant_units(org: OrgModel, unit_id: str | None, recursive: bool) -> set[str]:
+    if not recursive or unit_id is None:
+        return set()
+    descendants: set[str] = set()
+    frontier = [unit_id]
+    while frontier:
+        current = frontier.pop()
+        for uid, unit in org.org_units.items():
+            if unit.parent_id == current and uid not in descendants:
+                descendants.add(uid)
+                frontier.append(uid)
+    return descendants
+
+
+def _check_z3_backrefs(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Z3: NodePerformingAgent refs must be guaranteed-executed before the node."""
+
+    findings: list[ValidationFinding] = []
+    before = _must_executed_before(schema)
+    for node_id, rule in schema.staff_rules.items():
+        for ref in _node_refs(rule):
+            if ref not in before.get(node_id, set()):
+                findings.append(
+                    ValidationFinding(
+                        rule="Z3",
+                        node_id=node_id,
+                        message=(
+                            f"NodePerformingAgent('{ref}') is not guaranteed to run "
+                            f"before this node on all paths"
+                        ),
+                        code="Z3.reference-not-before",
+                        params={
+                            "step": node_name(schema, node_id),
+                            "ref": node_name(schema, ref),
+                        },
+                    )
+                )
+    return findings
+
+
+def _node_refs(rule: StaffRule) -> set[str]:
+    if rule.kind in STAFF_NODE_REF_KINDS and rule.ref is not None:
+        return {rule.ref}
+    refs: set[str] = set()
+    for operand in rule.operands:
+        refs |= _node_refs(operand)
+    return refs
+
+
+# --- N1-N4: modelled e-mail notification ---------------------------------
+
+
+def _check_mail(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Rule group N -- correctness of modelled e-mail notifications.
+
+    Silent unless the org model carries addresses or a node carries a
+    ``MailBinding`` (fully additive, like the temporal group). Enforces:
+
+    * N1 -- every address in the org master data is well-formed;
+    * N2 -- a mail binding sits on an ACTIVITY that carries a staff rule (BZR);
+    * N3 -- for the binding's mode, *every* address that could ever be needed
+      exists (per-agent: every possibly-eligible agent incl. deputies has an
+      ``email``; group: every addressed role/unit has a ``mailbox``);
+    * N4 -- every ``{element_id}`` placeholder in subject/body refers to an
+      INSTANCE data element guaranteed written before the node.
+
+    N3 is the correctness heart of the feature: because it runs before every
+    commit -- and the API re-runs the whole validator for every schema that
+    references a shared org model on each org edit -- a notification can never
+    reach a state in which a possible recipient has no address.
+    """
+
+    findings = org_address_findings(schema.org_model)
+    if not schema.mail_bindings:
+        return findings
+    # ``_must_written_before`` needs an intact control graph (like D1/D2); when
+    # the structure is broken we still check placeholder existence/scope (N4) but
+    # skip the "guaranteed written" part until the structure is fixed.
+    before = None if _structure_broken(schema) else _must_written_before(schema)
+    for node_id, binding in schema.mail_bindings.items():
+        findings += _check_mail_binding(schema, node_id, binding, before)
+    return findings
+
+
+def org_address_findings(org: OrgModel) -> list[ValidationFinding]:
+    """N1: every address set in the org master data is syntactically valid.
+
+    Checks agent e-mail addresses, then role mailboxes, then unit mailboxes,
+    each in insertion order; ``None`` means "no address" and is never a
+    finding. Shared with :func:`procworks.org.validate_org`, so a shared org
+    model and a schema's own org data reject the same addresses with the same
+    codes.
+
+    Module-public (no leading underscore) because :mod:`procworks.org` uses
+    it across the module boundary: renaming or changing it is an interface
+    change between the two core modules. It is deliberately not part of the
+    package API in ``procworks/__init__.py``.
+
+    :param org: the org model whose addresses are checked.
+    :returns: one ``N1`` finding per malformed address; empty when all are
+        well-formed or none is set.
+    """
+
+    findings: list[ValidationFinding] = []
+    for agent in org.agents.values():
+        if agent.email is not None and not is_valid_email(agent.email):
+            findings.append(
+                ValidationFinding(
+                    rule="N1",
+                    message=f"agent '{agent.id}' has a malformed e-mail address",
+                    code="N1.agent-mail",
+                    params={"agent": str(agent.id)},
+                )
+            )
+    for role in org.roles.values():
+        if role.mailbox is not None and not is_valid_email(role.mailbox):
+            findings.append(
+                ValidationFinding(
+                    rule="N1",
+                    message=f"role '{role.id}' has a malformed group mailbox",
+                    code="N1.role-mail",
+                    params={"role": str(role.id)},
+                )
+            )
+    for unit in org.org_units.values():
+        if unit.mailbox is not None and not is_valid_email(unit.mailbox):
+            findings.append(
+                ValidationFinding(
+                    rule="N1",
+                    message=f"org unit '{unit.id}' has a malformed mailbox",
+                    code="N1.unit-mail",
+                    params={"unit": str(unit.id)},
+                )
+            )
+    return findings
+
+
+def _check_mail_binding(
+    schema: ProcessSchema,
+    node_id: str,
+    binding: MailBinding,
+    before: dict[str, set[str]] | None,
+) -> list[ValidationFinding]:
+    """N2-N4 for a single mail binding."""
+
+    # N2: the binding must sit on an ACTIVITY that has a staff rule -- only an
+    # interactive step has an assignee to notify.
+    node = schema.nodes.get(node_id)
+    if node is None:
+        return [
+            ValidationFinding(
+                rule="N2",
+                node_id=node_id,
+                message="mail binding on unknown node",
+                code="N2.unknown-node",
+            )
+        ]
+    if node.type is not NodeType.ACTIVITY:
+        return [
+            ValidationFinding(
+                rule="N2",
+                node_id=node_id,
+                message="mail notifications are only allowed on ACTIVITY nodes",
+                code="N2.not-activity",
+            )
+        ]
+    rule = schema.staff_rules.get(node_id)
+    if rule is None:
+        return [
+            ValidationFinding(
+                rule="N2",
+                node_id=node_id,
+                message="mail notification requires a staff rule (BZR) on the node -- "
+                    "there is no assignee to address",
+                code="N2.no-staff-rule",
+            )
+        ]
+    policy = schema.escalation_policies.get(node_id)
+    functional_rules = [
+        stage.rule
+        for stage in (policy.stages if policy is not None else [])
+        if stage.kind is EscalationKind.FUNCTIONAL
+    ]
+    findings = _check_n3_addresses(
+        schema.org_model, node_id, binding, rule, extra_rules=functional_rules
+    )
+    findings += _check_n4_template(schema, node_id, binding, before)
+    return findings
+
+
+def _check_n3_addresses(
+    org: OrgModel,
+    node_id: str,
+    binding: MailBinding,
+    rule: StaffRule,
+    *,
+    extra_rules: Sequence[StaffRule] = (),
+) -> list[ValidationFinding]:
+    """N3: every address the binding could ever need is present in the org.
+
+    ``extra_rules`` are additional *possible performer* sets beyond the staff
+    rule -- today the FUNCTIONAL escalation stage targets (T3/E9): any stage
+    may fire, so its agents are possible recipients of the task notification
+    and must be addressable too.
+    """
+
+    if binding.mode is MailRecipientMode.TO_ELIGIBLE_AGENTS:
+        return _check_n3_eligible_agents(org, node_id, binding, rule, extra_rules)
+    # TO_GROUP_MAILBOX: every addressed role/unit must carry a mailbox.
+    return _check_n3_group_mailboxes(org, node_id, rule)
+
+
+def _check_n3_eligible_agents(
+    org: OrgModel,
+    node_id: str,
+    binding: MailBinding,
+    rule: StaffRule,
+    extra_rules: Sequence[StaffRule],
+) -> list[ValidationFinding]:
+    """N3 for the per-agent mode: every possible recipient has an e-mail address.
+
+    Parameters:
+        org: The org model holding the agents and their addresses.
+        node_id: The node that carries the mail binding (finding location).
+        binding: The mail binding; ``include_deputies`` widens the recipients
+            by the absence deputies of every possible performer.
+        rule: The node's staff rule.
+        extra_rules: Further possible performer sets (see
+            :func:`_check_n3_addresses`).
+
+    Returns:
+        A single ``N3.not-static`` finding when the recipient set has no static
+        bound; otherwise one ``N3.no-address`` finding per recipient without a
+        usable address, sorted by agent id. Empty when everybody is reachable.
+    """
+
+    possible = _possible_recipients(org, rule, extra_rules)
+    if possible is None:
+        # The rule depends on a prior node's performer (universe); the
+        # recipient set is not statically bounded, so we cannot guarantee
+        # every recipient has an address. CbC therefore forbids per-agent
+        # notification here (the group-mailbox mode stays available).
+        return [
+            ValidationFinding(
+                rule="N3",
+                node_id=node_id,
+                message="recipient set is not statically determinable (the staff "
+                    "rule depends on a prior node's performer); a per-agent mail "
+                    "notification cannot be modelled here -- use a group mailbox",
+                code="N3.not-static",
+            )
+        ]
+    findings: list[ValidationFinding] = []
+    recipients = _with_deputies(org, possible) if binding.include_deputies else possible
+    for agent_id in sorted(recipients):
+        agent = org.agents.get(agent_id)
+        if agent is None or not (agent.email or "").strip():
+            who = agent.name if agent is not None else agent_id
+            findings.append(
+                ValidationFinding(
+                    rule="N3",
+                    node_id=node_id,
+                    message=f"possible assignee '{who}' has no e-mail address",
+                    code="N3.no-address",
+                    params={"agent": str(who)},
+                )
+            )
+    return findings
+
+
+def _possible_recipients(
+    org: OrgModel, rule: StaffRule, extra_rules: Sequence[StaffRule]
+) -> set[str] | None:
+    """Over-approximate the agents a per-agent task notification may reach.
+
+    Parameters:
+        org: The org model the rules are evaluated against.
+        rule: The node's staff rule.
+        extra_rules: Further possible performer sets (e.g. FUNCTIONAL
+            escalation stage targets).
+
+    Returns:
+        The union of :func:`_possible_agents` over ``rule`` and every extra
+        rule, or ``None`` when ``rule`` itself has no static bound.
+
+    Edge cases:
+        An unbounded *extra* rule does not make the result unbounded; it is
+        left out of the union and only the bounded sets are combined. This
+        mirrors the long-standing N3 behaviour exactly -- changing it would
+        change which models pass N3.
+    """
+
+    possible = _possible_agents(org, rule)
+    for extra in extra_rules:
+        extra_possible = _possible_agents(org, extra)
+        if possible is not None and extra_possible is not None:
+            possible = set(possible) | extra_possible
+    return possible
+
+
+def _check_n3_group_mailboxes(
+    org: OrgModel, node_id: str, rule: StaffRule
+) -> list[ValidationFinding]:
+    """N3 for the group-mailbox mode: every addressed role/unit has a mailbox.
+
+    Parameters:
+        org: The org model holding roles, units and their mailboxes.
+        node_id: The node that carries the mail binding (finding location).
+        rule: The node's staff rule; its ROLE/ORG_UNIT leaves are the groups.
+
+    Returns:
+        ``N3.no-group`` when the rule addresses no group at all, then one
+        finding per group without a mailbox (in :func:`_group_refs` order),
+        then ``N3.performer-no-mailbox`` when the rule also names a prior
+        node's performer -- a single person has no group mailbox.
+    """
+
+    findings: list[ValidationFinding] = []
+    groups = _group_refs(rule)
+    if not groups:
+        findings.append(
+            ValidationFinding(
+                rule="N3",
+                node_id=node_id,
+                message="staff rule addresses no role or org unit, so there is no group "
+                    "mailbox to notify",
+                code="N3.no-group",
+            )
+        )
+    for kind, ref in groups:
+        if kind is StaffRuleKind.ROLE:
+            role = org.roles.get(ref)
+            if role is None or not (role.mailbox or "").strip():
+                findings.append(
+                    ValidationFinding(
+                        rule="N3",
+                        node_id=node_id,
+                        message=f"role '{ref}' has no group mailbox",
+                        code="N3.role-no-mailbox",
+                        params={"ref": str(ref)},
+                    )
+                )
+        else:
+            unit = org.org_units.get(ref)
+            if unit is None or not (unit.mailbox or "").strip():
+                findings.append(
+                    ValidationFinding(
+                        rule="N3",
+                        node_id=node_id,
+                        message=f"org unit '{ref}' has no mailbox",
+                        code="N3.unit-no-mailbox",
+                        params={"ref": str(ref)},
+                    )
+                )
+    if _node_refs(rule):
+        findings.append(
+            ValidationFinding(
+                rule="N3",
+                node_id=node_id,
+                message="staff rule includes a prior-node performer, which has no group "
+                    "mailbox; use the per-agent mode for it",
+                code="N3.performer-no-mailbox",
+            )
+        )
+    return findings
+
+
+def _check_n4_template(
+    schema: ProcessSchema,
+    node_id: str,
+    binding: MailBinding,
+    before: dict[str, set[str]] | None,
+) -> list[ValidationFinding]:
+    """N4: every template placeholder resolves to an available INSTANCE element."""
+
+    findings: list[ValidationFinding] = []
+    available = None if before is None else before.get(node_id, set())
+    for field, text in (("subject", binding.subject), ("body", binding.body)):
+        for ref in template_placeholders(text):
+            element = schema.data_elements.get(ref)
+            if element is None:
+                findings.append(
+                    ValidationFinding(
+                        rule="N4",
+                        node_id=node_id,
+                        message=f"{field} placeholder '{{{ref}}}' refers to unknown data "
+                            f"element '{ref}'",
+                        code="N4.unknown-element",
+                        params={"field_name": str(field), "ref": str(ref)},
+                    )
+                )
+                continue
+            if element.source is not DataSourceKind.INSTANCE:
+                findings.append(
+                    ValidationFinding(
+                        rule="N4",
+                        node_id=node_id,
+                        message=f"{field} placeholder '{{{ref}}}' refers to a non-INSTANCE data "
+                            f"element that is not available in the mail text",
+                        code="N4.not-instance",
+                        params={"field_name": str(field), "ref": str(ref)},
+                    )
+                )
+                continue
+            if available is not None and ref not in available:
+                findings.append(
+                    ValidationFinding(
+                        rule="N4",
+                        node_id=node_id,
+                        message=f"{field} placeholder '{{{ref}}}' is not guaranteed to be set "
+                            f"when this task becomes ready",
+                        code="N4.not-set",
+                        params={"field_name": str(field), "ref": str(ref)},
+                    )
+                )
+    return findings
+
+
+def _with_deputies(org: OrgModel, base: set[str]) -> set[str]:
+    """Extend an agent set by deputies, following the chain transitively (N3).
+
+    Mirrors the runtime resolution in :mod:`procworks.assignment`: whenever an
+    agent is eligible, so is its deputy. Kept local so the validator stays
+    self-contained (like ``_descendant_units``).
+    """
+
+    result = set(base)
+    frontier = list(base)
+    while frontier:
+        agent = org.agents.get(frontier.pop())
+        if agent is None or agent.deputy_id is None:
+            continue
+        if agent.deputy_id not in result:
+            result.add(agent.deputy_id)
+            frontier.append(agent.deputy_id)
+    return result
+
+
+def _group_refs(
+    rule: StaffRule, *, positive: bool = True
+) -> list[tuple[StaffRuleKind, str]]:
+    """Collect the (kind, ref) of every role/unit the rule *positively* addresses.
+
+    Group-mailbox notification targets named groups. An ``EXCEPT`` right operand
+    subtracts agents, so those groups are *not* notified -- they are skipped.
+    Duplicates are removed while preserving order.
+    """
+
+    refs: list[tuple[StaffRuleKind, str]] = []
+    if rule.kind in (StaffRuleKind.ROLE, StaffRuleKind.ORG_UNIT) and rule.ref is not None:
+        if positive:
+            refs.append((rule.kind, rule.ref))
+    elif rule.kind is StaffRuleKind.EXCEPT:
+        if rule.operands:
+            refs += _group_refs(rule.operands[0], positive=positive)
+        for operand in rule.operands[1:]:
+            refs += _group_refs(operand, positive=False)
+    else:  # AND / OR
+        for operand in rule.operands:
+            refs += _group_refs(operand, positive=positive)
+    seen: dict[tuple[StaffRuleKind, str], None] = {}
+    for item in refs:
+        seen.setdefault(item, None)
+    return list(seen)
+
+
+# --- H1-H4 / F1-F3: composition (sub- and follow-up processes) -----------
+
+
+def _check_composition(
+    schema: ProcessSchema, resolver: SchemaResolver | None
+) -> list[ValidationFinding]:
+    """Run the cross-schema composition rules H1-H4 (sub-processes) and
+    F1-F3 (follow-up processes)."""
+
+    findings: list[ValidationFinding] = []
+    findings += _check_subprocesses(schema, resolver)
+    findings += _check_follow_ups(schema, resolver)
+    return findings
+
+
+def _check_subprocesses(
+    schema: ProcessSchema, resolver: SchemaResolver | None
+) -> list[ValidationFinding]:
+    findings: list[ValidationFinding] = []
+    # Computed once for all bindings; ``None`` on a structurally broken schema,
+    # where the must-analysis carries no meaning (same guard as D1/D2).
+    written_before = (
+        None
+        if not schema.sub_process_bindings or _structure_broken(schema)
+        else _must_written_before(schema)
+    )
+
+    # Every SUBPROCESS node must carry a binding, and every binding must point
+    # at an existing SUBPROCESS node.
+    for node in schema.nodes.values():
+        if node.type is NodeType.SUBPROCESS and node.id not in schema.sub_process_bindings:
+            findings.append(
+                ValidationFinding(
+                    rule="H1",
+                    node_id=node.id,
+                    message="SUBPROCESS node has no sub-process binding",
+                    code="H1.no-binding",
+                )
+            )
+    for node_id, binding in schema.sub_process_bindings.items():
+        bound_node = schema.nodes.get(node_id)
+        if bound_node is None or bound_node.type is not NodeType.SUBPROCESS:
+            findings.append(
+                ValidationFinding(
+                    rule="H1",
+                    node_id=node_id,
+                    message="sub-process binding does not reference a SUBPROCESS node",
+                    code="H1.not-subprocess",
+                )
+            )
+            continue
+        # H2 (local part): mapped parent elements must exist.
+        for parent_eid in (*binding.input_mapping.values(), *binding.output_mapping.values()):
+            if parent_eid not in schema.data_elements:
+                findings.append(
+                    ValidationFinding(
+                        rule="H2",
+                        node_id=node_id,
+                        message=f"mapping references unknown parent data element '{parent_eid}'",
+                        code="H2.unknown-parent-element",
+                        params={"parent_element": str(parent_eid)},
+                    )
+                )
+        # H2 (local part): a mapped INPUT is copied into the child when it
+        # starts, so the parent element must already hold a value there. This
+        # lives in the *resolver-free* part on purpose: it needs only parent-side
+        # information, and an operation that runs without a resolver (delete_node
+        # removing the writer, for instance) must not be able to break it behind
+        # the composition rules' back.
+        findings += _check_subprocess_inputs_supplied(schema, node_id, binding, written_before)
+        if resolver is None:
+            continue
+        findings += _check_subprocess_target(schema, node_id, binding, resolver)
+
+    if resolver is not None and _has_subprocess_cycle(schema, resolver):
+        findings.append(
+            ValidationFinding(
+                rule="H3",
+                message="sub-process hierarchy is cyclic (a process cannot contain itself)",
+                code="H3.cycle",
+            )
+        )
+    return findings
+
+
+def _check_subprocess_target(
+    schema: ProcessSchema,
+    node_id: str,
+    binding: SubProcessBinding,
+    resolver: SchemaResolver,
+) -> list[ValidationFinding]:
+    findings: list[ValidationFinding] = []
+    target = resolver(binding.target_schema_id, binding.target_version)
+    if target is None:
+        findings.append(
+            ValidationFinding(
+                rule="H1",
+                node_id=node_id,
+                message=f"sub-process target '{binding.target_schema_id}' "
+                    f"v{binding.target_version} not found",
+                code="H1.target-missing",
+                params={
+                    "target": str(binding.target_schema_id),
+                    "version": str(binding.target_version),
+                },
+            )
+        )
+        return findings
+    if target.lifecycle_state is not LifecycleState.RELEASED:
+        findings.append(
+            ValidationFinding(
+                rule="H1",
+                node_id=node_id,
+                message=f"sub-process target '{binding.target_schema_id}' is "
+                    f"{target.lifecycle_state.value}, must be RELEASED",
+                code="H1.target-not-released",
+                params={
+                    "target": str(binding.target_schema_id),
+                    "state": str(target.lifecycle_state.value),
+                },
+            )
+        )
+    # H2 (type conformance): each mapped target element must exist and match.
+    mappings = (
+        ("input", binding.input_mapping),
+        ("output", binding.output_mapping),
+    )
+    for kind, mapping in mappings:
+        for target_eid, parent_eid in mapping.items():
+            target_el = target.data_elements.get(target_eid)
+            parent_el = schema.data_elements.get(parent_eid)
+            if target_el is None:
+                findings.append(
+                    ValidationFinding(
+                        rule="H2",
+                        node_id=node_id,
+                        message=f"{kind} maps unknown target element '{target_eid}'",
+                        code="H2.unknown-target-element",
+                        params={"direction": str(kind), "target_element": str(target_eid)},
+                    )
+                )
+                continue
+            if parent_el is not None and target_el.data_type is not parent_el.data_type:
+                findings.append(
+                    ValidationFinding(
+                        rule="H2",
+                        node_id=node_id,
+                        message=f"{kind} type mismatch: target '{target_eid}' is "
+                            f"{target_el.data_type.value}, parent '{parent_eid}' is "
+                            f"{parent_el.data_type.value}",
+                        code="H2.type-mismatch",
+                        params={
+                            "direction": str(kind),
+                            "target_element": str(target_eid),
+                            "target_type": str(target_el.data_type.value),
+                            "parent_element": str(parent_eid),
+                            "parent_type": str(parent_el.data_type.value),
+                        },
+                    )
+                )
+    # H2 (data-passing soundness): a mapped OUTPUT is written back into the
+    # parent and may be read downstream, so the child must guarantee to produce
+    # it on every path. Otherwise the whole model would not be runnable.
+    if binding.output_mapping:
+        guaranteed = _must_written_before(target).get(target.end_node().id, set())
+        for target_eid, parent_eid in binding.output_mapping.items():
+            if target_eid in target.data_elements and target_eid not in guaranteed:
+                findings.append(
+                    ValidationFinding(
+                        rule="H2",
+                        node_id=node_id,
+                        message=f"output '{target_eid}' is not written on every path of "
+                            f"sub-process '{binding.target_schema_id}', so parent "
+                            f"element '{parent_eid}' would be undefined",
+                        code="H2.output-not-written",
+                        params={
+                            "target_element": str(target_eid),
+                            "target": str(binding.target_schema_id),
+                            "parent_element": str(parent_eid),
+                        },
+                    )
+                )
+    return findings
+
+
+def _check_subprocess_inputs_supplied(
+    schema: ProcessSchema,
+    node_id: str,
+    binding: SubProcessBinding,
+    written_before: dict[str, set[str]] | None,
+) -> list[ValidationFinding]:
+    """H2 (parent side): every mapped input holds a value when the child starts.
+
+    The mirror image of the output guarantee: the child must produce each mapped
+    output on every path, and the parent must supply each mapped input before
+    the call. Without this the child begins with a missing input and the failure
+    surfaces at runtime inside a *different* schema than the one carrying the
+    modelling mistake (H2 -- "Jeder Pflicht-Input des Sub-Prozesses
+    ist aus einem geschriebenen Datenelement des Hauptprozesses versorgt").
+
+    Needs only parent-side information, so it deliberately runs **without** a
+    resolver: an operation that validates resolver-free (``delete_node``
+    removing the writing step, say) must not be able to break it unnoticed.
+    """
+
+    if written_before is None or not binding.input_mapping:
+        return []
+    findings: list[ValidationFinding] = []
+    supplied = written_before.get(node_id, set())
+    for target_eid, parent_eid in sorted(binding.input_mapping.items()):
+        parent_el = schema.data_elements.get(parent_eid)
+        if parent_el is None or parent_eid in supplied:
+            continue  # unknown element is reported by the local existence check
+        if _connector_supplied(parent_el):
+            continue  # resolved by the connector, not by a process write
+        findings.append(
+            ValidationFinding(
+                rule="H2",
+                node_id=node_id,
+                message=f"input '{target_eid}' is mapped from parent element "
+                    f"'{parent_el.name}', which is not guaranteed to be written "
+                    f"on every path to this sub-process",
+                code="H2.input-not-written",
+                params={"target_element": str(target_eid), "parent_element": str(parent_el.name)},
+            )
+        )
+    return findings
+
+
+def _has_subprocess_cycle(schema: ProcessSchema, resolver: SchemaResolver) -> bool:
+    """True if the transitive sub-process call graph leads back to ``schema``."""
+
+    visited: set[str] = set()
+
+    def visit(target_id: str, version: int | None) -> bool:
+        if target_id == schema.id:
+            return True
+        key = f"{target_id}:{version}"
+        if key in visited:
+            return False
+        visited.add(key)
+        target = resolver(target_id, version)
+        if target is None:
+            return False
+        for binding in target.sub_process_bindings.values():
+            if visit(binding.target_schema_id, binding.target_version):
+                return True
+        return False
+
+    return any(
+        visit(b.target_schema_id, b.target_version)
+        for b in schema.sub_process_bindings.values()
+    )
+
+
+def _check_follow_up_condition(
+    schema: ProcessSchema, link_id: str, condition: str | None
+) -> list[ValidationFinding]:
+    """F4: a CONDITIONAL follow-up's predicate is parseable and only reads
+    existing data elements."""
+
+    if condition is None or not condition.strip():
+        return [
+            ValidationFinding(
+                rule="F4",
+                message=f"conditional follow-up '{link_id}' has no condition",
+                code="F4.no-condition",
+                params={"link": str(link_id)},
+            )
+        ]
+    try:
+        names = referenced_names(condition)
+    except ConditionError as exc:
+        return [
+            ValidationFinding(
+                rule="F4",
+                message=f"follow-up '{link_id}' has an invalid condition: {exc}",
+                code="F4.invalid-condition",
+                params={"link": str(link_id), "error": str(exc)},
+            )
+        ]
+    findings: list[ValidationFinding] = []
+    for name in sorted(names):
+        if name not in schema.data_elements:
+            findings.append(
+                ValidationFinding(
+                    rule="F4",
+                    message=f"follow-up '{link_id}' condition references unknown data "
+                        f"element '{name}'",
+                    code="F4.unknown-element",
+                    params={"link": str(link_id), "element": str(name)},
+                )
+            )
+    if findings or _structure_broken(schema):
+        return findings
+
+    # F4 (evaluability): the predicate runs when the instance *finishes*, so
+    # every element it reads must be written on **every** path to END. An
+    # unwritten one makes the evaluator raise -- and because that happens while
+    # completing the final activity, the instance can then never be completed at
+    # all (the same dead end K1 produced, reached by a different route). This is
+    # the coupling that makes "die Auswertung beim Instanzabschluss ist
+    # garantiert definiert" (F4) actually true.
+    supplied = _must_written_before(schema).get(schema.end_node().id, set())
+    for name in sorted(names):
+        element = schema.data_elements[name]
+        if name in supplied or _connector_supplied(element):
+            continue
+        findings.append(
+            ValidationFinding(
+                rule="F4",
+                message=f"follow-up '{link_id}' condition reads '{element.name}', which "
+                    f"is not written on every path to the end of the process",
+                code="F4.condition-not-written",
+                params={"link": str(link_id), "element": str(element.name)},
+            )
+        )
+    return findings
+
+
+def _check_follow_ups(
+    schema: ProcessSchema, resolver: SchemaResolver | None
+) -> list[ValidationFinding]:
+    """Follow-up rules F1, F2 and F4 for every follow-up link of ``schema``.
+
+    Parameters:
+        schema: The schema whose ``follow_up_links`` are checked.
+        resolver: Looks up the follow-up target schema. ``None`` means no
+            cross-schema context is available (e.g. a plain edit operation).
+
+    Returns:
+        The findings of all links, link by link in ``follow_up_links`` order;
+        within a link the local checks come first, then the target checks.
+
+    Edge cases:
+        Without a resolver only the local part runs (F2 source existence, F4);
+        the target-dependent part (F1, F2 type conformance) needs the foreign
+        schema and is therefore skipped -- it is never weakened to a guess.
+    """
+
+    findings: list[ValidationFinding] = []
+    for link in schema.follow_up_links:
+        findings += _check_follow_up_local(schema, link)
+        if resolver is None:
+            continue
+        findings += _check_follow_up_target(schema, link, resolver)
+    return findings
+
+
+def _check_follow_up_local(schema: ProcessSchema, link: FollowUpLink) -> list[ValidationFinding]:
+    """The resolver-independent follow-up checks of one link (F2 local, F4).
+
+    Kept apart from :func:`_check_follow_up_target` because these checks must
+    run on *every* validation, including the resolver-less ones of ordinary
+    edit operations -- they must never end up behind the resolver gate.
+
+    Parameters:
+        schema: The schema that owns ``link``.
+        link: The follow-up link to check.
+
+    Returns:
+        F2 findings for every mapped source element that does not exist (in
+        mapping order), followed by the F4 findings of a CONDITIONAL trigger.
+        Empty when the link is locally sound.
+    """
+
+    findings: list[ValidationFinding] = []
+    # F2 (local part): mapped source elements must exist.
+    for source_eid in link.handover_mapping.values():
+        if source_eid not in schema.data_elements:
+            findings.append(
+                ValidationFinding(
+                    rule="F2",
+                    message=f"follow-up '{link.id}' handover references unknown source "
+                        f"element '{source_eid}'",
+                    code="F2.unknown-source",
+                    params={"link": str(link.id), "source_element": str(source_eid)},
+                )
+            )
+    # F4: a CONDITIONAL trigger needs a well-formed condition that only
+    # reads existing data elements (so it can be evaluated deterministically
+    # against an instance's data values at runtime).
+    if link.trigger is FollowUpTrigger.CONDITIONAL:
+        findings += _check_follow_up_condition(schema, link.id, link.condition)
+    return findings
+
+
+def _check_follow_up_target(
+    schema: ProcessSchema, link: FollowUpLink, resolver: SchemaResolver
+) -> list[ValidationFinding]:
+    """The target-dependent follow-up checks of one link (F1, F2 types).
+
+    Parameters:
+        schema: The schema that owns ``link`` (supplies the source elements).
+        link: The follow-up link to check.
+        resolver: Resolves the link's target schema reference.
+
+    Returns:
+        F1 findings about the target's existence and lifecycle state, followed
+        by the F2 type-conformance findings of the handover mapping.
+
+    Edge cases:
+        An unresolvable target yields only ``F1.no-released-version``: without
+        a target there are no target elements to compare against. A target
+        that exists but is not RELEASED is reported *and* still type-checked,
+        so the modeller sees every problem of the link at once.
+    """
+
+    target = resolver(link.target_schema_id, link.target_version)
+    if target is None:
+        return [
+            ValidationFinding(
+                rule="F1",
+                message=f"follow-up target '{link.target_schema_id}' has no "
+                    f"matching released version",
+                code="F1.no-released-version",
+                params={"target": str(link.target_schema_id)},
+            )
+        ]
+    findings: list[ValidationFinding] = []
+    if target.lifecycle_state is not LifecycleState.RELEASED:
+        findings.append(
+            ValidationFinding(
+                rule="F1",
+                message=f"follow-up target '{link.target_schema_id}' is "
+                    f"{target.lifecycle_state.value}, must be RELEASED",
+                code="F1.not-released",
+                params={
+                    "target": str(link.target_schema_id),
+                    "state": str(target.lifecycle_state.value),
+                },
+            )
+        )
+    findings += _check_follow_up_handover_types(schema, link, target)
+    return findings
+
+
+def _check_follow_up_handover_types(
+    schema: ProcessSchema, link: FollowUpLink, target: ProcessSchema
+) -> list[ValidationFinding]:
+    """F2 (type conformance): each mapped target start element must match.
+
+    Parameters:
+        schema: The source schema (owner of ``link``).
+        link: The follow-up link whose ``handover_mapping`` is checked.
+        target: The resolved follow-up target schema.
+
+    Returns:
+        One finding per mapping entry whose target element is unknown or whose
+        type differs from the source element's, in mapping order.
+
+    Edge cases:
+        An unknown *source* element is not reported here -- the local F2 part
+        (:func:`_check_follow_up_local`) already did, so it is skipped silently
+        instead of being reported twice.
+    """
+
+    findings: list[ValidationFinding] = []
+    for target_eid, source_eid in link.handover_mapping.items():
+        target_el = target.data_elements.get(target_eid)
+        source_el = schema.data_elements.get(source_eid)
+        if target_el is None:
+            findings.append(
+                ValidationFinding(
+                    rule="F2",
+                    message=f"follow-up '{link.id}' handover maps unknown target "
+                        f"element '{target_eid}'",
+                    code="F2.unknown-target",
+                    params={"link": str(link.id), "target_element": str(target_eid)},
+                )
+            )
+            continue
+        if source_el is not None and target_el.data_type is not source_el.data_type:
+            findings.append(
+                ValidationFinding(
+                    rule="F2",
+                    message=f"follow-up '{link.id}' type mismatch: target "
+                        f"'{target_eid}' is {target_el.data_type.value}, source "
+                        f"'{source_eid}' is {source_el.data_type.value}",
+                    code="F2.type-mismatch",
+                    params={
+                        "link": str(link.id),
+                        "target_element": str(target_eid),
+                        "target_type": str(target_el.data_type.value),
+                        "source_element": str(source_eid),
+                        "source_type": str(source_el.data_type.value),
+                    },
+                )
+            )
+    return findings
+
+
+# --- T1-T2: temporal perspective (roadmap E5, additive) ------------------
+
+
+def _check_temporal(schema: ProcessSchema) -> list[ValidationFinding]:
+    """Static time-consistency rules T1 (well-formed) and T2 (critical path).
+
+    These rules only fire when the schema carries temporal annotations
+    (``time_constraints`` and/or ``deadline_seconds``); a model without time
+    data produces no findings, so the check is fully additive.
+
+    * T1: every annotated duration and the deadline are finite, non-negative
+      and refer to an existing node. A non-finite value (NaN compares false
+      with everything, so it would pass the sign check and poison the T2 sum)
+      is reported once with its own code instead of the sign finding.
+    * T2: the critical path (longest accumulated duration from START to END)
+      must not exceed the schema deadline. Parallel/alternative branches are
+      treated by their longest branch (worst case), so the bound is sound.
+    """
+
+    if not schema.time_constraints and schema.deadline_seconds is None:
+        return []
+
+    findings: list[ValidationFinding] = []
+
+    # T1: well-formedness of the annotations.
+    if schema.deadline_seconds is not None and not math.isfinite(schema.deadline_seconds):
+        findings.append(
+            ValidationFinding(
+                rule="T1",
+                message=f"deadline_seconds must be a finite number, got {schema.deadline_seconds}",
+                code="T1.deadline-not-finite",
+                params={"value": str(schema.deadline_seconds)},
+            )
+        )
+    elif schema.deadline_seconds is not None and schema.deadline_seconds < 0:
+        findings.append(
+            ValidationFinding(
+                rule="T1",
+                message=f"deadline_seconds must be >= 0, got {schema.deadline_seconds}",
+                code="T1.negative-deadline",
+                params={"value": str(schema.deadline_seconds)},
+            )
+        )
+    for node_id, constraint in schema.time_constraints.items():
+        if node_id not in schema.nodes:
+            findings.append(
+                ValidationFinding(
+                    rule="T1",
+                    message=f"time constraint references unknown node '{node_id}'",
+                    node_id=node_id,
+                    code="T1.unknown-node",
+                    params={"node": str(node_id)},
+                )
+            )
+            continue
+        duration = constraint.max_duration_seconds
+        if duration is not None and not math.isfinite(duration):
+            findings.append(
+                ValidationFinding(
+                    rule="T1",
+                    message=f"max_duration_seconds of '{node_id}' must be a finite number, "
+                        f"got {duration}",
+                    node_id=node_id,
+                    code="T1.duration-not-finite",
+                    params={"node": str(node_id), "value": str(duration)},
+                )
+            )
+        elif duration is not None and duration < 0:
+            findings.append(
+                ValidationFinding(
+                    rule="T1",
+                    message=f"max_duration_seconds of '{node_id}' must be >= 0, "
+                        f"got {duration}",
+                    node_id=node_id,
+                    code="T1.negative-duration",
+                    params={"node": str(node_id), "value": str(duration)},
+                )
+            )
+        lead = constraint.target_lead_seconds
+        if lead is not None and not math.isfinite(lead):
+            findings.append(
+                ValidationFinding(
+                    rule="T1",
+                    message=f"target_lead_seconds of '{node_id}' must be a finite number, "
+                        f"got {lead}",
+                    node_id=node_id,
+                    code="T1.lead-not-finite",
+                    params={"node": str(node_id), "value": str(lead)},
+                )
+            )
+        elif lead is not None and lead < 0:
+            findings.append(
+                ValidationFinding(
+                    rule="T1",
+                    message=f"target_lead_seconds of '{node_id}' must be >= 0, "
+                        f"got {lead}",
+                    node_id=node_id,
+                    code="T1.negative-lead",
+                    params={"node": str(node_id), "value": str(lead)},
+                )
+            )
+
+    # T2: the critical path must fit the deadline (only when a deadline exists
+    # and the annotations so far are well-formed).
+    if schema.deadline_seconds is not None and not findings:
+        critical = _critical_path_seconds(schema)
+        if critical is not None and critical > schema.deadline_seconds:
+            findings.append(
+                ValidationFinding(
+                    rule="T2",
+                    message=(
+                        f"critical path of {critical:g}s exceeds the deadline of "
+                        f"{schema.deadline_seconds:g}s"
+                    ),
+                    code="T2.deadline",
+                    params={
+                        "critical": f"{critical:g}",
+                        "deadline": f"{schema.deadline_seconds:g}",
+                    },
+                )
+            )
+    return findings
+
+
+def _critical_path_seconds(schema: ProcessSchema) -> float | None:
+    """Longest accumulated max-duration from START to END, or ``None``.
+
+    Returns ``None`` if the control graph is not a well-formed DAG (e.g. during
+    incremental construction); the structural rules cover those cases instead.
+
+    Loop-aware (stage S3): a loop whose decision carries ``max_iterations``
+    charges its body ``max_iterations`` times -- the extra passes are folded
+    into the LOOP_END's duration (:func:`_loop_time_extras`), so the plain
+    one-pass DAG walk below stays correct. A loop without the bound keeps the
+    documented one-pass approximation (a deadline over such a loop is a
+    promise for the run without repetition).
+    """
+
+    nodes = schema.nodes
+    if not nodes:
+        return None
+    indegree: dict[str, int] = {nid: 0 for nid in nodes}
+    succ: dict[str, list[str]] = {nid: [] for nid in nodes}
+    for edge in schema.edges:
+        # T2 stays a control-flow bound: SYNC waits (K4) are deliberately not
+        # charged (conservative approximation, documented).
+        if edge.type is not EdgeType.CONTROL:
+            continue
+        if edge.source in nodes and edge.target in nodes:
+            succ[edge.source].append(edge.target)
+            indegree[edge.target] += 1
+
+    extras = _loop_time_extras(schema)
+    complete: dict[str, float] = {}
+    queue: deque[str] = deque(nid for nid, deg in indegree.items() if deg == 0)
+    visited = 0
+    while queue:
+        current = queue.popleft()
+        visited += 1
+        complete[current] = complete.get(current, 0.0) + _node_duration(
+            schema, current, extras
+        )
+        for target in succ[current]:
+            complete[target] = max(complete.get(target, 0.0), complete[current])
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                queue.append(target)
+    if visited != len(nodes):  # a cycle -> not a DAG, leave to structural rules
+        return None
+    return max(complete.values(), default=0.0)
+
+
+def _loop_time_extras(schema: ProcessSchema) -> dict[str, float]:
+    """Extra seconds charged to each LOOP_END for its bounded repetitions (T2).
+
+    For every loop whose decision carries ``max_iterations`` = m, the longest
+    internal path through the block (LOOP_START to LOOP_END) is charged
+    ``(m - 1)`` additional times onto the LOOP_END. Blocks are processed
+    innermost-first (smaller bodies first), so a nested bounded loop's extra
+    is already part of the enclosing block's internal path and multiplies
+    correctly. Loops without the bound contribute nothing (one-pass
+    approximation preserved).
+    """
+
+    blocks: list[tuple[int, str, str, set[str]]] = []
+    for nid, node in schema.nodes.items():
+        if node.type is not NodeType.LOOP_START:
+            continue
+        try:
+            end_id, body = loop_block(schema, nid)
+        except ValueError:
+            continue  # unpaired start -> K6a reports it, no time charge
+        blocks.append((len(body), nid, end_id, body))
+
+    extras: dict[str, float] = {}
+    for _, start_id, end_id, body in sorted(blocks, key=lambda b: b[0]):
+        decision = schema.loop_decisions.get(end_id)
+        if decision is None or decision.max_iterations is None:
+            continue
+        if decision.max_iterations < 2:
+            continue  # ill-formed bound -> K6b reports it, no time charge
+
+        block = body | {start_id, end_id}
+        longest: dict[str, float] = {start_id: _node_duration(schema, start_id, extras)}
+        for node_id in _topological_order(schema):
+            if node_id not in block or node_id == start_id:
+                continue
+            preds = [
+                e.source for e in schema.incoming(node_id) if e.source in block
+            ]
+            best = max(
+                (longest.get(p, 0.0) for p in preds), default=0.0
+            )
+            longest[node_id] = best + _node_duration(schema, node_id, extras)
+        extras[end_id] = extras.get(end_id, 0.0) + (
+            decision.max_iterations - 1
+        ) * longest.get(end_id, 0.0)
+    return extras
+
+
+def _node_duration(
+    schema: ProcessSchema, node_id: str, extras: dict[str, float]
+) -> float:
+    """Anrechenbare Dauer eines Knotens für T2 (Sekunden).
+
+    Die Soll-Dauer ``max_duration_seconds`` seiner Zeitannotation (0, wenn es
+    keine gibt) plus der Zuschlag aus ``extras`` für begrenzte Wiederholungen
+    (nur LOOP_END-Knoten tragen einen, :func:`_loop_time_extras`). Gemeinsam
+    genutzt von :func:`_critical_path_seconds` und :func:`_loop_time_extras`.
+
+    Parameter:
+        schema: Das Schema mit den Zeitannotationen.
+        node_id: Der Knoten, dessen Dauer gesucht ist.
+        extras: Bisher berechnete Schleifenzuschläge. :func:`_loop_time_extras`
+            reicht hier sein **noch wachsendes** Dict herein -- so zählt eine
+            innere, schon verrechnete Schleife im Pfad der äußeren mit.
+
+    Rückgabe:
+        Die Dauer in Sekunden, nie negativ bei wohlgeformten Annotationen (T1).
+    """
+
+    constraint = schema.time_constraints.get(node_id)
+    base = 0.0
+    if constraint is not None and constraint.max_duration_seconds is not None:
+        base = constraint.max_duration_seconds
+    return base + extras.get(node_id, 0.0)

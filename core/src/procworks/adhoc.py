@@ -1,0 +1,306 @@
+# SPDX-License-Identifier: BUSL-1.1
+"""Ad-hoc changes on a single running instance (roadmap step 10).
+
+An ad-hoc change adapts *one* instance without touching the released schema:
+the instance gets its own schema variant (``ad_hoc_schema``) plus an updated
+node/edge marking. Every change is checked against:
+
+  * R1 (state compatibility): only the not-yet-executed region may change -- a
+    node that is already RUNNING/COMPLETED/SKIPPED is frozen;
+  * R2 (correctness preservation): the resulting schema still satisfies all
+    structural and data-flow rules (validate-before-commit, as for normal
+    change operations).
+
+The executed nodes keep their ids, so the existing markings stay valid and the
+Execution Engine continues seamlessly against the variant.
+"""
+
+from __future__ import annotations
+
+from procworks.model import (
+    ControlEdge,
+    EdgeState,
+    LifecycleState,
+    Node,
+    NodeState,
+    NodeType,
+    ProcessInstance,
+    ProcessSchema,
+    StaffRule,
+)
+from procworks.validator import (
+    CorrectnessError,
+    SchemaResolver,
+    ValidationFinding,
+    check_executable,
+    clean_label,
+    raise_if_invalid,
+)
+
+
+def _edge_key(source: str, target: str) -> str:
+    return f"{source}->{target}"
+
+
+def effective_schema(
+    instance: ProcessInstance, base_schema: ProcessSchema
+) -> ProcessSchema:
+    """Return the schema this instance actually runs against (variant or base)."""
+
+    return instance.ad_hoc_schema or base_schema
+
+
+def _r1_error(message: str, node_id: str | None = None, *, code: str) -> CorrectnessError:
+    """R1 rejection with a ``code`` the client words.
+
+    ``params["node"]`` carries the node id; the client resolves it to the
+    step's name in the instance variant it shows.
+    """
+
+    return CorrectnessError(
+        [
+            ValidationFinding(
+                rule="R1",
+                message=message,
+                node_id=node_id,
+                code=code,
+                params={"node": node_id} if node_id else {},
+            )
+        ]
+    )
+
+
+def _require_node(schema: ProcessSchema, node_id: str) -> Node:
+    """Return the node ``node_id`` of the instance variant, or refuse (R1).
+
+    ``schema`` is the schema the instance actually runs against
+    (:func:`effective_schema`). A missing node raises the R1 rejection
+    ``R1.not-found`` with the id in ``params["node"]`` -- the one wording all
+    three ad-hoc operations share.
+    """
+
+    node = schema.nodes.get(node_id)
+    if node is None:
+        raise _r1_error(f"node '{node_id}' does not exist", node_id, code="R1.not-found")
+    return node
+
+
+def adhoc_insert_activity(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    after_node_id: str,
+    label: str,
+    *,
+    resolver: SchemaResolver | None = None,
+    new_node_id: str | None = None,
+    staff_rule: StaffRule | None = None,
+) -> ProcessInstance:
+    """Insert a serial ACTIVITY after ``after_node_id`` into one instance.
+
+    requires (R1): the anchor exists and is not END, its single outgoing edge
+                   is not yet signaled and its successor is NOT_ACTIVATED (the
+                   region is still ahead of the execution front).
+    requires (B2): ``staff_rule`` names who works the new step. The instance
+                   runs, so the new step must be *runnable*, not merely
+                   correct: without a rule it is activated but stands in no
+                   worklist, and the instance only moves on by a supervision
+                   act. The check is
+                   :func:`check_executable` restricted to the new node -- the
+                   rest of the variant is the released schema (or, for a test
+                   instance, a draft that may still be incomplete).
+                   ``check_executable`` deliberately stays **outside**
+                   ``validate()``; this is the ad-hoc path's own gate.
+    ensures (R2):  the resulting instance schema is still correct (the staff
+                   rule included: Z1-Z3 apply as everywhere); the new node is
+                   spliced in as NOT_ACTIVATED.
+    """
+
+    current = effective_schema(instance, schema)
+    anchor = _require_node(current, after_node_id)
+    if anchor.type is NodeType.END:
+        raise _r1_error("cannot insert after END", after_node_id, code="R1.after-end")
+    outgoing = current.outgoing(after_node_id)
+    if len(outgoing) != 1:
+        raise _r1_error(
+            f"anchor '{after_node_id}' must have exactly one outgoing edge",
+            after_node_id,
+            code="R1.anchor-not-serial",
+        )
+    edge = outgoing[0]
+    successor_id = edge.target
+    edge_state = instance.edge_states.get(_edge_key(after_node_id, successor_id))
+    if edge_state is not None and edge_state is not EdgeState.NOT_SIGNALED:
+        raise _r1_error(
+            f"edge '{after_node_id}->{successor_id}' is already signaled",
+            after_node_id,
+            code="R1.already-passed",
+        )
+    if instance.node_states.get(successor_id) not in (None, NodeState.NOT_ACTIVATED):
+        raise _r1_error(
+            f"successor '{successor_id}' is already reached",
+            successor_id,
+            code="R1.already-reached",
+        )
+
+    candidate = current.model_copy(deep=True)
+    new_node = Node(
+        id=new_node_id or _free_id(candidate, "adhoc"),
+        type=NodeType.ACTIVITY,
+        label=clean_label(label, what="node"),
+    )
+    candidate.nodes[new_node.id] = new_node
+    candidate.edges = [
+        e
+        for e in candidate.edges
+        if not (e.source == after_node_id and e.target == successor_id)
+    ]
+    candidate.edges.append(ControlEdge(source=after_node_id, target=new_node.id))
+    candidate.edges.append(ControlEdge(source=new_node.id, target=successor_id))
+    if staff_rule is not None:
+        candidate.staff_rules[new_node.id] = staff_rule
+    candidate.lifecycle_state = LifecycleState.RELEASED
+    raise_if_invalid(candidate, resolver)
+    unready = [f for f in check_executable(candidate) if f.node_id == new_node.id]
+    if unready:
+        raise CorrectnessError(unready)
+
+    result = instance.model_copy(deep=True)
+    result.ad_hoc_schema = candidate
+    result.node_states[new_node.id] = NodeState.NOT_ACTIVATED
+    result.edge_states.pop(_edge_key(after_node_id, successor_id), None)
+    result.edge_states[_edge_key(after_node_id, new_node.id)] = EdgeState.NOT_SIGNALED
+    result.edge_states[_edge_key(new_node.id, successor_id)] = EdgeState.NOT_SIGNALED
+    result.ad_hoc_deltas.append(
+        f"insert {new_node.id} ('{label}') after {after_node_id}"
+    )
+    return result
+
+
+def adhoc_delete_node(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    *,
+    resolver: SchemaResolver | None = None,
+) -> ProcessInstance:
+    """Remove a not-yet-reached serial ACTIVITY from one instance.
+
+    requires (R1): the node exists, is an ACTIVITY, is still NOT_ACTIVATED and
+                   sits on a serial stretch (exactly one predecessor and one
+                   successor).
+    ensures (R2):  predecessor and successor are reconnected and the resulting
+                   instance schema is still correct.
+    """
+
+    current = effective_schema(instance, schema)
+    node = _require_node(current, node_id)
+    if node.type is not NodeType.ACTIVITY:
+        raise _r1_error(
+            "only ACTIVITY nodes can be deleted ad-hoc", node_id, code="R1.delete-not-activity"
+        )
+    if instance.node_states.get(node_id) is not NodeState.NOT_ACTIVATED:
+        raise _r1_error(
+            f"node '{node_id}' is already reached", node_id, code="R1.already-reached"
+        )
+    incoming = current.incoming(node_id)
+    outgoing = current.outgoing(node_id)
+    if len(incoming) != 1 or len(outgoing) != 1:
+        raise _r1_error(
+            f"node '{node_id}' is not on a serial stretch (one in/one out)",
+            node_id,
+            code="R1.not-serial",
+        )
+    predecessor_id = incoming[0].source
+    successor_id = outgoing[0].target
+
+    candidate = current.model_copy(deep=True)
+    del candidate.nodes[node_id]
+    candidate.edges = [
+        e for e in candidate.edges if e.source != node_id and e.target != node_id
+    ]
+    candidate.data_accesses = [
+        a for a in candidate.data_accesses if a.node_id != node_id
+    ]
+    candidate.staff_rules.pop(node_id, None)
+    candidate.service_bindings.pop(node_id, None)
+    # Everything else keyed by the node goes too -- exactly what
+    # ``operations._drop_nodes`` removes on a modelling-time delete. Otherwise a
+    # step carrying a target time could not be removed ad hoc at all: its time
+    # constraint would survive as a stale key and T1 ("time constraint
+    # references unknown node") would reject the whole change.
+    candidate.sub_process_bindings.pop(node_id, None)
+    candidate.forms.pop(node_id, None)
+    candidate.time_constraints.pop(node_id, None)
+    candidate.mail_bindings.pop(node_id, None)
+    candidate.node_priorities.pop(node_id, None)
+    candidate.escalation_policies.pop(node_id, None)
+    candidate.edges.append(ControlEdge(source=predecessor_id, target=successor_id))
+    candidate.lifecycle_state = LifecycleState.RELEASED
+    raise_if_invalid(candidate, resolver)
+
+    result = instance.model_copy(deep=True)
+    result.ad_hoc_schema = candidate
+    result.node_states.pop(node_id, None)
+    # E1: an ownership entry hangs on exactly one activation (W4) -- the
+    # deleted step takes its claim along.
+    result.claimed_by.pop(node_id, None)
+    result.node_claimed_at.pop(node_id, None)
+    result.escalated_stages.pop(node_id, None)  # T3: same reasoning
+    result.node_details.pop(node_id, None)  # E2: same reasoning
+    result.node_detail_reason.pop(node_id, None)
+    result.edge_states.pop(_edge_key(predecessor_id, node_id), None)
+    result.edge_states.pop(_edge_key(node_id, successor_id), None)
+    result.edge_states[_edge_key(predecessor_id, successor_id)] = EdgeState.NOT_SIGNALED
+    result.ad_hoc_deltas.append(f"delete {node_id}")
+    return result
+
+
+def adhoc_rename_activity(
+    instance: ProcessInstance,
+    schema: ProcessSchema,
+    node_id: str,
+    label: str,
+    *,
+    resolver: SchemaResolver | None = None,
+) -> ProcessInstance:
+    """Relabel a not-yet-reached ACTIVITY/SUBPROCESS in one instance.
+
+    A relabelling is the smallest possible adaptation to reality: it never
+    touches structure, markings or data flow, so it always preserves R2. R1
+    still restricts it to the not-yet-executed region, so the recorded history
+    of already reached steps is never rewritten.
+
+    requires (R1): the node exists, is an ACTIVITY or SUBPROCESS and is still
+                   NOT_ACTIVATED (not yet reached by the execution front).
+    ensures (R2):  the instance schema stays correct; the markings are kept.
+    """
+
+    current = effective_schema(instance, schema)
+    node = _require_node(current, node_id)
+    if node.type not in (NodeType.ACTIVITY, NodeType.SUBPROCESS):
+        raise _r1_error(
+            "only ACTIVITY or SUBPROCESS nodes can be renamed ad-hoc",
+            node_id,
+            code="R1.rename-not-step",
+        )
+    if instance.node_states.get(node_id) not in (None, NodeState.NOT_ACTIVATED):
+        raise _r1_error(
+            f"node '{node_id}' is already reached", node_id, code="R1.already-reached"
+        )
+
+    candidate = current.model_copy(deep=True)
+    candidate.nodes[node_id].label = clean_label(label, what="node")
+    candidate.lifecycle_state = LifecycleState.RELEASED
+    raise_if_invalid(candidate, resolver)
+
+    result = instance.model_copy(deep=True)
+    result.ad_hoc_schema = candidate
+    result.ad_hoc_deltas.append(f"rename {node_id} to '{label}'")
+    return result
+
+
+def _free_id(schema: ProcessSchema, prefix: str) -> str:
+    i = 1
+    while f"{prefix}_{i}" in schema.nodes:
+        i += 1
+    return f"{prefix}_{i}"

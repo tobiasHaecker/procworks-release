@@ -1,0 +1,1013 @@
+# SPDX-License-Identifier: BUSL-1.1
+"""Built-in demo data set and the one-shot loader behind the admin reset.
+
+A fresh kernel is empty, which makes it hard to grasp what the tool can do. The
+:func:`load_demo` loader populates the stores with a small but complete world so
+every view has something to show: one shared organisation, two example
+processes (one *released*, one *draft*), three running/finished instances at
+different points, process variables and -- in password mode -- a handful of
+ready-to-use logins.
+
+The released leave-request process also exercises the newer runtime features so
+their views are not empty on a fresh reset: the approval step uses the
+supervisor-relative staff rule (the manager of the request creator approves it),
+the currently-active steps carry a reaction SLA (``target_lead_seconds``, the
+basis of the time-based worklist prioritisation) and -- when an absence store is
+supplied -- one agent (Erika) is seeded absent with a deputy (Tom), so the
+absence-gated, parallel deputy substitution is visible out of the box.
+
+The data is built exclusively through the public operations (the same
+validate-before-commit path every client uses), so the demo can never create an
+incorrect schema. Loading is wired to ``POST /admin/reset`` (admin only); the
+same endpoint also wipes everything back to an empty system.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+
+from procworks import execution as exe
+from procworks import operations as ops
+from procworks import org as org_ops
+from procworks.audit import AuditEvent, AuditLog, EventType
+from procworks.auth_password import (
+    PasswordAuthBackend,
+    User,
+    hash_password,
+)
+from procworks.model import (
+    AbsenceEntry,
+    AccessMode,
+    Cardinality,
+    ConnectorKind,
+    DataType,
+    FilterOperator,
+    ImpactUrgency,
+    InstanceState,
+    NodeType,
+    OrgModel,
+    ProcessInstance,
+    ProcessSchema,
+    QueryFilter,
+    StaffRule,
+    StaffRuleKind,
+    TimeConstraint,
+    ValueClass,
+    WidgetKind,
+    WorkItemPriority,
+)
+from procworks.store import (
+    AbsenceStore,
+    InstanceStore,
+    OrgStore,
+    SchemaStore,
+    dehydrate_org,
+    make_resolver,
+)
+
+#: Stable ids so the demo is recognisable and reset-idempotent.
+ORG_ID = "org-acme"
+SCHEMA_URLAUB = "urlaubsantrag"
+SCHEMA_BESCHAFFUNG = "beschaffung"
+
+#: Shared password for every seeded demo login (documented in the README).
+#: The demo users skip the forced first-change so they work out of the box.
+DEMO_PASSWORD = "demo-procworks"
+
+#: The demo logins seeded in password mode: (login, name, roles, agent id).
+DEMO_USERS: list[tuple[str, str, frozenset[str], str | None]] = [
+    ("mara.modell", "Mara Modell", frozenset({"modeler"}), None),
+    ("erika.sander", "Erika Sander", frozenset({"operator"}), "a-erika"),
+    ("tom.berger", "Tom Berger", frozenset({"operator"}), "a-tom"),
+    # Ohne diesen Login waere die Rolle "Einkauf" unbesetzt -- und damit der
+    # Schritt "Angebote einholen" des Beschaffungsantrags von *niemandem*
+    # bedienbar: der Entwurfsprozess liesse sich zwar starten, aber nie
+    # durchspielen. Waechter: test_every_demo_staff_rule_has_a_seeded_login.
+    ("paul.klein", "Paul Klein", frozenset({"operator"}), "a-paul"),
+    # Sabine leitet die Geschaeftsleitung, also die Abteilung ueber Toms
+    # Vertrieb. Seit „Vorgesetzte:r“ nie den Antragsteller selbst meint
+    # genehmigt sie Toms Urlaubsantrag -- ohne Login blieb der in der Demo bei
+    # „Genehmigung durch Leitung“ stehen.
+    ("sabine.chef", "Sabine Chef", frozenset({"operator"}), "a-sabine"),
+    ("vera.viewer", "Vera Viewer", frozenset({"viewer"}), None),
+]
+
+#: The login a public demo auto-authenticates a fresh visitor as (the modeler --
+#: the modelling experience is the product's core, so a visitor lands straight in
+#: the editor). Consumed only in demo mode by the ``/auth/config`` boundary; see
+#: ``api._demo_login_info``. Must be one of :data:`DEMO_USERS`.
+DEMO_AUTOLOGIN = "mara.modell"
+
+
+#: Felder einer Maske, die Pruefregeln tragen koennen (U2 erlaubt Grenzen nur an
+#: Zahlenfeldern, Muster und Laenge nur an Textfeldern).
+_RULE_WIDGETS = frozenset({WidgetKind.NUMBER, WidgetKind.TEXT, WidgetKind.TEXTAREA})
+
+
+@dataclasses.dataclass(frozen=True)
+class InputRule:
+    """Input checks of one data element in the example masks.
+
+    ``min_value``/``max_value`` bound a number field, ``pattern``/``max_length``
+    a text field (see :class:`procworks.model.FormField`). ``help_text``
+    explains what the rule expects, or a rule the mask cannot check itself
+    (e.g. "at most the delivered quantity"); it is put in front of the field's
+    own help text, never replaces it.
+    """
+
+    min_value: float | None = None
+    max_value: float | None = None
+    pattern: str | None = None
+    max_length: int | None = None
+    help_text: str | None = None
+
+
+def with_input_rules(
+    fields: Sequence[ops.FormFieldSpec], rules: dict[str, InputRule]
+) -> list[ops.FormFieldSpec]:
+    """Give every writable mask field the input checks of its data element.
+
+    The example data set is a showcase: its masks must refuse what no clerk
+    would enter (negative leave days, a credit score of 150, a tracking "URL"
+    that is none). The checks live in one table per data set, keyed by data
+    element, so the same element carries the same bounds in every mask.
+
+    :param fields: the fields as written in the data set
+    :param rules: the :class:`InputRule` per data element id
+    :returns: new field specs; the inputs stay untouched
+    :edge cases: READ fields and widgets without checks (dropdown, checkbox,
+        date) are passed through unchanged. A field's own help text is kept;
+        the rule's hint comes first -- a format the user must meet (e.g. the
+        tracking address) would otherwise vanish behind a general hint.
+    """
+
+    out: list[ops.FormFieldSpec] = []
+    for spec in fields:
+        rule = rules.get(spec.element_id)
+        if rule is not None and spec.mode is not AccessMode.READ and spec.widget in _RULE_WIDGETS:
+            spec = dataclasses.replace(
+                spec,
+                min_value=rule.min_value,
+                max_value=rule.max_value,
+                pattern=rule.pattern,
+                max_length=rule.max_length,
+                help_text=" ".join(t for t in (rule.help_text, spec.help_text) if t) or None,
+            )
+        out.append(spec)
+    return out
+
+
+#: Pruefregeln der Basis-Beispiele (siehe :func:`with_input_rules`).
+DEMO_INPUT_RULES: dict[str, InputRule] = {
+    "tage": InputRule(min_value=1, max_value=30),
+    "grund": InputRule(max_length=1000),
+    "mitteilung": InputRule(max_length=1000),
+    "betrag": InputRule(min_value=0.01),
+    "lieferant_nr": InputRule(min_value=1),
+}
+
+
+def _set_form(
+    schema: ProcessSchema,
+    node_id: str,
+    *,
+    title: str = "",
+    fields: list[ops.FormFieldSpec],
+    columns: int = 1,
+) -> ProcessSchema:
+    """:func:`procworks.operations.set_form` with :data:`DEMO_INPUT_RULES`."""
+
+    return ops.set_form(
+        schema,
+        node_id,
+        title=title,
+        fields=with_input_rules(fields, DEMO_INPUT_RULES),
+        columns=columns,
+    )
+
+
+def _nid(schema: ProcessSchema, label: str) -> str:
+    """Return the id of the (unique) node carrying ``label``."""
+
+    return next(n.id for n in schema.nodes.values() if n.label == label)
+
+
+def _gateway_id(schema: ProcessSchema, node_type: NodeType) -> str:
+    """Return the id of the (unique) gateway node of ``node_type``."""
+
+    return next(n.id for n in schema.nodes.values() if n.type is node_type)
+
+
+def _label(schema: ProcessSchema, node_id: str) -> str | None:
+    node = schema.nodes.get(node_id)
+    return node.label if node is not None else None
+
+
+def _role(role_id: str) -> StaffRule:
+    return StaffRule(kind=StaffRuleKind.ROLE, ref=role_id)
+
+
+def _build_org() -> OrgModel:
+    """The shared organisation reused by both example processes."""
+
+    org = org_ops.create_org_model("ACME Mittelstand GmbH", org_id=ORG_ID)
+    org = org_ops.org_add_role(org, "Sachbearbeiter", role_id="sachbearbeiter")
+    org = org_ops.org_add_role(org, "Teamleitung", role_id="teamleitung")
+    org = org_ops.org_add_role(org, "Einkauf", role_id="einkauf")
+    org = org_ops.org_add_unit(org, "Gesch\u00e4ftsleitung", org_unit_id="leitung")
+    org = org_ops.org_add_unit(org, "Vertrieb", org_unit_id="vertrieb")
+    org = org_ops.org_add_unit(org, "Einkauf", org_unit_id="einkauf-abt")
+    org = org_ops.org_add_agent(
+        org, "Sabine Chef", role_ids=["teamleitung"], org_unit_id="leitung", agent_id="a-sabine"
+    )
+    org = org_ops.org_add_agent(
+        org, "Erika Sander", role_ids=["sachbearbeiter"], org_unit_id="vertrieb", agent_id="a-erika"
+    )
+    org = org_ops.org_add_agent(
+        org, "Tom Berger", role_ids=["teamleitung"], org_unit_id="vertrieb", agent_id="a-tom"
+    )
+    org = org_ops.org_add_agent(
+        org,
+        "Nina Wolf",
+        role_ids=["sachbearbeiter"],
+        org_unit_id="vertrieb",
+        agent_id="a-nina",
+        deputy_id="a-erika",
+    )
+    org = org_ops.org_add_agent(
+        org, "Paul Klein", role_ids=["einkauf"], org_unit_id="einkauf-abt", agent_id="a-paul"
+    )
+    # A two-level hierarchy so the org chart shows a real tree: sales and
+    # purchasing both report to the management unit, each with its own manager.
+    org = org_ops.org_set_parent(org, "vertrieb", "leitung")
+    org = org_ops.org_set_parent(org, "einkauf-abt", "leitung")
+    org = org_ops.org_set_manager(org, "leitung", "a-sabine")
+    org = org_ops.org_set_manager(org, "vertrieb", "a-tom")
+    org = org_ops.org_set_manager(org, "einkauf-abt", "a-paul")
+    # Erika Sander hat selbst eine Vertretung (Tom Berger). Zusammen mit der unten
+    # geseedeten aktiven Abwesenheit macht das die abwesenheitsgesteuerte, parallele
+    # Substitution im Demo sichtbar: waehrend Erikas Urlaub erscheinen ihre offenen
+    # Aufgaben zusaetzlich bei Tom, ohne je aus Erikas Liste zu verschwinden. Der
+    # Vertreter wird erst hier gesetzt, weil er (Tom) als Agent existieren muss (Z1).
+    org = org_ops.org_set_deputy(org, "a-erika", "a-tom")
+    return org
+
+
+def _build_urlaubsantrag(org: OrgModel) -> ProcessSchema:
+    """Released process: a leave request with an approval/rejection decision.
+
+    Fachliche Modellierung der Verzweigung (bewusst so und nicht anders): Der
+    XOR-Split haengt an der **Entscheidung**, nicht an der beantragten Anzahl
+    Urlaubstage. Ein Antrag wird nicht abgelehnt, *weil* er viele Tage umfasst --
+    er wird abgelehnt, weil die vorgesetzte Person so entscheidet. Die Tage sind
+    Entscheidungs*grundlage* (sie werden im Genehmigungsschritt gelesen), nicht
+    das Verzweigungskriterium. Der Schritt "Genehmigung durch Leitung" liegt
+    deshalb **vor** dem Split und schreibt den Diskriminator; die beiden Zweige
+    fuehren die Entscheidung nur noch aus.
+    """
+
+    s = ops.create_empty_schema("Urlaubsantrag", schema_id=SCHEMA_URLAUB)
+    s = ops.serial_insert(s, "Antrag erfassen", after_node_id="start")
+    erfassen = _nid(s, "Antrag erfassen")
+    s = ops.serial_insert(s, "Antrag pr\u00fcfen", after_node_id=erfassen)
+    pruefen = _nid(s, "Antrag pr\u00fcfen")
+    s = ops.serial_insert(s, "Genehmigung durch Leitung", after_node_id=pruefen)
+    genehmigung = _nid(s, "Genehmigung durch Leitung")
+
+    # "Urlaubstage" wandert als Datenobjekt durch den Fluss: erfasst im ersten
+    # Schritt, gelesen von der Pruefung und von der Genehmigung (dort ist es die
+    # Entscheidungsgrundlage). Kein Verzweigungskriterium -- siehe Docstring.
+    s = ops.add_data_element(s, "Urlaubstage", DataType.INTEGER, element_id="tage")
+    s = ops.connect_data(s, erfassen, "tage", AccessMode.WRITE)
+    s = ops.connect_data(s, pruefen, "tage", AccessMode.READ)
+    s = ops.connect_data(s, genehmigung, "tage", AccessMode.READ)
+
+    # Der Diskriminator muss existieren und vor dem Split garantiert geschrieben
+    # sein (K7), deshalb wird er hier -- vor dem conditional_insert -- angelegt
+    # und im Genehmigungsschritt verbindlich (mandatory) geschrieben.
+    s = ops.add_data_element(s, "Entscheidung", DataType.STRING, element_id="entscheidung")
+    s = ops.connect_data(s, genehmigung, "entscheidung", AccessMode.WRITE)
+
+    # Strukturierte XOR-Partition ueber "entscheidung" (STRING -> ENUM): der
+    # Wert "Genehmigt" fuehrt in den Genehmigungszweig, jeder andere Wert in den
+    # Auffang-Zweig (Ablehnung). Die beiden Zellen decken den gesamten
+    # Wertebereich total und disjunkt ab, also ist immer genau ein Zweig
+    # freigeschaltet -- die Engine loest ihn aus den Instanzdaten selbst auf.
+    s = ops.conditional_insert(
+        s,
+        after_node_id=genehmigung,
+        discriminator="entscheidung",
+        branches=[
+            ops.BranchSpec(label="Urlaub eintragen", values=("Genehmigt",)),
+            ops.BranchSpec(label="Ablehnung dokumentieren", is_else=True),
+        ],
+    )
+    join = _gateway_id(s, NodeType.XOR_JOIN)
+    s = ops.serial_insert(s, "Mitarbeiter benachrichtigen", after_node_id=join)
+
+    # A second data object that *travels and is enriched along the flow*: the
+    # message text is filled in by whichever XOR branch runs (the confirmation
+    # on approval, the reason on rejection) and then consumed by the
+    # notification at the end. Because both branches write it, the value is
+    # guaranteed present on every path after the join (D1 holds via the XOR-join
+    # intersection). Die Entscheidung selbst wird ebenfalls mitgelesen.
+    s = ops.add_data_element(s, "Mitteilungstext", DataType.STRING, element_id="mitteilung")
+    s = ops.connect_data(s, _nid(s, "Urlaub eintragen"), "mitteilung", AccessMode.WRITE)
+    s = ops.connect_data(s, _nid(s, "Ablehnung dokumentieren"), "mitteilung", AccessMode.WRITE)
+    s = ops.connect_data(s, _nid(s, "Mitarbeiter benachrichtigen"), "mitteilung", AccessMode.READ)
+    s = ops.connect_data(s, _nid(s, "Mitarbeiter benachrichtigen"), "entscheidung", AccessMode.READ)
+
+    s = ops.link_org_model(s, ORG_ID, org)
+    s = ops.assign_staff_rule(s, erfassen, _role("sachbearbeiter"))
+    s = ops.assign_staff_rule(s, pruefen, _role("sachbearbeiter"))
+    # Vorgesetzten-BZR (Z1-Z3, relativ zum Ausfuehrer): den Antrag genehmigt die
+    # vorgesetzte Person der/des Erfassenden -- der Manager der Organisationseinheit,
+    # in der "Antrag erfassen" ausgefuehrt wurde (der Lehrbuch-Fall). Der Bezugsknoten
+    # laeuft garantiert vorher (Z3) und mindestens eine vorgesetzte Person ist gepflegt
+    # (Z2: die moeglichen Erfasser sitzen im Vertrieb, dessen Manager Tom Berger ist),
+    # sonst wiese der Kern die Zuordnung ab.
+    s = ops.assign_staff_rule(
+        s,
+        _nid(s, "Genehmigung durch Leitung"),
+        StaffRule(kind=StaffRuleKind.NODE_PERFORMING_AGENT_SUPERVISOR, ref=erfassen),
+    )
+    s = ops.assign_staff_rule(s, _nid(s, "Urlaub eintragen"), _role("sachbearbeiter"))
+    s = ops.assign_staff_rule(s, _nid(s, "Ablehnung dokumentieren"), _role("sachbearbeiter"))
+    s = ops.assign_staff_rule(s, _nid(s, "Mitarbeiter benachrichtigen"), _role("sachbearbeiter"))
+
+    # Input mask (form designer, U1-U3): the first step is entered through a
+    # designed mask -- a number field for the days plus an optional free-text
+    # reason. The mask *is* the data flow (a WRITE field yields a write access),
+    # so "tage" stays guaranteed-written before it is read downstream.
+    s = ops.add_data_element(s, "Begr\u00fcndung", DataType.STRING, element_id="grund")
+    s = _set_form(
+        s,
+        erfassen,
+        title="Urlaubsantrag erfassen",
+        fields=[
+            ops.FormFieldSpec(
+                element_id="tage",
+                widget=WidgetKind.NUMBER,
+                label="Urlaubstage",
+                help_text="Anzahl der beantragten Arbeitstage.",
+            ),
+            ops.FormFieldSpec(
+                element_id="grund",
+                widget=WidgetKind.TEXTAREA,
+                label="Begr\u00fcndung (optional)",
+                required=False,
+            ),
+        ],
+    )
+
+    # Entscheidungs-Maske: die vorgesetzte Person sieht die beantragten Tage
+    # (READ-Feld, zeigt den zuvor geschriebenen Wert an) und waehlt die
+    # Entscheidung aus einer Auswahlliste. Genau dieses Pflichtfeld schreibt den
+    # XOR-Diskriminator -- der Wert "Genehmigt" trifft die Zelle des
+    # Genehmigungszweigs, jeder andere landet im Auffang-Zweig (Ablehnung).
+    s = _set_form(
+        s,
+        genehmigung,
+        title="Urlaubsantrag entscheiden",
+        fields=[
+            ops.FormFieldSpec(
+                element_id="tage",
+                widget=WidgetKind.NUMBER,
+                label="Beantragte Urlaubstage",
+                mode=AccessMode.READ,
+                help_text="Entscheidungsgrundlage \u2013 hier nur zur Ansicht.",
+            ),
+            ops.FormFieldSpec(
+                element_id="entscheidung",
+                widget=WidgetKind.DROPDOWN,
+                label="Entscheidung",
+                options=("Genehmigt", "Abgelehnt"),
+                help_text="Steuert die Verzweigung: nur \u201eGenehmigt\u201c "
+                "f\u00fchrt in den Genehmigungszweig.",
+            ),
+        ],
+    )
+
+    # Beide Zweige schreiben den Mitteilungstext (Bestaetigung bzw. Begruendung),
+    # den die Benachrichtigung am Ende liest -- garantiert gesetzt auf jedem Pfad.
+    s = _set_form(
+        s,
+        _nid(s, "Urlaub eintragen"),
+        title="Urlaub eintragen",
+        fields=[
+            ops.FormFieldSpec(
+                element_id="mitteilung",
+                widget=WidgetKind.TEXTAREA,
+                label="Best\u00e4tigungstext",
+                help_text="Wird der antragstellenden Person mitgeteilt.",
+            )
+        ],
+    )
+    s = _set_form(
+        s,
+        _nid(s, "Ablehnung dokumentieren"),
+        title="Ablehnung dokumentieren",
+        fields=[
+            ops.FormFieldSpec(
+                element_id="mitteilung",
+                widget=WidgetKind.TEXTAREA,
+                label="Begr\u00fcndung der Ablehnung",
+                help_text="Wird der antragstellenden Person mitgeteilt.",
+            )
+        ],
+    )
+
+    # Value-adding classification (E3) -- all three classes appear so the
+    # monitoring value breakdown has something to show.
+    s = ops.set_value_class(s, erfassen, ValueClass.BUSINESS_NECESSARY)
+    s = ops.set_value_class(s, pruefen, ValueClass.BUSINESS_NECESSARY)
+    s = ops.set_value_class(s, genehmigung, ValueClass.VALUE_ADDING)
+    s = ops.set_value_class(s, _nid(s, "Urlaub eintragen"), ValueClass.VALUE_ADDING)
+    s = ops.set_value_class(s, _nid(s, "Ablehnung dokumentieren"), ValueClass.NON_VALUE_ADDING)
+    s = ops.set_value_class(s, _nid(s, "Mitarbeiter benachrichtigen"), ValueClass.VALUE_ADDING)
+
+    # Work-item priority (E8): the approval by the team lead is the most urgent
+    # step, so it sorts to the top of the worklist.
+    s = ops.set_node_priority(
+        s, pruefen, WorkItemPriority(impact=ImpactUrgency.MEDIUM, urgency=ImpactUrgency.HIGH)
+    )
+    s = ops.set_node_priority(
+        s,
+        genehmigung,
+        WorkItemPriority(impact=ImpactUrgency.HIGH, urgency=ImpactUrgency.HIGH),
+    )
+
+    # Temporal perspective (E5, T1/T2 static): per-step target durations, an
+    # optional *reaction* SLA (``target_lead_seconds``, measured from activation)
+    # and a process deadline. The reaction SLA is what the time-based worklist
+    # prioritisation reads to derive the criticality bands (the "Faellig" column);
+    # T1 only checks it is >= 0. The critical path (erfassen + pruefen +
+    # Genehmigung + longest branch + benachrichtigen) must fit the deadline,
+    # which the validator checks (T2). The two currently-active steps in the
+    # seeded instances (erfassen, Genehmigung) carry a reaction SLA so their
+    # worklist bands are populated.
+    s = ops.set_time_constraint(
+        s, erfassen, TimeConstraint(max_duration_seconds=3600, target_lead_seconds=1800)
+    )
+    s = ops.set_time_constraint(
+        s, pruefen, TimeConstraint(max_duration_seconds=7200, target_lead_seconds=3600)
+    )
+    s = ops.set_time_constraint(
+        s,
+        genehmigung,
+        TimeConstraint(max_duration_seconds=86400, target_lead_seconds=43200),
+    )
+    s = ops.set_time_constraint(
+        s, _nid(s, "Urlaub eintragen"), TimeConstraint(max_duration_seconds=3600)
+    )
+    s = ops.set_time_constraint(
+        s, _nid(s, "Ablehnung dokumentieren"), TimeConstraint(max_duration_seconds=3600)
+    )
+    s = ops.set_time_constraint(
+        s, _nid(s, "Mitarbeiter benachrichtigen"), TimeConstraint(max_duration_seconds=1800)
+    )
+    s = ops.set_deadline(s, 3 * 86400)  # three working days
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["grund", "tage"])
+    return ops.release(s)
+
+
+def _build_beschaffung(org: OrgModel) -> ProcessSchema:
+    """Draft process: a procurement request with a parallel block (still ENTWURF).
+
+    This second, unreleased schema deliberately exercises the *advanced* feature
+    set so every view has something to show even before release: an external
+    SQL-bound data element (connector for the supplier credit limit), input masks,
+    structured staff rules (role, org-unit and OR combinator) and the analytical
+    annotations (value class, priority, time). Every step is interactive, so the
+    whole flow can be played through in the GUI without an external worker; the
+    External-Task/automation feature is shown separately in the integration guide
+    (it needs a worker to complete an automatic step).
+    """
+
+    s = ops.create_empty_schema("Beschaffungsantrag", schema_id=SCHEMA_BESCHAFFUNG)
+    s = ops.parallel_insert(s, ["Angebote einholen", "Budget pr\u00fcfen"], after_node_id="start")
+    join = _gateway_id(s, NodeType.AND_JOIN)
+    s = ops.serial_insert(s, "Bestellung freigeben", after_node_id=join)
+    angebote = _nid(s, "Angebote einholen")
+    budget = _nid(s, "Budget pr\u00fcfen")
+    freigeben = _nid(s, "Bestellung freigeben")
+
+    # Two data objects filled on the *parallel* branches and merged downstream:
+    # "Angebote einholen" writes the order value, "Budget pr\u00fcfen" writes the
+    # budget verdict; the final activity reads both (union at the AND-join -> D1
+    # holds, and the writers target different elements -> no D2 conflict).
+    s = ops.add_data_element(s, "Bestellwert", DataType.FLOAT, element_id="betrag")
+    s = ops.add_data_element(s, "Budget genehmigt", DataType.BOOLEAN, element_id="budget_ok")
+    # A lookup key (written on the offer branch) and an EXTERNAL element whose
+    # value is fetched from the ERP via a structured scalar select (see below).
+    s = ops.add_data_element(s, "Lieferantennummer", DataType.INTEGER, element_id="lieferant_nr")
+    s = ops.add_data_element(s, "Kreditlimit", DataType.FLOAT, element_id="kreditlimit")
+    s = ops.connect_data(s, angebote, "betrag", AccessMode.WRITE)
+    s = ops.connect_data(s, angebote, "lieferant_nr", AccessMode.WRITE)
+    s = ops.connect_data(s, budget, "budget_ok", AccessMode.WRITE)
+    s = ops.connect_data(s, freigeben, "betrag", AccessMode.READ)
+    s = ops.connect_data(s, freigeben, "budget_ok", AccessMode.READ)
+    # EXTERNAL reads are non-mandatory (resolved by the connector at runtime),
+    # otherwise D1 would demand a prior WRITE that an external element never has.
+    s = ops.connect_data(s, freigeben, "kreditlimit", AccessMode.READ, mandatory=False)
+
+    # Data connector + CbC-safe scalar SQL binding (C1/C4-C6): the supplier's
+    # credit limit is read from the ERP by supplier number. The select is a
+    # structured skizze (never free-form SQL): one typed column, an equality
+    # filter on the (INSTANCE) key written beforehand, and a KEY_UNIQUE
+    # cardinality guarantee -- so exactly one typed scalar comes back.
+    s = ops.register_connector(s, "ERP-System", ConnectorKind.MS_SQL, connector_id="erp")
+    s = ops.bind_sql_select(
+        s,
+        "kreditlimit",
+        connector_id="erp",
+        entity="lieferanten",
+        column="kreditlimit",
+        column_type=DataType.FLOAT,
+        filters=[
+            QueryFilter(
+                column="nr",
+                column_type=DataType.INTEGER,
+                operator=FilterOperator.EQ,
+                key_element_id="lieferant_nr",
+            )
+        ],
+        cardinality=Cardinality.KEY_UNIQUE,
+        unique_column="nr",
+    )
+
+    s = ops.link_org_model(s, ORG_ID, org)
+
+    # Input masks (form designer): "Angebote einholen" captures the order value
+    # and the supplier number, "Budget pruefen" the budget verdict. This is where
+    # betrag/lieferant_nr/budget_ok get their values at runtime -- a person fills
+    # the WRITE fields, so the whole procurement flow is completable in the GUI
+    # end-to-end without any external worker.
+    s = _set_form(
+        s,
+        angebote,
+        title="Angebote einholen",
+        fields=[
+            ops.FormFieldSpec(
+                element_id="betrag",
+                widget=WidgetKind.NUMBER,
+                label="Bestellwert (EUR)",
+            ),
+            ops.FormFieldSpec(
+                element_id="lieferant_nr",
+                widget=WidgetKind.NUMBER,
+                label="Lieferantennummer",
+            ),
+        ],
+    )
+    s = _set_form(
+        s,
+        budget,
+        title="Budgetpr\u00fcfung",
+        fields=[
+            ops.FormFieldSpec(
+                element_id="budget_ok",
+                widget=WidgetKind.CHECKBOX,
+                label="Budget genehmigt",
+            )
+        ],
+    )
+
+    # Structured staff rules (BZR): a plain role leaf, an org-unit leaf and an OR
+    # combinator, so the resource view shows the full range.
+    s = ops.assign_staff_rule(s, angebote, _role("einkauf"))
+    s = ops.assign_staff_rule(
+        s, budget, StaffRule(kind=StaffRuleKind.ORG_UNIT, ref="vertrieb")
+    )
+    s = ops.assign_staff_rule(
+        s,
+        freigeben,
+        StaffRule(
+            kind=StaffRuleKind.OR,
+            operands=[_role("teamleitung"), _role("einkauf")],
+        ),
+    )
+
+    # Analytical annotations (E3/E8/E5) on the draft as well.
+    s = ops.set_value_class(s, angebote, ValueClass.VALUE_ADDING)
+    s = ops.set_value_class(s, budget, ValueClass.BUSINESS_NECESSARY)
+    s = ops.set_value_class(s, freigeben, ValueClass.VALUE_ADDING)
+    s = ops.set_node_priority(
+        s, freigeben, WorkItemPriority(impact=ImpactUrgency.HIGH, urgency=ImpactUrgency.MEDIUM)
+    )
+    s = ops.set_time_constraint(s, angebote, TimeConstraint(max_duration_seconds=7200))
+    s = ops.set_time_constraint(s, budget, TimeConstraint(max_duration_seconds=3600))
+    s = ops.set_time_constraint(s, freigeben, TimeConstraint(max_duration_seconds=1800))
+    s = ops.set_deadline(s, 86400)  # one working day
+    # Benennende Werte: Vorgaenge und Aufgaben heissen danach statt nach ihrer
+    # internen Kennung (Monitoring, Arbeitslisten, Ausfuehrung).
+    s = ops.set_display_fields(s, ["lieferant_nr", "betrag"])
+    return s  # left in ENTWURF on purpose: shows a draft / test-instance state
+
+
+class BackdatedAudit:
+    """Legt geseedete Ereignisse mit einem **plausiblen Zeitverlauf** ab.
+
+    Ein Seed schreibt seine ganze Historie in Millisekunden. Damit standen alle
+    Ereignisse praktisch auf derselben Sekunde, und die Auswertung zeigte, was
+    sie ehrlicherweise zeigen musste: „Ø Durchlaufzeit 0.0 s" und in der
+    Engpass-Tabelle durchweg „keine Zeitdaten".
+    Der Datensatz ist aber ein **Schaufenster** -- ohne Zeitachse laesst sich
+    die Zeitauswertung daran nicht zeigen.
+
+    Diese Huelle liegt vor dem echten Log und stempelt jedes Ereignis rueckwaerts
+    von „jetzt" aus: Sie beginnt ``days_back`` Tage in der Vergangenheit und
+    rueckt je Ereignis um eine Spanne vor, die zwischen den Schritten variiert.
+    Der Verlauf ist **deterministisch** (kein Zufall) -- derselbe Seed erzeugt
+    dieselben Zeiten, wie es sich fuer einen reproduzierbaren Datensatz gehoert.
+
+    Bewusst nur eine Huelle: Der Aufrufer merkt nichts, es gibt keine zweite
+    Stelle, die Zeitstempel erzeugt, und ausserhalb des Seeds ist nichts
+    betroffen. Alles andere (Reihenfolge, Hash-Kette, Inhalte) bleibt unberuehrt
+    -- die Kette rechnet ueber den Zeitstempel, den sie bekommt.
+
+    :param inner: das echte Log, an das weitergereicht wird
+    :param days_back: wie weit vor „jetzt" die Historie beginnt
+    """
+
+    #: Spannen (Minuten), die der Reihe nach durchlaufen werden. Teilerfremd zur
+    #: Schrittzahl der Prozesse, damit nicht jeder Vorgang dasselbe Muster zeigt.
+    _STEPS_MINUTES = (23, 47, 11, 96, 34, 7, 61, 18, 142, 29, 53, 13)
+
+    def __init__(self, inner: AuditLog, *, days_back: float = 21.0) -> None:
+        self._inner = inner
+        self._now = datetime.now(UTC) - timedelta(days=days_back)
+        self._tick = 0
+        self._last_per_instance: dict[str, datetime] = {}
+
+    def _next(self) -> datetime:
+        """Naechster Zeitpunkt; ruecken tut die Uhr vor dem Stempeln."""
+
+        minutes = self._STEPS_MINUTES[self._tick % len(self._STEPS_MINUTES)]
+        self._tick += 1
+        self._now += timedelta(minutes=minutes)
+        return self._now
+
+    def append(
+        self,
+        event_type: EventType,
+        instance_id: str,
+        schema_id: str,
+        *,
+        schema_version: int = 1,
+        node_id: str | None = None,
+        label: str | None = None,
+        agent_id: str | None = None,
+        detail: dict[str, str] | None = None,
+        at: datetime | None = None,
+    ) -> AuditEvent:
+        stamp = at or self._next()
+        previous = self._last_per_instance.get(instance_id)
+        self._last_per_instance[instance_id] = stamp
+        # Die Dauer eines Schritts misst die Auswertung von "bereit" bis
+        # "erledigt" und liest "bereit" aus ``detail.ready_at`` (das die API
+        # sonst aus ihrer Aktivierungs-Uhr mitgibt). Im Seed ist dieser Zeitpunkt
+        # nicht erfunden, sondern bekannt: Es ist das vorangegangene Ereignis
+        # desselben Vorgangs -- da wurde der Schritt bereit. Ohne diese Angabe
+        # blieb die Engpass-Tabelle durchweg bei "keine Zeitdaten".
+        if (
+            event_type is EventType.ACTIVITY_COMPLETED
+            and previous is not None
+            and not (detail or {}).get("ready_at")
+        ):
+            detail = {**(detail or {}), "ready_at": previous.isoformat()}
+        return self._inner.append(
+            event_type,
+            instance_id,
+            schema_id,
+            schema_version=schema_version,
+            node_id=node_id,
+            label=label,
+            agent_id=agent_id,
+            detail=detail,
+            at=stamp,
+        )
+
+    # -- unveraendert durchgereicht ---------------------------------------
+    def list_all(self) -> list[AuditEvent]:
+        return self._inner.list_all()
+
+    def for_instance(self, instance_id: str) -> list[AuditEvent]:
+        return self._inner.for_instance(instance_id)
+
+    def revision(self) -> int:
+        return self._inner.revision()
+
+    def head_hash(self) -> str:
+        return self._inner.head_hash()
+
+    def max_event_time(self) -> float:
+        return self._inner.max_event_time()
+
+    def clear(self) -> None:
+        self._inner.clear()
+
+
+def _emit(
+    audit: AuditLog,
+    event_type: EventType,
+    instance: ProcessInstance,
+    *,
+    node_id: str | None = None,
+    label: str | None = None,
+    agent_id: str | None = None,
+    detail: dict[str, str] | None = None,
+) -> None:
+    """Schreibt ein Seed-Ereignis zu ``instance`` ins Audit-Log.
+
+    Gemeinsam genutzt von beiden Datensaetzen (auch vom Seeder in
+    :mod:`procworks.demo_o2c`): Instanz-Id, Schema-Id und -Version kommen aus
+    der Instanz, damit keine Aufrufstelle sie einzeln (und womoeglich
+    abweichend) nennt. Den Zeitstempel setzt das Log selbst -- im Seed ist das
+    :class:`BackdatedAudit`.
+
+    :param audit: Ziel-Log (im Seed die :class:`BackdatedAudit`-Huelle)
+    :param event_type: Art des Ereignisses
+    :param instance: die Instanz, *nach* dem Uebergang, den das Ereignis meldet
+    :param node_id: betroffener Knoten (bei Schritt-Ereignissen)
+    :param label: Bezeichnung des Knotens, wie sie in Auswertungen erscheint
+    :param agent_id: ausfuehrende Person, falls bekannt
+    :param detail: Zusatzangaben; ``None`` laesst sie weg
+    """
+
+    audit.append(
+        event_type,
+        instance.id,
+        instance.schema_id,
+        schema_version=instance.schema_version,
+        node_id=node_id,
+        label=label,
+        agent_id=agent_id,
+        detail=detail,
+    )
+
+
+def stamp_seeded_start_times(instance_store: InstanceStore, audit: AuditLog) -> None:
+    """Gibt jedem geseedeten Vorgang ohne Startzeit die seines ersten Ereignisses.
+
+    Im Betrieb stempelt die API ``started_at`` beim Start; der Seed startet an
+    ihr vorbei, auch die Kind-Vorgaenge der Teilprozesse. Ohne Startzeit hiess
+    ein Vorgang ohne benennende Werte in der Oberflaeche nur „Vorgang“.
+    Genommen wird das frueheste Audit-Ereignis des Vorgangs (im Seed
+    zurueckdatiert, siehe :class:`BackdatedAudit`); ohne Ereignis bleibt das
+    Feld leer. Vorhandene Startzeiten bleiben unangetastet.
+
+    :param instance_store: Store mit den geseedeten Vorgaengen
+    :param audit: das Log, in das der Seed geschrieben hat
+    """
+
+    for instance_id in instance_store.list_ids():
+        instance = instance_store.get(instance_id)
+        if instance is None or instance.started_at is not None:
+            continue
+        events = audit.for_instance(instance_id)
+        if not events:
+            continue
+        first = min(e.timestamp for e in events)
+        instance_store.put(instance.model_copy(update={"started_at": first}))
+
+
+def _start(
+    schema: ProcessSchema, ctx: exe.ExecutionContext, audit: AuditLog, instance_id: str
+) -> ProcessInstance:
+    inst = exe.instantiate(schema, instance_id=instance_id, context=ctx)
+    _emit(audit, EventType.INSTANCE_CREATED, inst)
+    return inst
+
+
+def _complete(
+    schema: ProcessSchema,
+    inst: ProcessInstance,
+    node_id: str,
+    ctx: exe.ExecutionContext,
+    audit: AuditLog,
+    *,
+    agent_id: str | None = None,
+    data: dict[str, object] | None = None,
+) -> ProcessInstance:
+    after = exe.complete_activity(inst, schema, node_id, data, agent_id=agent_id, context=ctx)
+    _emit(
+        audit,
+        EventType.ACTIVITY_COMPLETED,
+        after,
+        node_id=node_id,
+        label=_label(schema, node_id),
+        agent_id=agent_id,
+    )
+    if after.state is InstanceState.COMPLETED:
+        _emit(audit, EventType.INSTANCE_COMPLETED, after)
+    ctx.instances.put(after)
+    return after
+
+
+def _seed_instances(
+    schema: ProcessSchema, instance_store: InstanceStore, audit: AuditLog
+) -> None:
+    """Create three leave-request instances at different points in the flow."""
+
+    ctx = exe.ExecutionContext(make_resolver(_NoopSchemaStore()), instance_store)
+    erfassen = _nid(schema, "Antrag erfassen")
+    pruefen = _nid(schema, "Antrag pr\u00fcfen")
+    genehmigung = _nid(schema, "Genehmigung durch Leitung")
+    ablehnung = _nid(schema, "Ablehnung dokumentieren")
+    benachrichtigen = _nid(schema, "Mitarbeiter benachrichtigen")
+
+    # 1) Freshly started -- waiting at the very first activity.
+    _start(schema, ctx, audit, "urlaub-2026-001")
+
+    # 2) In progress -- captured and checked; the instance now waits at
+    # "Genehmigung durch Leitung", where the supervisor still has to make the
+    # decision that will resolve the XOR split.
+    i2 = _start(schema, ctx, audit, "urlaub-2026-002")
+    i2 = _complete(schema, i2, erfassen, ctx, audit, agent_id="a-erika", data={"tage": 8})
+    _complete(schema, i2, pruefen, ctx, audit, agent_id="a-erika")
+
+    # 3) Finished -- a rejected request that ran all the way to the end. The
+    # supervisor decided "Abgelehnt", so the split resolves into the catch-all
+    # branch; that branch writes the message text, which the notification then
+    # reads (an object enriched along the path).
+    i3 = _start(schema, ctx, audit, "urlaub-2026-003")
+    i3 = _complete(schema, i3, erfassen, ctx, audit, agent_id="a-erika", data={"tage": 20})
+    i3 = _complete(schema, i3, pruefen, ctx, audit, agent_id="a-erika")
+    i3 = _complete(
+        schema,
+        i3,
+        genehmigung,
+        ctx,
+        audit,
+        agent_id="a-tom",
+        data={"entscheidung": "Abgelehnt"},
+    )
+    i3 = _complete(
+        schema,
+        i3,
+        ablehnung,
+        ctx,
+        audit,
+        agent_id="a-erika",
+        data={"mitteilung": "20 Tage \u00fcberschreiten den Resturlaub (noch 10 Tage offen)."},
+    )
+    _complete(schema, i3, benachrichtigen, ctx, audit, agent_id="a-erika")
+
+
+def _seed_absences(absence_store: AbsenceStore) -> None:
+    """Seed one *currently active* absence so the deputy substitution is live.
+
+    Erika Sander (``a-erika``) is on vacation for a window that spans "now"; her
+    registered deputy is Tom Berger (set in :func:`_build_org`). While the window
+    covers the wall clock, Erika's open tasks -- e.g. capturing the first, freshly
+    started leave request (instance ``urlaub-2026-001`` still waiting at "Antrag
+    erfassen") -- appear **in parallel** on Tom's worklist, without ever leaving
+    Erika's own. Logging in as ``tom.berger`` therefore shows a task that is
+    really Erika's, which is exactly the point of the feature. The window is
+    anchored to load time (like the audit timestamps), so the demo stays "current"
+    whenever it is reset.
+
+    Purely operational runtime state -- it lives outside the correctness model and
+    never changes how any schema validates (see :class:`AbsenceEntry`).
+    """
+
+    now = datetime.now(UTC)
+    absence_store.put_entry(
+        AbsenceEntry(
+            id="abs-demo-erika",
+            agent_id="a-erika",
+            start_at=now - timedelta(days=1),
+            end_at=now + timedelta(days=6),
+            note="Jahresurlaub",
+        )
+    )
+
+
+class _NoopSchemaStore:
+    """A throwaway empty schema store for the instance execution context.
+
+    The demo drives execution against the in-memory released schema directly;
+    the resolver is only consulted for sub-processes, of which the demo has
+    none, so an empty store is sufficient (and keeps the loader self-contained).
+    """
+
+    def put(self, schema: ProcessSchema) -> ProcessSchema:
+        return schema
+
+    def get(self, schema_id: str) -> ProcessSchema | None:
+        return None
+
+    def list_ids(self) -> list[str]:
+        return []
+
+    def clear(self) -> None:
+        return None
+
+
+def _seed_users(backend: PasswordAuthBackend, password: str = DEMO_PASSWORD) -> int:
+    """Seed the ready-to-use demo logins (idempotent); returns how many added.
+
+    Seeds :data:`DEMO_USERS` through the shared :func:`_seed_logins`.
+
+    :param backend: the password backend whose credential store receives them
+    :param password: the password of every seeded login. Only the public
+        throw-away demo uses the published :data:`DEMO_PASSWORD`; the admin
+        reset of a customer installation passes a random one, because a
+        login with a password printed on the website would be an open door.
+    """
+
+    return _seed_logins(backend, DEMO_USERS, password)
+
+
+def _seed_logins(
+    backend: PasswordAuthBackend,
+    users: Sequence[tuple[str, str, frozenset[str], str | None]],
+    password: str,
+) -> int:
+    """Legt Beispiel-Logins an, die es noch nicht gibt; zaehlt die neu angelegten.
+
+    Gemeinsamer Kern beider Datensaetze (``_seed_users`` hier und in
+    :mod:`procworks.demo_o2c`): Jeder Eintrag wird nur angelegt, wenn der Login
+    noch fehlt -- ein zweites Laden (oder das Nebeneinander beider Datensaetze)
+    ueberschreibt also nie ein bestehendes Konto samt dessen Passwort.
+
+    :param backend: das Passwort-Backend, in dessen Store die Logins landen
+    :param users: ``(login, anzeigename, rollen, agent-id)`` je Login, in der
+        Reihenfolge, in der sie angelegt werden
+    :param password: das Passwort *aller* angelegten Logins (je Login eigens
+        gehasht). Die Logins muessen es nicht beim ersten Anmelden aendern
+        (``must_change=False``), damit sie sofort benutzbar sind -- deshalb darf
+        das veroeffentlichte :data:`DEMO_PASSWORD` nur in der oeffentlichen
+        Demo stehen.
+    :returns: Anzahl der neu angelegten Logins (bereits vorhandene zaehlen nicht)
+    """
+
+    store = backend.store
+    seeded = 0
+    for login, name, roles, agent_id in users:
+        if store.get_user(login) is not None:
+            continue
+        store.put_user(
+            User(
+                login=login,
+                password_hash=hash_password(password),
+                subject=login,
+                agent_id=agent_id,
+                roles=roles,
+                display_name=name,
+                must_change=False,
+            )
+        )
+        seeded += 1
+    return seeded
+
+
+def load_demo(
+    *,
+    schema_store: SchemaStore,
+    instance_store: InstanceStore,
+    org_store: OrgStore,
+    audit_log: AuditLog,
+    password_backend: PasswordAuthBackend | None = None,
+    absence_store: AbsenceStore | None = None,
+    password: str = DEMO_PASSWORD,
+) -> int:
+    """Populate the stores with the demo world; returns the seeded-user count.
+
+    ``password`` is the password of the seeded logins (see :func:`_seed_users`;
+    the published one only for the public demo).
+
+    Call this on an already-empty system (the admin reset clears first). The
+    shared org, both schemas and the three instances are always created; demo
+    logins are only seeded when password login is active (otherwise the open
+    dev mode already grants every role and needs no users). When an
+    ``absence_store`` is given, one active absence is seeded as well so the
+    deputy substitution is visible out of the box (see :func:`_seed_absences`).
+    """
+
+    # Geseedete Historie mit plausiblem Zeitverlauf (siehe BackdatedAudit) --
+    # ohne sie zeigt die Auswertung "0.0 s" und "keine Zeitdaten".
+    audit_log = BackdatedAudit(audit_log)
+
+    org = _build_org()
+    org_store.put(org)
+
+    urlaub = _build_urlaubsantrag(org)
+    beschaffung = _build_beschaffung(org)
+    schema_store.put(dehydrate_org(urlaub))
+    schema_store.put(dehydrate_org(beschaffung))
+
+    _seed_instances(urlaub, instance_store, audit_log)
+    stamp_seeded_start_times(instance_store, audit_log)
+
+    if absence_store is not None:
+        _seed_absences(absence_store)
+
+    if password_backend is not None:
+        return _seed_users(password_backend, password)
+    return 0

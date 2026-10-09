@@ -1,0 +1,162 @@
+# Full local/self-hosted stack for ProcWorks (roadmap step 16):
+# PostgreSQL + stateless API + Caddy (reverse proxy / TLS / static web).
+#
+# Start (from the repository root):
+#   docker compose -f deploy/docker-compose.full.yml pull
+#   docker compose -f deploy/docker-compose.full.yml up -d
+# Then open http://localhost (the web container serves the SPA and proxies /api).
+#
+# API and web run from the RELEASED images on ghcr.io -- built and scanned
+# (Trivy) by the release workflow. The default below is the version of this
+# checkout; only the current release is published, so do not pin an older one
+# via PROCWORKS_VERSION (its images are removed). `up --build` instead builds
+# both from the source in this checkout (development, own changes); the image
+# is then a local build under the same name, not the scanned release.
+#
+# Start with the example data already loaded (evaluation / live demo -- the
+# switches are ignored once the system holds a process, see the api service):
+#   PROCWORKS_LOAD_DEMO=1 PROCWORKS_LOAD_O2C=1 \
+#     docker compose -f deploy/docker-compose.full.yml up -d
+#
+# For a public HTTPS deployment, set SITE_ADDRESS to your domain and ACME_EMAIL
+# to a contact address; Caddy then provisions Let's Encrypt certificates.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: process
+      POSTGRES_PASSWORD: process
+      POSTGRES_DB: procworks
+    volumes:
+      - procworks_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U process -d procworks"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    # Scanned release image; `build` stays for `up --build` and as the
+    # fallback when the image cannot be pulled.
+    image: ghcr.io/tobiashaecker/procworks-api:${PROCWORKS_VERSION:-1.33.1}
+    build:
+      context: ../core
+    restart: unless-stopped
+    environment:
+      # Durable schema, instance and audit-event persistence.
+      DATABASE_URL: postgresql+psycopg://process:process@postgres:5432/procworks
+      # Production default: require username/password login (the open dev mode
+      # grants every role without authentication). On first start a default
+      # 'admin' account is created and its one-off password is written to the
+      # API container log (`docker compose logs api`) -- log in and change it.
+      # Pin a known admin instead by setting PROCWORKS_ADMIN_LOGIN +
+      # PROCWORKS_ADMIN_PASSWORD.
+      PROCWORKS_AUTH: password
+      # Optional, empty (= off) by default: seed the example data at boot, so a
+      # fresh stack comes up ready for a demo instead of an empty system that
+      # first has to be filled from the admin view. Both only fire while no
+      # process is stored yet, so a running installation is never touched:
+      #   PROCWORKS_LOAD_DEMO=1 PROCWORKS_LOAD_O2C=1 docker compose -f … up -d
+      PROCWORKS_LOAD_DEMO: "${PROCWORKS_LOAD_DEMO:-}"
+      PROCWORKS_LOAD_O2C: "${PROCWORKS_LOAD_O2C:-}"
+      # Optional: pin the initial admin instead of reading the one-off password
+      # from the container log. Both must be set; the account still has to
+      # change its password on first login.
+      PROCWORKS_ADMIN_LOGIN: "${PROCWORKS_ADMIN_LOGIN:-}"
+      PROCWORKS_ADMIN_PASSWORD: "${PROCWORKS_ADMIN_PASSWORD:-}"
+      # Optional: e-mail notifications. Without a host and sender nothing is
+      # sent (the feature stays modellable). Put the values into deploy/.env,
+      # which Compose reads automatically -- see README "E-Mail einrichten".
+      PROCWORKS_SMTP_HOST: "${PROCWORKS_SMTP_HOST:-}"
+      PROCWORKS_SMTP_PORT: "${PROCWORKS_SMTP_PORT:-587}"
+      PROCWORKS_SMTP_USER: "${PROCWORKS_SMTP_USER:-}"
+      PROCWORKS_SMTP_PASSWORD: "${PROCWORKS_SMTP_PASSWORD:-}"
+      PROCWORKS_SMTP_TLS: "${PROCWORKS_SMTP_TLS:-1}"
+      PROCWORKS_MAIL_FROM: "${PROCWORKS_MAIL_FROM:-}"
+      # Optional: machine tokens for workers/integrations next to the password
+      # logins (JSON {token: {subject, roles: ["integration"], scopes}}); only
+      # the role "integration" is accepted. Also via deploy/.env.
+      PROCWORKS_TOKENS_JSON: "${PROCWORKS_TOKENS_JSON:-}"
+      # Read-only backup admin view (GET /admin/backups, POST …/run-now): the API
+      # only reads the metadata index the backup scheduler publishes here and
+      # writes a .run-now trigger. It has NO access to the dump volume.
+      PROCWORKS_BACKUP_CONTROL_DIR: /control
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8000"
+    volumes:
+      - procworks_backup_control:/control
+
+  web:
+    image: ghcr.io/tobiashaecker/procworks-web:${PROCWORKS_VERSION:-1.33.1}
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    environment:
+      # ":80" = plain HTTP for local use. Set to your domain for automatic HTTPS.
+      SITE_ADDRESS: ":80"
+      API_UPSTREAM: "api:8000"
+      # ACME_EMAIL is only needed for HTTPS. Leave it unset for local ":80" HTTP
+      # (the Caddyfile supplies a placeholder default); set it for production.
+      # ACME_EMAIL: "you@example.com"
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Out-of-the-box datensicherung: a small scheduler that produces one
+  # consistent pg_dump per day (operator guide: docs/Betriebs-Backup-Leitfaden.md).
+  # Built from the postgres image (pg_dump/pg_restore already inside) plus gnupg
+  # for optional encryption at rest; writes to the dedicated procworks_backups
+  # volume. Runs entirely on the operations layer -- the API/core is untouched.
+  backup:
+    build:
+      context: ./backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # libpq connection to the bundled database.
+      PGHOST: postgres
+      PGUSER: process
+      PGPASSWORD: process
+      PGDATABASE: procworks
+      # Schedule + retention (Grandfather-Father-Son). All overridable.
+      BACKUP_CRON: "0 2 * * *"        # daily at 02:00 UTC
+      BACKUP_KEEP_DAILY: "14"
+      BACKUP_KEEP_WEEKLY: "8"
+      BACKUP_KEEP_MONTHLY: "6"
+      # Shared control surface for the read-only admin view (metadata only, no
+      # dumps): the scheduler publishes backups-index.json here and watches for
+      # the API's .run-now trigger.
+      BACKUP_CONTROL_DIR: "/control"
+      # Version stamped into every backup's index (app_version) -- the same
+      # default as the images above, so a restore shows which release wrote
+      # the dump (Helm passes .Chart.AppVersion the same way).
+      PROCWORKS_VERSION: "${PROCWORKS_VERSION:-1.33.1}"
+      # Optional hardening/extension hooks (see docs/Betriebs-Backup-Leitfaden.md, left empty here):
+      #   BACKUP_PASSPHRASE   -> symmetric encryption at rest (needs gpg/age)
+      #   BACKUP_SYNC_CMD     -> off-site copy command (rsync/rclone/aws s3 ...)
+      #   BACKUP_ALERT_WEBHOOK-> POST backup success/failure to an ops endpoint
+    volumes:
+      - procworks_backups:/backups
+      - procworks_backup_control:/control
+      - ./backup:/opt/backup:ro       # mitgelieferte Skripte (relativ zu deploy/)
+    entrypoint: ["/bin/sh", "/opt/backup/run-scheduler.sh"]
+
+volumes:
+  procworks_pgdata:
+  procworks_backups:                  # persistente Ablage der Sicherungen
+  procworks_backup_control:           # metadaten-Index + .run-now für die Admin-Sicht
+  caddy_data:
+  caddy_config:

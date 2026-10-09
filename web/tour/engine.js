@@ -1,0 +1,1186 @@
+// SPDX-License-Identifier: BUSL-1.1
+// ---------------------------------------------------------------------------
+// Engine der geführten Tour.
+//
+// Kennt KEINE Inhalte -- die stehen in tours.js, die Aufzeichnung des
+// Beispielprozesses in fixtures.js. Diese Datei kann drei Dinge:
+//
+//   1. Ein Popup an ein Element im DOM heften und den Fortschritt verwalten.
+//   2. Den schreibfreien SANDKASTEN durchsetzen: Solange eine Sandkasten-Tour
+//      läuft, verlässt kein POST/PUT/PATCH/DELETE den Browser. Deshalb
+//      entstehen durch Tutorial-Eingaben keine dauerhaften Daten.
+//   3. Sich merken, wer welche Tour schon gesehen oder verschoben hat.
+//
+// Stabilität geht vor Führung: Jeder Einstiegspunkt ist gekapselt; ein Fehler
+// in der Tour beendet die Tour, nie die Anwendung. Findet ein Schritt seinen
+// Anker nicht, rutscht das Popup in die Mitte, statt zu scheitern.
+// ---------------------------------------------------------------------------
+
+const Tour = (() => {
+  "use strict";
+
+  // --- Konstanten ---------------------------------------------------------
+
+  /** Schlüssel-Präfix im localStorage. Gespeichert wird NUR, was der Nutzer
+   *  über die Tour entschieden hat -- niemals eine seiner Eingaben. */
+  const LS = "tour.";
+  /** Wie oft "Später erinnern" höchstens erneut anbietet, bevor Ruhe ist. */
+  const MAX_POSTPONE = 3;
+  /** Wartezeit, bis ein fehlender Anker als "nicht da" gilt (ms). */
+  const ANCHOR_TIMEOUT_MS = 1500;
+  /** Takt, in dem Fortschrittsbedingung und Ankerposition geprüft werden (ms). */
+  const TICK_MS = 300;
+  /** Verzögerung des Erstangebots nach dem Booten (ms), damit die Anwendung
+   *  nicht unter dem Modal aufblitzt. */
+  const OFFER_DELAY_MS = 400;
+  /** Ab dieser Breite gilt die Ansicht als "Desktop" (vgl. styles.css). */
+  const DESKTOP_MIN_PX = 721;
+
+  // --- Zustand (bewusst NICHT persistiert) --------------------------------
+
+  const t = {
+    tour: null,        // laufende Tour
+    index: 0,          // aktueller Schritt
+    sandbox: false,    // schreibfreier Modus aktiv?
+    stage: 0,          // Stufe der Aufzeichnung (nur im Sandkasten)
+    rejected: false,   // wurde die vorgeführte Ablehnung bereits ausgelöst?
+    saved: null,       // gesicherter App-Zustand, für das Ende der Tour
+    timer: null,       // Intervall für Fortschritt/Neupositionierung
+    anchorSince: 0,    // seit wann wird der Anker des Schritts vermisst?
+    painted: null,     // zuletzt gezeichnetes Overlay (siehe paint())
+  };
+
+  // --- Merker (localStorage) ----------------------------------------------
+
+  /**
+   * Präfix der Merker des **angemeldeten** Nutzers.
+   *
+   * Die Merker hängen am Browser, das Konto wechselt aber darin: Ohne diesen
+   * Zusatz erbte der nächste Nutzer den Stand seines Vorgängers. Zwei Personen
+   * derselben Rolle (in der Demo etwa Erika und Tom, beide Bearbeiter) teilen
+   * sich denselben Tour-Schlüssel -- hatte die eine die Tour gesehen oder
+   * abgelehnt, bekam die andere nie ein Angebot. Auf gemeinsam genutzten
+   * Rechnern gilt dasselbe.
+   *
+   * Ohne Anmeldung (offener Modus) bleibt es beim bisherigen, browserweiten
+   * Schlüssel -- dort gibt es kein Konto, an dem sich etwas festmachen liesse.
+   *
+   * @returns {string} Präfix inklusive Trennzeichen (oder "").
+   */
+  function who() {
+    try {
+      const subject = state.principal && state.principal.subject;
+      return subject ? `${subject}.` : "";
+    } catch (_e) { return ""; }
+  }
+
+  /**
+   * Liest einen Merker der Tour aus dem localStorage.
+   *
+   * @param {string} key Schlüssel ohne Präfix.
+   * @returns {string|null} Wert oder null.
+   */
+  function mark(key) {
+    try { return localStorage.getItem(LS + who() + key); } catch (_e) { return null; }
+  }
+
+  /**
+   * Schreibt einen Merker der Tour. Fehler (privater Modus, volle Quote)
+   * werden geschluckt -- ein nicht merkbarer Fortschritt ist ein Schönheits-
+   * fehler, kein Grund, die Tour zu verweigern.
+   *
+   * @param {string} key Schlüssel ohne Präfix.
+   * @param {string} value Zu speichernder Wert.
+   */
+  function setMark(key, value) {
+    try { localStorage.setItem(LS + who() + key, value); } catch (_e) { /* egal */ }
+  }
+
+  /**
+   * Schlüssel des Merkers „erledigt“ einer Tour.
+   *
+   * Enthält die Fassung (``tour.version``): Wird eine Tour inhaltlich
+   * überarbeitet und ihre Fassung angehoben, gilt sie wieder als unerledigt
+   * und wird erneut angeboten.
+   *
+   * @param {object} tour Die Tour aus tours.js.
+   * @returns {string} Schlüssel ohne Präfix (siehe :func:`mark`).
+   */
+  function doneKey(tour) {
+    return `done.${tour.id}.${tour.version}`;
+  }
+
+  /**
+   * Schlüssel des Merkers „zuletzt erreichter Schritt“ einer Tour.
+   *
+   * Ebenfalls an die Fassung gebunden -- ein gemerkter Schritt-Index einer
+   * älteren Fassung könnte in der neuen auf einen ganz anderen Schritt zeigen.
+   *
+   * @param {object} tour Die Tour aus tours.js.
+   * @returns {string} Schlüssel ohne Präfix (siehe :func:`mark`).
+   */
+  function progressKey(tour) {
+    return `progress.${tour.id}.${tour.version}`;
+  }
+
+  /** @returns {boolean} true, wenn die Tour in dieser Fassung erledigt ist. */
+  function isDone(tour) {
+    return mark(doneKey(tour)) === "1";
+  }
+
+  /** @returns {number} Wie oft die Tour bereits verschoben wurde. */
+  function postponeCount(tour) {
+    return Number(mark(`postponed.${tour.id}`) || 0);
+  }
+
+  /** @returns {number} Gemerkter Schritt-Index eines Abbruchs (0, wenn keiner). */
+  function savedProgress(tour) {
+    const raw = mark(progressKey(tour));
+    const i = Number(raw);
+    return Number.isFinite(i) && i > 0 && i < tour.steps.length ? i : 0;
+  }
+
+  // --- Auswahl der passenden Tour -----------------------------------------
+
+  /** @returns {boolean} true auf schmalen (mobilen) Ansichten. */
+  function isMobile() {
+    return window.innerWidth < DESKTOP_MIN_PX;
+  }
+
+  /**
+   * Alle Touren, die zur Rolle des angemeldeten Nutzers passen -- in der
+   * Rangfolge aus TOUR_ROLE_ORDER und ohne solche, die in der aktuellen
+   * Ansicht (mobil) gar nicht sinnvoll sind.
+   *
+   * @returns {Array<object>} Passende Touren, ggf. leer.
+   */
+  function availableTours() {
+    const mobile = isMobile();
+    return TOUR_ROLE_ORDER
+      .map((role) => TOURS.find((x) => x.role === role))
+      .filter((tour) => tour && hasRole(tour.role) && (tour.mobile !== false || !mobile));
+  }
+
+  // --- Angebot beim ersten Anmelden ---------------------------------------
+
+  /** sessionStorage-Merker: in dieser Browsersitzung wurde schon gefragt. */
+  const OFFERED_KEY = "procworks.tour.offered";
+  function sessionGet(key) {
+    try { return sessionStorage.getItem(key); } catch (_e) { return null; }
+  }
+  function sessionSet(key, value) {
+    try { sessionStorage.setItem(key, value); } catch (_e) { /* nur Komfort */ }
+  }
+
+  /**
+   * Bietet nach dem Booten die erste noch nicht erledigte Tour an.
+   *
+   * Wird von ``boot()`` aufgerufen. Zeigt höchstens ein Angebot und niemals
+   * eines, das der Nutzer bereits abgelehnt oder dreimal verschoben hat.
+   */
+  function maybeOffer() {
+    try {
+      if (t.tour) return;
+      // Hoechstens ein Angebot je Browsersitzung: Jeder Rollenwechsel in der
+      // Demo ist ein neuer Login, und die Frage fing danach jedes Mal die
+      // Klicks ab. Die Touren bleiben ueber
+      // „Hilfe“ erreichbar.
+      if (sessionGet(OFFERED_KEY) === "1") return;
+      const tour = availableTours().find(
+        (x) => !isDone(x) && postponeCount(x) < MAX_POSTPONE);
+      if (!tour) return;
+      setTimeout(() => { try { offer(tour); } catch (_e) { /* still */ } }, OFFER_DELAY_MS);
+    } catch (_e) { /* Angebot ist Kür -- nie die App gefährden */ }
+  }
+
+  /**
+   * Zeigt das Willkommens-Modal mit den drei Entscheidungen des Nutzers:
+   * starten, später erinnern oder endgültig ablehnen.
+   *
+   * @param {object} tour Die anzubietende Tour.
+   */
+  function offer(tour) {
+    if (t.tour) return;
+    // Nie ueber einen offenen Dialog: Das Angebot legte sich sonst
+    // darueber und zog den Tastatur-Fokus aus dem Dialog. Es wartet, bis der
+    // Dialog zu ist.
+    if (byId("modal-root").children.length) {
+      setTimeout(() => { try { offer(tour); } catch (_e) { /* still */ } }, 1500);
+      return;
+    }
+    sessionSet(OFFERED_KEY, "1");
+    const resumeAt = savedProgress(tour);
+    const root = byId("tour-root");
+    clear(root);
+    const card = el("div", { class: "tour-offer" },
+      el("h2", null, "Kurze Einführung?"),
+      el("p", null,
+        `„${tour.title}“ — ${tour.subtitle}. `,
+        `${tour.steps.length} Schritte, keine zwei Minuten.`),
+      tour.sandbox
+        ? el("p", { class: "tour-offer-note" },
+            "Die Tour arbeitet auf einem Beispielprozess in deinem Browser. Es wird nichts gespeichert.")
+        : null,
+      resumeAt
+        ? el("p", { class: "tour-offer-note" },
+            `Du warst zuletzt bei Schritt ${resumeAt + 1} stehengeblieben.`)
+        : null,
+      el("div", { class: "tour-offer-actions" },
+        el("button", { class: "btn primary", onClick: () => { clear(root); start(tour.id, { resume: !!resumeAt }); } },
+          resumeAt ? "Fortsetzen" : "Tour starten"),
+        resumeAt
+          ? el("button", { class: "btn ghost", onClick: () => { clear(root); start(tour.id, { resume: false }); } }, "Von vorn")
+          : null,
+        el("button", { class: "btn ghost", onClick: () => { postpone(tour); clear(root); } }, "Später erinnern"),
+        el("button", { class: "btn ghost", onClick: () => { setMark(doneKey(tour), "1"); clear(root); } }, "Nein danke")));
+    root.appendChild(el("div", { class: "tour-offer-backdrop" }, card));
+  }
+
+  /**
+   * Merkt eine Verschiebung. Nach MAX_POSTPONE Verschiebungen wird die Tour
+   * nicht mehr von selbst angeboten -- sie bleibt aber in der Hilfe erreichbar.
+   *
+   * @param {object} tour Die verschobene Tour.
+   */
+  function postpone(tour) {
+    setMark(`postponed.${tour.id}`, String(postponeCount(tour) + 1));
+    toast("info", "Später gern", ["Die Einführung findest du jederzeit unter „Hilfe“."]);
+  }
+
+  // --- Start / Ende --------------------------------------------------------
+
+  /**
+   * Startet eine Tour.
+   *
+   * Bei einer Sandkasten-Tour wird der bisherige App-Zustand gesichert und der
+   * Tutorial-Beispielprozess eingesetzt; ab dann blockt intercept() jeden
+   * schreibenden API-Aufruf.
+   *
+   * @param {string} tourId Kennung aus tours.js.
+   * @param {{resume?: boolean}} [opts] resume = beim gemerkten Schritt einsteigen.
+   */
+  function start(tourId, opts) {
+    const tour = TOURS.find((x) => x.id === tourId);
+    if (!tour || t.tour) return;
+    t.tour = tour;
+    t.index = opts && opts.resume ? savedProgress(tour) : 0;
+    t.stage = 0;
+    t.rejected = false;
+    t.anchorSince = 0;
+    t.painted = null;
+
+    if (tour.sandbox) enterSandbox();
+
+    switchToStepView(tour.steps[t.index]);
+    render();
+    t.timer = setInterval(tick, TICK_MS);
+    document.addEventListener("keydown", onKey, true);
+    // Rollen bewegt Anker, Ring und Aussparung gemeinsam -- nur der 300-ms-Takt
+    // zieht sie nach, und das sieht man (der Ring stuende nach dem
+    // selbsttaetigen Rollen sichtbar an der alten Stelle). Deshalb
+    // zusaetzlich am Rollereignis nachfuehren, gedrosselt auf ein Bild.
+    document.addEventListener("scroll", onScroll, true);
+  }
+
+  /** Auf ein Bild gedrosseltes Nachfuehren des Overlays beim Rollen. */
+  let scrollFrame = 0;
+  function onScroll() {
+    if (!t.tour || scrollFrame) return;
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0;
+      try { paint({ noScroll: true }); } catch (_e) { /* Nachfuehren ist Kuer */ }
+    });
+  }
+
+  /**
+   * Beendet die Tour und stellt den Ausgangszustand wieder her.
+   *
+   * @param {{completed?: boolean}} [opts] completed = regulär durchlaufen
+   *   (dann wird kein Fortschritt zum Fortsetzen gemerkt).
+   */
+  function stop(opts) {
+    const tour = t.tour;
+    if (!tour) return;
+    const completed = !!(opts && opts.completed);
+    try {
+      if (completed) {
+        setMark(doneKey(tour), "1");
+        setMark(progressKey(tour), "0");
+      } else {
+        setMark(progressKey(tour), String(t.index));
+      }
+    } catch (_e) { /* egal */ }
+
+    if (t.timer) clearInterval(t.timer);
+    t.timer = null;
+    if (scrollFrame) { cancelAnimationFrame(scrollFrame); scrollFrame = 0; }
+    document.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("scroll", onScroll, true);
+    t.tour = null;
+    t.index = 0;
+    t.painted = null;
+    clear(byId("tour-root"));
+    document.documentElement.removeAttribute("data-tour-active");
+
+    // Sandkasten IMMER verlassen -- auch wenn oben etwas schiefging.
+    const wasSandbox = t.sandbox;
+    t.sandbox = false;
+    t.stage = 0;
+    t.rejected = false;
+    if (wasSandbox) leaveSandbox();
+    else render();
+
+    if (!completed) {
+      toast("info", "Tour beendet", ["Jederzeit unter „Hilfe“ neu startbar."]);
+    }
+  }
+
+  // --- Sandkasten ----------------------------------------------------------
+
+  /**
+   * Schaltet in den schreibfreien Modus: sichert den echten Zustand weg und
+   * setzt den Tutorial-Beispielprozess (Stufe 0) ein.
+   *
+   * Ab hier fängt intercept() jeden Aufruf ab, der schreiben würde oder den
+   * Beispielprozess betrifft.
+   */
+  function enterSandbox() {
+    t.saved = {
+      schemaId: state.schemaId,
+      schema: state.schema,
+      validation: state.validation,
+      view: state.view,
+      selectedNode: state.selectedNode,
+      paletteTab: state.paletteTab,
+      schemaIds: state.schemaIds.slice(),
+    };
+    t.sandbox = true;
+    t.stage = 0;
+    applyStage();
+    state.selectedNode = null;
+    state.paletteTab = "data";
+  }
+
+  /**
+   * Verlässt den Sandkasten und holt den echten Zustand zurück. Der zuvor
+   * angezeigte Prozess wird frisch vom Kern geladen, damit die Anwendung
+   * garantiert wieder auf echten Daten steht.
+   */
+  function leaveSandbox() {
+    const saved = t.saved;
+    t.saved = null;
+    if (!saved) { render(); return; }
+    state.schemaId = saved.schemaId;
+    state.schema = saved.schema;
+    state.validation = saved.validation;
+    state.view = saved.view;
+    state.selectedNode = saved.selectedNode;
+    state.paletteTab = saved.paletteTab;
+    state.schemaIds = saved.schemaIds;
+    // Frisch nachladen (und dabei den localStorage-Eintrag wieder geraderücken,
+    // den refreshSchema() im Sandkasten auf die Tutorial-Id gesetzt hat).
+    Promise.resolve()
+      .then(() => (state.schemaId ? refreshSchema() : null))
+      .catch(() => { /* Anzeige bleibt beim gesicherten Stand */ })
+      .then(() => render());
+  }
+
+  /**
+   * Setzt Schema und Befunde der aktuellen Aufzeichnungsstufe in den
+   * Anwendungszustand.
+   *
+   * Es wird eine tiefe Kopie eingesetzt, damit die Aufzeichnung selbst nie von
+   * der GUI verändert werden kann (sie wird pro Tour mehrfach gelesen).
+   */
+  function applyStage() {
+    const rec = TOUR_FIXTURES.stages[Math.min(t.stage, TOUR_FIXTURES.stages.length - 1)];
+    state.schema = JSON.parse(JSON.stringify(rec.schema));
+    state.validation = JSON.parse(JSON.stringify(rec.validation));
+    state.schemaId = state.schema.id;
+    state.schemaIds = [state.schema.id];
+    state.schemaNames[state.schema.id] = state.schema.name;
+    state.schemaVersions[state.schema.id] = state.schema.version;
+  }
+
+  /**
+   * DER Sperrpunkt für „keine dauerhaften Daten“.
+   *
+   * Wird von ``request()`` vor jedem Netzwerkaufruf befragt. Liefert sie eine
+   * Funktion, findet KEIN fetch statt -- die Antwort kommt aus der Aufzeichnung.
+   * Liefert sie null, läuft der Aufruf ganz normal.
+   *
+   * Regeln im Sandkasten:
+   *   - alles unter /schemas wird bedient (GET aus der Aufzeichnung,
+   *     schreibende Aufrufe über das sim-Feld des laufenden Schritts),
+   *   - jeder andere schreibende Aufruf wird freundlich abgelehnt,
+   *   - andere Lesezugriffe laufen echt durch (die Anwendung soll sich nicht
+   *     „tot“ anfühlen).
+   *
+   * @param {string} method HTTP-Methode.
+   * @param {string} path Pfad ab der API-Basis.
+   * @param {object|undefined} body Anfragekörper.
+   * @returns {null|function(): Promise<*>} Ersatzantwort oder null.
+   */
+  function intercept(method, path, body) {
+    if (!t.sandbox) return null;
+    const write = method !== "GET";
+    const isSchemaPath = path === "/schemas" || path.startsWith("/schemas/");
+    if (!write && !isSchemaPath) return null;
+
+    if (!write) return () => Promise.resolve(readSchemaPath(path));
+    if (isSchemaPath) return () => applySimulation(body);
+    return () => refuseWrite();
+  }
+
+  /**
+   * Freundliche Ablehnung eines schreibenden Aufrufs im Sandkasten.
+   *
+   * Gilt für jeden Schreibversuch, den der laufende Schritt nicht vorsieht --
+   * außerhalb von /schemas ebenso wie unter /schemas ohne ``step.sim``. Die
+   * Form (``status`` + ``detail`` als Text) entspricht einer echten
+   * API-Ablehnung, damit ``describeError`` in app.js sie als Meldung anzeigt.
+   *
+   * @returns {Promise<never>} Stets abgelehnte Zusage (HTTP 400).
+   */
+  function refuseWrite() {
+    return Promise.reject({
+      status: 400,
+      detail: "Im Tutorial werden keine Daten gespeichert.",
+    });
+  }
+
+  /**
+   * Beantwortet einen lesenden /schemas-Aufruf aus der Aufzeichnung.
+   *
+   * @param {string} path Angefragter Pfad.
+   * @returns {*} Das passende Stück der Aufzeichnung.
+   */
+  function readSchemaPath(path) {
+    if (path === "/schemas") return [state.schema.id];
+    if (path.endsWith("/validation")) return state.validation;
+    const rest = path.slice("/schemas/".length);
+    if (rest === state.schema.id) return state.schema;
+    // Alles andere (Metriken, Instanzen eines Schemas …) gibt es im Tutorial
+    // nicht -- eine leere, gültige Antwort ist harmloser als ein Fehler.
+    return null;
+  }
+
+  /**
+   * Führt den schreibenden Aufruf des aktuellen Schritts als Aufzeichnung aus.
+   *
+   * Drei Fälle, gesteuert über ``step.sim``:
+   *   - ``{stage: n}``  -> die Aufzeichnung rückt auf Stufe n vor,
+   *   - ``{reject: true}`` -> die vorgeführte Ablehnung des Kerns (HTTP 422),
+   *   - kein sim       -> freundliche Ablehnung (der Schritt sieht das nicht vor).
+   *
+   * ``applyLabel`` übernimmt zusätzlich die vom Nutzer eingetippte Bezeichnung
+   * in den aufgezeichneten Knoten. Das ist reine Kosmetik an einer Konserve --
+   * es wird nichts berechnet und nichts validiert.
+   *
+   * @param {object|undefined} body Der abgefangene Anfragekörper.
+   * @returns {Promise<*>} Ersatzantwort bzw. abgelehnte Zusage.
+   */
+  function applySimulation(body) {
+    const step = current();
+    const sim = step && step.sim;
+    if (!sim) return refuseWrite();
+    if (sim.reject) {
+      t.rejected = true;
+      // Form der echten API-Antwort nachbilden: Der Kern antwortet mit
+      // ``{"detail": {"findings": [...]}}``, und genau darauf sieht
+      // ``describeError`` in app.js nach. Die Konserve haelt (wie in
+      // tour_fixture_build.py dokumentiert) nur die Befundliste -- wird die
+      // direkt als ``detail`` durchgereicht, findet describeError weder
+      // ``findings`` noch ``message`` und zeigt ein nacktes "Fehler". Damit
+      // bliebe ausgerechnet der Kernmoment der Tour ohne Begruendung.
+      return Promise.reject({
+        status: 422,
+        detail: { findings: TOUR_FIXTURES.rejection },
+      });
+    }
+    t.stage = sim.stage;
+    applyStage();
+    if (sim.applyLabel && body && typeof body.label === "string" && body.label.trim()) {
+      const node = Object.values(state.schema.nodes)
+        .find((n) => n.label === TOUR_NEW_STEP_LABEL);
+      if (node) node.label = body.label.trim();
+    }
+    return Promise.resolve(state.schema);
+  }
+
+  // --- Ablauf --------------------------------------------------------------
+
+  /** @returns {object|null} Der aktuelle Schritt. */
+  function current() {
+    return t.tour ? t.tour.steps[t.index] : null;
+  }
+
+  /**
+   * Geht einen Schritt weiter -- oder beendet die Tour nach dem letzten.
+   *
+   * Wechselt bei Bedarf in die Sicht des nächsten Schritts, damit ein reiner
+   * „Zeigen“-Schritt nicht ins Leere zeigt.
+   */
+  function next() {
+    if (!t.tour) return;
+    if (t.index >= t.tour.steps.length - 1) { stop({ completed: true }); return; }
+    t.index += 1;
+    t.anchorSince = 0;
+    if (switchToStepView(current())) { render(); return; }
+    paint();
+  }
+
+  /**
+   * Stellt die Sicht ein, die ein Schritt voraussetzt (``step.view``).
+   *
+   * Rendert bewusst NICHT selbst: :func:`start` rendert ohnehin immer, und
+   * :func:`next` muss nur dann neu rendern, wenn tatsächlich gewechselt wurde
+   * -- sonst genügt ein :func:`paint`.
+   *
+   * @param {object|null|undefined} step Schritt aus tours.js (fehlend = nichts tun).
+   * @returns {boolean} true, wenn ``state.view`` geändert wurde.
+   */
+  function switchToStepView(step) {
+    if (!step || !step.view || state.view === step.view) return false;
+    state.view = step.view;
+    return true;
+  }
+
+  /** Geht einen Schritt zurück (ohne den Modellzustand zurückzudrehen). */
+  function prev() {
+    if (!t.tour || t.index === 0) return;
+    t.index -= 1;
+    t.anchorSince = 0;
+    paint();
+  }
+
+  /**
+   * Taktgeber: prüft die Fortschrittsbedingung des Schritts und hält das Popup
+   * an seinem Anker, wenn sich das Layout bewegt hat (Scrollen, Zoom, Resize).
+   */
+  function tick() {
+    try {
+      const step = current();
+      if (!step) return;
+      if (typeof step.advance === "function" && step.advance(ctx())) { next(); return; }
+      paint();
+    } catch (_e) {
+      stop();
+    }
+  }
+
+  /**
+   * Baut den Kontext, den eine Fortschrittsbedingung auswerten darf.
+   *
+   * Bewusst schmal: Anwendungszustand (lesend), Sandkasten-Stufe und die
+   * Information, ob die vorgeführte Ablehnung schon eingetreten ist.
+   *
+   * @returns {{state: object, stage: number, rejected: boolean}} Kontext.
+   */
+  function ctx() {
+    return { state, stage: t.stage, rejected: t.rejected };
+  }
+
+  /**
+   * Prüft, ob der Fokus in einem Eingabeelement steht, das die Tasten selbst
+   * braucht.
+   *
+   * Hintergrund: ``onKey`` läuft in der Capture-Phase und nimmt Esc und die
+   * Pfeiltasten weg, *bevor* das fokussierte Element sie sieht. Genau diese
+   * Tasten bedienen aber ein Datums-/Zeitfeld -- die Pfeile wechseln zwischen
+   * Tag, Monat und Jahr und zählen den Wert hoch, Esc schließt den Kalender.
+   * Ohne diese Ausnahme ließ sich das Abwesenheits-Datum bei laufender Tour
+   * nicht auswählen: jeder Pfeiltastendruck blätterte die Tour weiter.
+   *
+   * Deshalb dieselbe Regel wie beim offenen Dialog: Wer tippt, besitzt die
+   * Tastatur. Die Tour bleibt per Maus vollständig bedienbar (Zurück/Weiter
+   * im Popup, „×“ beendet), es geht also kein Bedienweg verloren.
+   *
+   * @param {EventTarget|null} target Ziel des Tastenereignisses.
+   * @returns {boolean} true, wenn die Tour die Taste durchlassen muss.
+   */
+  function typingInField(target) {
+    if (!target || target.nodeType !== 1) return false;
+    if (target.isContentEditable) return true;
+    return ["INPUT", "SELECT", "TEXTAREA"].indexOf(target.tagName) !== -1;
+  }
+
+  /**
+   * Reagiert auf Tastatur: Esc beendet, Pfeiltasten blättern.
+   *
+   * Läuft in der Capture-Phase, damit Esc die Tour beendet, bevor die
+   * Anwendung es als „Vollbild verlassen“ deutet.
+   *
+   * @param {KeyboardEvent} e Tastenereignis.
+   */
+  function onKey(e) {
+    if (!t.tour) return;
+    // In einem geöffneten Dialog gehört die Tastatur dem Dialog.
+    if (byId("modal-root").children.length) return;
+    // Ebenso in einem Eingabefeld (Datum, Auswahl, Text) -- siehe typingInField.
+    if (typingInField(e.target)) return;
+    if (e.key === "Escape") { e.stopPropagation(); stop(); }
+    else if (e.key === "ArrowRight") { e.stopPropagation(); next(); }
+    else if (e.key === "ArrowLeft") { e.stopPropagation(); prev(); }
+  }
+
+  /**
+   * Wird nach jedem ``render()`` der Anwendung aufgerufen und zeichnet das
+   * Overlay neu -- die Sichten bauen ihr DOM jedes Mal komplett neu auf, der
+   * Anker von eben existiert also nicht mehr.
+   */
+  function afterRender() {
+    if (!t.tour) return;
+    try { paint(); } catch (_e) { stop(); }
+  }
+
+  // --- Darstellung ---------------------------------------------------------
+
+  /**
+   * Zeichnet Spotlight und Popup für den aktuellen Schritt.
+   *
+   * Solange ein Dialog offen ist, tritt die Tour zurück (leeres Overlay) --
+   * sonst läge der Scrim über dem Dialog, den der Nutzer gerade ausfüllen soll.
+   * Fehlt der Anker länger als ANCHOR_TIMEOUT_MS, rutscht das Popup mittig und
+   * bietet das Überspringen an, statt die Tour scheitern zu lassen.
+   *
+   * **Wichtig -- wird im Takt von TICK_MS aufgerufen.** Solange derselbe
+   * Schritt gezeichnet bleibt, wird das Overlay deshalb NICHT neu gebaut,
+   * sondern nur nachgeführt (Aussparung, Ring, Popup-Position). Ein Neubau je
+   * Takt hatte zwei sichtbare Folgen: Der Ring startete seine Puls-Animation
+   * jedes Mal von vorn (Flackern), und weil auch die Fusszeile neue Knöpfe
+   * bekam, lagen ``mousedown`` und ``mouseup`` auf verschiedenen Elementen --
+   * „Weiter“/„Zurück“ lösten dadurch oft gar kein ``click`` aus. Ein Neubau
+   * findet nur statt, wenn sich Schritt, Anker-Verfügbarkeit oder
+   * Blockier-Modus ändern (:func:`paintKey`).
+   *
+   * @param {{noScroll?: boolean}} [opts] ``noScroll`` unterdrückt das
+   *   selbsttätige Rollen. Der Aufruf aus dem Rollereignis setzt es: Er soll
+   *   das Overlay nachführen, nicht erneut rollen -- sonst könnte ein Neubau
+   *   während einer weichen Rollbewegung sich selbst weitertreiben.
+   */
+  function paint(opts) {
+    const step = current();
+    const root = byId("tour-root");
+    if (!step || !root) return;
+    if (byId("modal-root").children.length) { clear(root); t.painted = null; return; }
+
+    let anchor = step.anchor ? document.querySelector(step.anchor) : null;
+    // Ersatzanker: Manche Anker entstehen erst durch die verlangte Handlung --
+    // in der Karten-Sicht gibt es den Abschnitt „Daten“/„Bearbeiter“ erst, wenn
+    // ein Schritt gewählt ist. Solange zeigt die Tour auf den ersten vorhandenen
+    // Zusatzbereich (``also``, hier der Kontrollfluss), statt nach Ablauf der
+    // Frist „nicht sichtbar“ zu melden und das Popup mittig über genau den
+    // Knoten zu legen, den man anklicken soll.
+    let fallback = false;
+    if (step.anchor && !anchor && step.action === "simulate") {
+      for (const sel of step.also || []) {
+        const extra = document.querySelector(sel);
+        if (extra) { anchor = extra; fallback = true; break; }
+      }
+    }
+    // Mobil liegt das Menue in einer Schublade: Ein Anker darin existiert, ist
+    // bei geschlossener Schublade aber ausserhalb des Bildes -- die Admin-Tour
+    // hing so in Schritt 2. Solange zeigt die
+    // Tour auf den Menue-Knopf und sagt, was dort zu tippen ist; oeffnet der
+    // Nutzer die Schublade, springt sie auf den eigentlichen Eintrag.
+    let viaMenu = null;
+    if (anchor && isMobile() && anchor.closest("#nav")
+        && document.documentElement.getAttribute("data-mobile-nav") !== "open") {
+      const burger = byId("nav-burger");
+      // Beschriftung ohne vorangestelltes Symbol (etwa „⚙ Administration“).
+      if (burger) { viaMenu = (anchor.textContent || "").trim().replace(/^[^\p{L}]+/u, ""); anchor = burger; }
+    }
+    let missing = false;
+    if (step.anchor && !anchor) {
+      if (!t.anchorSince) t.anchorSince = Date.now();
+      if (Date.now() - t.anchorSince < ANCHOR_TIMEOUT_MS) {
+        clear(root);
+        t.painted = null;
+        return;
+      }
+      missing = true;
+    } else {
+      t.anchorSince = 0;
+    }
+
+    const key = paintKey(step, anchor, missing, fallback) + (viaMenu !== null ? "|m" : "");
+    const reuse = !!(t.painted && t.painted.key === key && t.painted.pop.isConnected);
+    if (!reuse) clear(root);
+    document.documentElement.setAttribute("data-tour-active", "1");
+    // Vom unteren Rand belegter Platz (Demo-Banner). Hier gesetzt statt in
+    // position(), weil das mittige Popup ohne Anker gar nicht dort vorbeikommt --
+    // es braucht die Zahl aber genauso, sonst rutscht es hinter den Banner.
+    document.documentElement.style.setProperty("--tour-bottom-inset", `${bottomInset()}px`);
+    const rect = anchor ? anchor.getBoundingClientRect() : null;
+    // Bei „simulate“ blockt der Scrim Klicks außerhalb des Ankers: Ein Klick an
+    // die falsche Stelle würde die Aufzeichnung und das Gesehene auseinander-
+    // laufen lassen. Sonst bleibt die Anwendung voll bedienbar.
+    const blocking = step.action === "simulate";
+    // Manche Schritte brauchen mehr als eine Stelle: Der Ablehnungs-Schritt
+    // bittet zuerst darum, den neuen Schritt im Graph zu wählen, und erst dann
+    // die Bindung im Tab zu setzen. Der Anker kann aber nur EINE Stelle zeigen
+    // -- ohne die Zusatzbereiche läge der Graph unter dem blockenden Scrim und
+    // der Schritt liesse sich gar nicht auswählen. ``step.also`` nennt daher
+    // weitere Bereiche, die frei bedienbar bleiben.
+    const rects = rect ? [rect] : [];
+    (step.also || []).forEach((sel) => {
+      const extra = document.querySelector(sel);
+      if (extra) rects.push(extra.getBoundingClientRect());
+    });
+    const scrimStyle = rects.length ? cutoutStyle(rects) : "";
+    const ringStyle = rect
+      ? `left:${rect.left - 6}px;top:${rect.top - 6}px;` +
+        `width:${rect.width + 12}px;height:${rect.height + 12}px`
+      : "";
+
+    if (reuse) {
+      // Nur nachführen: dieselben Knoten behalten, damit Ring-Animation und
+      // Klick-Ziele erhalten bleiben.
+      t.painted.scrim.setAttribute("style", scrimStyle);
+      if (t.painted.ring) t.painted.ring.setAttribute("style", ringStyle);
+      if (rect) position(t.painted.pop, rect, step.placement, true);
+      return;
+    }
+
+    const scrim = el("div", {
+      class: "tour-scrim" + (blocking ? " blocking" : ""),
+      style: scrimStyle,
+    });
+    if (blocking) makeScrimScrollable(scrim);
+    root.appendChild(scrim);
+    let ring = null;
+    if (rect) {
+      ring = el("div", { class: "tour-ring", style: ringStyle });
+      root.appendChild(ring);
+    }
+    if (!(opts && opts.noScroll)) scrollTargetsIntoView(rects);
+    const pop = popup(step, rect, missing, viaMenu);
+    root.appendChild(pop);
+    t.painted = { key, scrim, ring, pop };
+  }
+
+  /**
+   * Lässt den blockenden Scrim Rollbewegungen durch.
+   *
+   * Der Scrim nimmt bei ``simulate`` Zeigerereignisse an (er soll Fehlklicks
+   * abfangen) und liegt als ``position: fixed``-Kind von ``<body>`` über allem.
+   * Damit landet auch jedes Mausrad-/Wischereignis bei ihm -- und der Browser
+   * rollt daraufhin seinen rollbaren Vorfahren, also das Dokument. Das Dokument
+   * rollt in dieser Anwendung aber gar nicht: Gerollt wird ``.main``
+   * (``styles.css``). Ergebnis: Die Seite stand fest, und ein Zielbereich
+   * oberhalb des Sichtfensters -- etwa der Kontrollfluss -- war nicht mehr
+   * erreichbar.
+   *
+   * Deshalb wird die Bewegung von Hand weitergereicht. Nur das Rollen; Klicks
+   * bleiben geblockt, die Schutzwirkung des Scrims bleibt also erhalten.
+   *
+   * @param {HTMLElement} scrim Der blockende Scrim.
+   */
+  function makeScrimScrollable(scrim) {
+    const scroller = () => document.querySelector(".main");
+    scrim.addEventListener("wheel", (ev) => {
+      const box = scroller();
+      if (!box) return;
+      box.scrollTop += ev.deltaY;
+      box.scrollLeft += ev.deltaX;
+      ev.preventDefault();
+    }, { passive: false });
+    // Touch: die Fingerbewegung selbst nachrechnen (ein `touchmove` auf dem
+    // Scrim rollt sonst ebenso wenig wie das Mausrad).
+    let lastY = 0, lastX = 0;
+    scrim.addEventListener("touchstart", (ev) => {
+      const p = ev.touches[0];
+      if (p) { lastY = p.clientY; lastX = p.clientX; }
+    }, { passive: true });
+    scrim.addEventListener("touchmove", (ev) => {
+      const box = scroller();
+      const p = ev.touches[0];
+      if (!box || !p) return;
+      box.scrollTop += lastY - p.clientY;
+      box.scrollLeft += lastX - p.clientX;
+      lastY = p.clientY;
+      lastX = p.clientX;
+      ev.preventDefault();
+    }, { passive: false });
+  }
+
+  /**
+   * Kennung des gezeichneten Zustands.
+   *
+   * Ändert sie sich, muss das Overlay neu gebaut werden; bleibt sie gleich,
+   * genügt das Nachführen der Positionen. Bewusst grob: Der Inhalt eines
+   * Schritts ist statisch, veränderlich sind nur Schritt-Nummer, ob der Anker
+   * gefunden wurde (Popup mittig vs. am Element) und der Blockier-Modus. Dass
+   * ein Neurendern der Sicht den Anker-KNOTEN austauscht, ist unerheblich --
+   * verwendet wird nur dessen Rechteck, und das wird ohnehin jeden Takt neu
+   * gemessen.
+   *
+   * @param {object} step Aktueller Schritt.
+   * @param {Element|null} anchor Gefundenes Anker-Element.
+   * @param {boolean} missing Anker dauerhaft nicht auffindbar.
+   * @param {boolean} fallback ``anchor`` ist nur der Ersatzanker aus ``also``.
+   * @returns {string} Vergleichbare Kennung.
+   */
+  function paintKey(step, anchor, missing, fallback) {
+    return [
+      t.tour ? t.tour.id : "",
+      t.index,
+      missing ? "1" : "0",
+      // Wechsel Ersatzanker -> echter Anker zeichnet neu (Popup rückt an die Karte).
+      anchor ? (fallback ? "f" : "a") : "-",
+      step.action === "simulate" ? "b" : "-",
+    ].join("|");
+  }
+
+  /**
+   * Erzeugt die Aussparungen im Abdunkel-Overlay (eine je Bereich).
+   *
+   * Ein ``clip-path: polygon`` kennt keine getrennten Teilpfade. Mehrere Löcher
+   * entstehen deshalb über „Brücken“: Nach jedem Loch kehrt der Pfad zum
+   * Ursprung zurück und läuft von dort ins nächste. Weil jedes Loch entgegen
+   * dem Umlaufsinn des Außenrechtecks umrundet wird, hebt es sich nach der
+   * nonzero-Regel heraus; die Brücken selbst sind entartet (Hin- und Rückweg
+   * auf derselben Linie) und damit unsichtbar.
+   *
+   * @param {DOMRect[]} rects Bildschirmrechtecke der freizulassenden Bereiche.
+   * @returns {string} Inline-Style mit der clip-path-Aussparung.
+   */
+  function cutoutStyle(rects) {
+    const pad = 6;
+    const padded = rects.map((r) => ({
+      x1: Math.max(0, r.left - pad), y1: Math.max(0, r.top - pad),
+      x2: r.right + pad, y2: r.bottom + pad,
+    }));
+    const holes = disjointRects(padded).map(({ x1, y1, x2, y2 }) =>
+      // Gegen den Uhrzeigersinn, das Außenrechteck läuft im Uhrzeigersinn.
+      `${x1}px ${y1}px, ${x1}px ${y2}px, ${x2}px ${y2}px, ` +
+      `${x2}px ${y1}px, ${x1}px ${y1}px, 0 0`);
+    return "clip-path: polygon(" +
+      "0 0, 100% 0, 100% 100%, 0 100%, 0 0, " + holes.join(", ") + ")";
+  }
+
+  /**
+   * Zerlegt eine Menge Rechtecke in **überschneidungsfreie** Rechtecke gleicher
+   * Vereinigungsfläche.
+   *
+   * Das ist keine Schönheitsarbeit, sondern die Voraussetzung dafür, dass
+   * :func:`cutoutStyle` überhaupt funktioniert: Bei der nonzero-Füllregel zählt
+   * jedes Loch einmal gegen die Umlaufzahl des Außenrechtecks. Zwei Löcher, die
+   * einander überdecken, zählen dort **zweimal** -- die Fläche wird wieder
+   * gefüllt, und genau dieser Teil der Abdunkelung blockt dann Klicks.
+   *
+   * Ohne das waeren Tour-Schritte bei Laptop-Höhe nicht ausführbar, deren
+   * Anker ein Abschnittskopf **innerhalb** der Schritt-Karte ist, während
+   * ``also`` die ganze Karte zusätzlich freigibt. Das innere Rechteck lag vollständig im äusseren --
+   * beide hoben sich auf, und der gesamte Bildschirm blieb abgedunkelt und
+   * klickdicht, auch im Ring.
+   *
+   * Verfahren: Streifen entlang aller vorkommenden x-Kanten; je Streifen die
+   * y-Intervalle der dort liegenden Rechtecke vereinigen. Das Ergebnis deckt
+   * dieselbe Fläche, überschneidet sich aber nirgends. Bei den ein bis drei
+   * Bereichen eines Tour-Schritts ist der Aufwand bedeutungslos.
+   *
+   * @param {{x1:number,y1:number,x2:number,y2:number}[]} rects Eingabe-Rechtecke.
+   * @returns {{x1:number,y1:number,x2:number,y2:number}[]} Überschneidungsfrei.
+   */
+  function disjointRects(rects) {
+    const valid = rects.filter((r) => r.x2 > r.x1 && r.y2 > r.y1);
+    if (valid.length < 2) return valid;
+    const xs = [...new Set(valid.flatMap((r) => [r.x1, r.x2]))].sort((a, b) => a - b);
+    const out = [];
+    for (let i = 0; i < xs.length - 1; i++) {
+      const x1 = xs[i], x2 = xs[i + 1];
+      if (x2 <= x1) continue;
+      const spans = valid
+        .filter((r) => r.x1 <= x1 && r.x2 >= x2)
+        .map((r) => [r.y1, r.y2])
+        .sort((a, b) => a[0] - b[0]);
+      const merged = [];
+      for (const [y1, y2] of spans) {
+        const last = merged[merged.length - 1];
+        if (last && y1 <= last[1]) last[1] = Math.max(last[1], y2);
+        else merged.push([y1, y2]);
+      }
+      merged.forEach(([y1, y2]) => out.push({ x1, y1, x2, y2 }));
+    }
+    return out;
+  }
+
+  /**
+   * Rollt die Zielbereiche des Schritts ins Sichtfeld.
+   *
+   * Bekommt **alle** freigelassenen Bereiche, nicht nur den Anker: Ein Schritt
+   * mit ``also`` fordert zu mehreren Stellen auf, und die müssen zusammen
+   * sichtbar sein. Beim Ablehnungs-Schritt zentrierte das frühere Verhalten den
+   * Anker (den Tab unten rechts) und schob damit den Kontrollfluss über den
+   * oberen Rand -- also genau die Stelle, an der zuerst ein Schritt zu wählen
+   * war.
+   *
+   * Passt die Gesamthöhe ins Fenster, wird der Verbund mittig gestellt; sonst
+   * wird nur so weit gerollt, dass der obere Bereich anliegt (er kommt in der
+   * Aufforderung zuerst). Gerollt wird ``.main`` -- das Dokument selbst rollt
+   * in dieser Anwendung nicht.
+   *
+   * @param {DOMRect[]} rects Bildschirmrechtecke der Zielbereiche.
+   */
+  function scrollTargetsIntoView(rects) {
+    if (!rects.length) return;
+    const box = document.querySelector(".main");
+    if (!box) return;
+    const pad = 16;
+    const top = Math.min(...rects.map((r) => r.top));
+    const bottom = Math.max(...rects.map((r) => r.bottom));
+    const usableTop = topInset();
+    const usableBottom = window.innerHeight - bottomInset();
+    if (top >= usableTop + pad && bottom <= usableBottom - pad) return;  // passt schon
+
+    let delta;
+    if (bottom - top <= usableBottom - usableTop - 2 * pad) {
+      delta = (top + bottom) / 2 - (usableTop + usableBottom) / 2;  // mittig
+    } else {
+      delta = top - usableTop - pad;                          // oben anlegen
+    }
+    const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    try {
+      box.scrollBy({ top: delta, behavior: smooth ? "smooth" : "auto" });
+    } catch (_e) {
+      box.scrollTop += delta;                                 // ältere Engines
+    }
+  }
+
+  /**
+   * Baut das Popup des Schritts.
+   *
+   * @param {object} step Aktueller Schritt.
+   * @param {DOMRect|null} rect Ankerrechteck (null = mittiges Popup).
+   * @param {boolean} missing true, wenn der Anker nicht gefunden wurde.
+   * @param {string|null} [viaMenu] mobil: Beschriftung des Menueeintrags, der
+   *   hinter dem ☰-Knopf liegt -- der Hinweis sagt dann, was zu tippen ist.
+   * @returns {HTMLElement} Das fertige Popup.
+   */
+  function popup(step, rect, missing, viaMenu) {
+    const total = t.tour.steps.length;
+    const box = el("div", {
+      class: "tour-pop" + (rect && !missing ? "" : " centered"),
+      role: "dialog",
+      "aria-labelledby": "tour-pop-title",
+    },
+      el("div", { class: "tour-pop-h" },
+        el("h3", { id: "tour-pop-title", tabindex: "-1" }, step.title),
+        el("button", {
+          class: "tour-x", type: "button", title: "Tour beenden (Esc)",
+          "aria-label": "Tour beenden", onClick: () => stop(),
+        }, "×")),
+      // Der veränderliche Teil sitzt in einem eigenen Behälter, damit NUR er
+      // rollt (tour.css). Kopf und Fusszeile bleiben dadurch immer sichtbar --
+      // sonst rutschte „Weiter“ bei langem Text aus dem Fenster.
+      el("div", { class: "tour-pop-b" },
+        el("p", { class: "tour-body" }, step.body),
+        viaMenu !== null && viaMenu !== undefined
+          ? el("p", { class: "tour-hint" },
+              `Tippe oben links auf \u2630 und dann im Men\u00FC auf \u201E${viaMenu}\u201C.`)
+          : (step.hint ? el("p", { class: "tour-hint" }, step.hint) : null),
+        missing ? el("p", { class: "tour-warn" },
+          "Das zugehörige Element ist gerade nicht sichtbar.") : null,
+        step.doc
+          ? el("p", { class: "tour-doc" },
+              el("a", { href: docUrl(step.doc), target: "_blank", rel: "noopener" },
+                "Ausführlich nachlesen"))
+          : null),
+      el("div", { class: "tour-foot" },
+        el("span", { class: "tour-count" }, `${t.index + 1} von ${total}`),
+        el("span", { class: "tour-spacer" }),
+        t.index > 0
+          ? el("button", { class: "btn ghost small", onClick: prev }, "Zurück")
+          : null,
+        step.action === "none" || missing
+          ? el("button", { class: "btn primary small", onClick: next },
+              t.index === total - 1 ? "Fertig" : "Weiter")
+          : el("button", {
+              class: "btn ghost small", title: "Diesen Schritt überspringen",
+              onClick: next,
+            }, "Überspringen")));
+
+    if (rect && !missing) position(box, rect, step.placement);
+    // Fokus auf die Überschrift, damit Screenreader den neuen Schritt vorlesen
+    // und die Tastaturbedienung im Popup startet.
+    requestAnimationFrame(() => {
+      const h = box.querySelector("#tour-pop-title");
+      if (h) h.focus({ preventScroll: true });
+    });
+    return box;
+  }
+
+  /**
+   * Vom oberen Rand belegter Platz (die klebende Kopfleiste).
+   *
+   * ``.topbar`` ist ``position: sticky`` **innerhalb** des rollbaren ``.main``
+   * -- sie bleibt also am oberen Rand stehen, während der Inhalt darunter
+   * durchrollt. Wer bis an die Oberkante rollt, schiebt sein Ziel damit
+   * **unter** die Kopfleiste. Bei Laptop-Höhe rollte die Tour den Knoten
+   * sonst sauber an den oberen Rand -- und dort verdeckte ihn die Kopfleiste.
+   *
+   * @returns {number} Unterkante der Kopfleiste in Bildschirmkoordinaten.
+   */
+  function topInset() {
+    const bar = document.querySelector(".topbar");
+    if (!bar) return 0;
+    const r = bar.getBoundingClientRect();
+    return r.height ? Math.max(0, r.bottom) : 0;
+  }
+
+  /**
+   * Höhe des unten fest stehenden Demo-Banners (0, wenn keiner da ist).
+   *
+   * Der Banner der öffentlichen Demo (``#demo-banner``) klebt am unteren Rand
+   * und trägt denselben ``z-index`` wie das Tour-Overlay -- weil er später ins
+   * DOM kommt, malt er darüber. Genau dort sass die Fusszeile des Popups mit
+   * „Weiter“, der Schritt war dadurch nicht abschliessbar.
+   *
+   * Statt an der Stapelreihenfolge zu drehen (dann läge das Popup zwar oben,
+   * verdeckte aber die Rollen-Umschaltung), wird der Platz **freigehalten**:
+   * Das Popup endet oberhalb des Banners, beide sind gleichzeitig bedienbar.
+   *
+   * @returns {number} Belegte Höhe am unteren Rand in Pixeln, inkl. Abstand.
+   */
+  function bottomInset() {
+    const banner = byId("demo-banner");
+    if (!banner) return 0;
+    const r = banner.getBoundingClientRect();
+    if (!r.height) return 0;                       // ausgeblendet -> kein Platzbedarf
+    return Math.max(0, window.innerHeight - r.top + 8);
+  }
+
+  /**
+   * Platziert das Popup am Anker -- bevorzugt darunter, bei Platzmangel darüber,
+   * bei ``placement: "side"`` daneben (:func:`sidePosition`); immer innerhalb
+   * des Fensters.
+   *
+   * Die Größe steht erst nach dem Einhängen fest, deshalb wird im nächsten
+   * Frame nachgemessen und dann erst gesetzt.
+   *
+   * Der nutzbare Bereich endet über dem Demo-Banner (siehe :func:`bottomInset`);
+   * dieselbe Zahl bekommt auch das Stylesheet als ``--tour-bottom-inset``, damit
+   * der Höhendeckel des Popups den Banner mit einrechnet.
+   *
+   * @param {HTMLElement} box Das Popup.
+   * @param {DOMRect} r Ankerrechteck.
+   * @param {string} placement "top" erzwingt oberhalb, "side" stellt das Popup
+   *   neben das Ziel, sonst automatisch (unter- bzw. oberhalb).
+   * @param {boolean} [quiet] true beim reinen Nachführen eines bereits
+   *   stehenden Popups: Dann entfällt das Ausblenden bis zur Messung -- sonst
+   *   blinkte das Popup in jedem Takt (TICK_MS) einmal auf.
+   */
+  function position(box, r, placement, quiet) {
+    if (!quiet) box.style.visibility = "hidden";
+    requestAnimationFrame(() => {
+      const pad = 12;
+      const inset = bottomInset();
+      document.documentElement.style.setProperty("--tour-bottom-inset", `${inset}px`);
+      const usableBottom = window.innerHeight - inset;
+      const w = box.offsetWidth, h = box.offsetHeight;
+      let left, top;
+      if (placement === "side") {
+        ({ left, top } = sidePosition(r, w, h, window.innerWidth, usableBottom, pad));
+      } else {
+        ({ left, top } = autoPosition(r, w, h, window.innerWidth, usableBottom, pad,
+          placement === "top"));
+      }
+      box.style.left = `${left}px`;
+      box.style.top = `${top}px`;
+      box.style.visibility = "visible";
+    });
+  }
+
+  /**
+   * Platzierung ``"side"``: neben das Ziel statt darüber oder darunter.
+   *
+   * Für Schritte, in denen im Zielbereich selbst geklickt werden muss (Knoten im
+   * Kontrollfluss wählen, dann ⊕ in der Schritt-Karte). Ober- oder unterhalb
+   * eines großen Bereichs ist selten Platz; das Popup wurde dann in den Bereich
+   * geschoben und verdeckte den Knoten. Reihenfolge: links vom Ziel, sonst
+   * rechts davon, sonst an den rechten Fensterrand -- der Ablauf beginnt links
+   * (Start), der neue Schritt steht direkt dahinter, rechts ist er frei.
+   * Senkrecht bündig mit der Oberkante des Ziels, immer im Fenster.
+   *
+   * Reine Rechnung (kein DOM), damit sie sich ohne Browser prüfen lässt.
+   *
+   * @param {{left:number,right:number,top:number}} r Zielrechteck.
+   * @param {number} w Popup-Breite.
+   * @param {number} h Popup-Höhe.
+   * @param {number} viewW Fensterbreite.
+   * @param {number} usableBottom Unterkante des nutzbaren Bereichs (über dem Demo-Banner).
+   * @param {number} pad Randabstand.
+   * @returns {{left:number, top:number}}
+   */
+  function sidePosition(r, w, h, viewW, usableBottom, pad) {
+    let left;
+    if (r.left - pad >= w + pad) left = r.left - w - pad;
+    else if (viewW - r.right - pad >= w + pad) left = r.right + pad;
+    else left = viewW - w - pad;
+    left = Math.max(pad, Math.min(left, viewW - w - pad));
+    const top = Math.max(pad, Math.min(r.top, usableBottom - h - pad));
+    return { left, top };
+  }
+
+  /**
+   * Automatische Platzierung: unter dem Ziel, sonst darüber, sonst daneben,
+   * sonst an den Fensterrand, der das Ziel am wenigsten verdeckt.
+   *
+   * Früher wurde das Popup, wenn es weder darunter noch darüber passte, per
+   * Klemmung ans Fenster *in* das Ziel geschoben -- bei breiten, hohen Zielen
+   * (Aufgabenliste, Abwesenheits-Panel, Sicherungen) lag es dann genau auf der
+   * Zeile, um die es ging. Reine Rechnung (kein DOM), prüfbar ohne Browser.
+   *
+   * @param {{left:number,right:number,top:number,bottom:number,width:number}} r Zielrechteck.
+   * @param {number} w Popup-Breite.
+   * @param {number} h Popup-Höhe.
+   * @param {number} viewW Fensterbreite.
+   * @param {number} usableBottom Unterkante des nutzbaren Bereichs (über dem Demo-Banner).
+   * @param {number} pad Randabstand.
+   * @param {boolean} [preferTop] oberhalb bevorzugen (``placement: "top"``)
+   * @returns {{left:number, top:number}} immer innerhalb des Fensters
+   */
+  function autoPosition(r, w, h, viewW, usableBottom, pad, preferTop) {
+    const clampX = (x) => Math.max(pad, Math.min(x, viewW - w - pad));
+    // Auch ein Ziel ausserhalb des Bilds (noch nicht hineingerollt) ergibt
+    // eine Position im Fenster.
+    const clampY = (y) => Math.max(pad, Math.min(y, usableBottom - h - pad));
+    const centred = clampX(r.left + r.width / 2 - w / 2);
+    const fitsBelow = usableBottom - r.bottom >= h + 2 * pad;
+    const fitsAbove = r.top >= h + 2 * pad;
+    if (preferTop && fitsAbove) return { left: centred, top: clampY(r.top - h - pad) };
+    if (fitsBelow) return { left: centred, top: clampY(r.bottom + pad) };
+    if (fitsAbove) return { left: centred, top: clampY(r.top - h - pad) };
+    const sideRoom = r.left - pad >= w + pad || viewW - r.right - pad >= w + pad;
+    if (sideRoom) return sidePosition(r, w, h, viewW, usableBottom, pad);
+    // Kein freier Platz: an den Rand, der weniger vom Ziel verdeckt. Bei
+    // Gleichstand unten -- oben stehen Überschrift und erste Zeile.
+    const atTop = pad, atBottom = Math.max(pad, usableBottom - h - pad);
+    const cover = (y) => Math.max(0, Math.min(r.bottom, y + h) - Math.max(r.top, y));
+    const top = cover(atTop) < cover(atBottom) ? atTop : atBottom;
+    return { left: centred, top };
+  }
+
+  // --- Öffentliche Schnittstelle ------------------------------------------
+
+  return {
+    maybeOffer,
+    afterRender,
+    intercept,
+    start,
+    stop,
+    availableTours,
+    isDone,
+    savedProgress,
+    /** Nur für Prüfungen: die reine Platzierungsrechnung (siehe sidePosition). */
+    _sidePosition: sidePosition,
+    /** Nur für Prüfungen: die automatische Platzierung (siehe autoPosition). */
+    _autoPosition: autoPosition,
+    /** @returns {boolean} true, solange eine Tour läuft. */
+    get running() { return !!t.tour; },
+    /** @returns {boolean} true im schreibfreien Modus (für das GUI-Abzeichen). */
+    get sandboxed() { return t.sandbox; },
+  };
+})();

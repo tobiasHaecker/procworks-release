@@ -1,0 +1,148 @@
+# Default values for the procworks chart.
+# Override per environment with `-f my-values.yaml` or `--set`.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  registry: ghcr.io
+  # Default: the published release images ghcr.io/tobiashaecker/procworks-api
+  # and ghcr.io/tobiashaecker/procworks-web. Registry paths must be lowercase.
+  apiRepository: tobiashaecker/procworks-api
+  webRepository: tobiashaecker/procworks-web
+  # Own registry or mirror: either set apiRepository/webRepository, or set a
+  # common prefix here -- the chart then uses <repository>-api and
+  # <repository>-web (e.g. "my-org/procworks"). It wins over the two above.
+  repository: ""
+  # Image tags default to the chart appVersion unless overridden here.
+  apiTag: ""
+  webTag: ""
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# API server (stateless). Reads/writes PostgreSQL.
+# ---------------------------------------------------------------------------
+api:
+  # One API process by default. More are possible -- new ids are reserved
+  # atomically in the database, so two processes never hand out the same id --
+  # but the login throttle counts failed attempts per process, so with N
+  # replicas an attacker gets up to N times the attempts before a lock-out.
+  # Raise it only when one process is not enough.
+  replicaCount: 1
+  port: 8000
+  # Authentication mode for the API boundary. Production default is "password"
+  # (username/password login with coarse RBAC); use "open" only for throwaway
+  # demos -- it grants every role without authentication. On a fresh store a
+  # default 'admin' account is auto-created and its one-off password is written
+  # to the API pod log; log in and change it on first use.
+  authMode: password
+  # Optional: reference a Secret with `login` and `password` keys to pin a known
+  # initial admin instead of the auto-generated one. Leave empty to use the
+  # logged auto-generated password.
+  adminSecret: ""
+  # Optional: name of a Secret whose keys become environment variables of the
+  # API, e.g. PROCWORKS_SMTP_HOST, PROCWORKS_SMTP_PORT, PROCWORKS_SMTP_USER,
+  # PROCWORKS_SMTP_PASSWORD, PROCWORKS_MAIL_FROM (e-mail notifications) or
+  # PROCWORKS_TOKENS_JSON (machine tokens with role "integration" for workers).
+  envFromSecret: ""
+  # DATABASE_URL is read from a Kubernetes Secret (never hard-code credentials).
+  # When `database.createSecret` is true the chart creates it from
+  # `database.url`; otherwise set `database.existingSecret` to your own secret.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # Liveness/readiness use the public /health endpoint.
+
+# ---------------------------------------------------------------------------
+# Web GUI + reverse proxy (Caddy). Serves the SPA and proxies /api to the API.
+# ---------------------------------------------------------------------------
+web:
+  replicaCount: 2
+  port: 80
+  # host:port of the API service is wired automatically from the chart name.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Out-of-the-box datensicherung (operator guide: docs/Betriebs-Backup-Leitfaden.md).
+# A CronJob takes one consistent pg_dump per day into a PVC, with GFS retention.
+# The scripts are loaded from a ConfigMap (deploy/helm/files/backup/*.sh) -- no
+# image rebuild needed. The image only has to carry pg_dump/pg_restore/psql.
+# ---------------------------------------------------------------------------
+backup:
+  enabled: true
+  # Image providing pg_dump/pg_restore/psql. Match the server's major version.
+  image: postgres:16-alpine
+  pullPolicy: IfNotPresent
+  schedule: "0 2 * * *"          # CronJob schedule (cluster timezone / UTC)
+  keepDaily: 14                  # Grandfather-Father-Son retention
+  keepWeekly: 8
+  keepMonthly: 6
+  # CronJob safety knobs.
+  startingDeadlineSeconds: 3600  # skip a run missed by more than 1h
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  storage:
+    size: 10Gi
+    storageClass: ""             # "" = cluster default StorageClass
+    existingClaim: ""            # set to reuse an existing PVC instead
+  # Optional symmetric encryption at rest (GnuPG): reference a Secret with a
+  # `passphrase` key. NOTE: the default postgres image has no gpg; set
+  # `backup.image` to one that includes it (build & push deploy/backup/Dockerfile,
+  # = postgres:16-alpine + gnupg) when enabling this.
+  passphraseSecret: ""
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # One-off restore Job. Rendered only when enabled (keep it false in normal
+  # operation). The restore refuses to run while the API is still connected, so
+  # scale the API to 0 first:
+  #   kubectl scale deploy/<release>-procworks-api --replicas=0
+  #   helm upgrade <release> ./deploy/helm --set backup.restore.enabled=true \
+  #       --set backup.restore.file=procworks-2026-07-01T02-00.dump
+  #   kubectl scale deploy/<release>-procworks-api --replicas=1   # auto-migrates
+  # (-n <namespace> if the release lives elsewhere; with fullnameOverride the
+  # deployment is <fullnameOverride>-api; scale back to your api.replicaCount)
+  restore:
+    enabled: false
+    file: ""                     # dump filename to restore; "" = newest (--latest)
+    force: false                 # override non-empty-DB / connected-clients guards
+
+# ---------------------------------------------------------------------------
+# External PostgreSQL (the chart does not bundle a database).
+# ---------------------------------------------------------------------------
+database:
+  createSecret: true
+  # Used only when createSecret is true.
+  url: "postgresql+psycopg://process:process@postgres:5432/procworks"
+  # Used when createSecret is false: reference an existing secret with a
+  # DATABASE_URL key.
+  existingSecret: ""
+  secretKey: DATABASE_URL
+
+# ---------------------------------------------------------------------------
+# Ingress / TLS. With Caddy already terminating TLS you may instead expose the
+# web Service via LoadBalancer; the Ingress is provided for cluster-standard
+# setups (e.g. ingress-nginx + cert-manager).
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: process.example.com
+  tls:
+    enabled: false
+    secretName: procworks-tls

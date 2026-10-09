@@ -1,0 +1,1256 @@
+/* SPDX-License-Identifier: BUSL-1.1 */
+
+/* ---------------------------------------------------------------------------
+   Farbschema (Theme)
+   ---------------------------------------------------------------------------
+   Die gesamte GUI ist rein ueber CSS-Variablen eingefaerbt. Das dunkle Schema
+   ist der Default auf :root; die helle Variante ueberschreibt dieselben
+   Variablen unter `:root[data-theme="light"]`. Der Web-Client (app.js) stempelt
+   das gewuenschte Theme als `data-theme`-Attribut auf das <html>-Element und
+   merkt sich die Wahl in localStorage ("theme"). So laesst sich das Aussehen
+   umschalten, ohne dass eine einzige Komponentenregel angefasst werden muss.
+   Neue Regeln MUESSEN Farben ausschliesslich ueber diese Variablen beziehen,
+   sonst bricht die helle Variante.
+   --------------------------------------------------------------------------- */
+:root {
+  --bg: #0f1420;
+  --bg-elev: #161d2e;
+  --bg-elev2: #1d2740;
+  --line: #2a3550;
+  --txt: #e6ebf5;
+  --txt-dim: #9aa6bf;
+  --muted: #9aa6bf;           /* Alias fuer gedaempften Text (tl-*/tree-Badges) */
+  --accent: #4f86ff;
+  --accent-soft: #21345e;
+  --accent-txt: #cfe0ff;      /* Text/Icon auf accent-soft-Flaechen (Chips, Badges) */
+  --on-accent: #ffffff;       /* Text auf gefuellter accent-Flaeche (Buttons) */
+  --on-green: #04210f;        /* Text auf gefuellter green-Flaeche (Erledigen-Knopf) */
+  --green: #2fbf71;
+  --green-soft: #163a2a;
+  --amber: #f0a93b;
+  --amber-soft: #3d2e12;
+  --red: #ef5b6b;
+  --red-soft: #3a1a20;
+  --gray: #6b7794;
+  --gray-soft: #232c42;
+  --purple: #8a5bff;          /* Sub-Prozess-/Bearbeiter-Akzent */
+  --purple-soft: #2a2350;
+  --purple-txt: #d8c9ff;
+  --topbar-bg: rgba(15, 20, 32, .8);   /* halbtransparente, verschwimmende Topbar */
+  --backdrop: rgba(6, 10, 18, .6);     /* Modal-Abdunklung */
+  --body-glow: #18223a;                /* radialer Schimmer im Seitenhintergrund */
+  --hairline: rgba(255, 255, 255, .02);/* extrem dezente Flaechenaufhellung */
+  --graph-sel-stroke: #ffffff;         /* Auswahlkontur im Kontrollfluss-Graph */
+  --radius: 12px;
+  --shadow: 0 8px 30px rgba(0, 0, 0, .35);
+}
+
+/* Helle Variante: ueberschreibt nur die Farb-Variablen (nicht das Layout). */
+:root[data-theme="light"] {
+  /* Text- und Akzentfarben erreichen auf jeder Flaeche dieses Schemas (Hintergrund,
+     Karte, *-soft) mindestens 4,5:1 (WCAG AA) -- Waechter
+     test_light_theme_text_pairs_meet_wcag_aa. */
+  --bg: #f4f6fb;
+  --bg-elev: #ffffff;
+  --bg-elev2: #eceff6;
+  --line: #d5dbe7;
+  --txt: #1a2233;
+  --txt-dim: #5b6678;
+  --muted: #5b6678;
+  --accent: #0b52ff;
+  --accent-soft: #dbe7ff;
+  --accent-txt: #1a4bc4;
+  --on-accent: #ffffff;
+  --on-green: #ffffff;
+  --green: #177742;
+  --green-soft: #d6f2e2;
+  --amber: #915f0a;
+  --amber-soft: #fbeccb;
+  --red: #c12838;
+  --red-soft: #fbe0e3;
+  --gray: #5c667f;
+  --gray-soft: #e6e9f0;
+  --purple: #6933ff;
+  --purple-soft: #e7dfff;
+  --purple-txt: #5a34c0;
+  --topbar-bg: rgba(255, 255, 255, .82);
+  --backdrop: rgba(30, 40, 60, .35);
+  --body-glow: #dfe8ff;
+  --hairline: rgba(0, 0, 0, .025);
+  --graph-sel-stroke: #1a2233;
+  --shadow: 0 8px 30px rgba(30, 45, 80, .12);
+}
+* { box-sizing: border-box; }
+/* `text-size-adjust: 100%` verhindert die automatische Schriftvergroesserung,
+   die mobile Safari/Chrome sonst auf einzelne Textbloecke anwenden – sie wuerde
+   die sorgfaeltig abgestimmten Schriftgroessen unvorhersehbar aufblaehen. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+/* Das Dokument selbst darf NIE scrollen – gerollt wird ausschliesslich `.main`
+   (siehe unten). Ohne diese Sperre kettet Safari das Mausrad am Scroll-Ende von
+   `.main` ans Dokument weiter: die ganze `.app` (Sidebar + Inhalt) schiebt sich
+   nach oben und ein Dokument-Scrollbalken taucht im Hintergrund auf. */
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+  background: radial-gradient(1200px 600px at 80% -10%, var(--body-glow) 0%, transparent 60%), var(--bg);
+  color: var(--txt);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Layout ---- */
+/* Hoehe: `dvh` (dynamic viewport height) folgt dem tatsaechlich sichtbaren
+   Bereich, wenn mobile Browser ihre Adress-/Werkzeugleiste ein- und ausblenden.
+   `100vh` meint auf iOS die *grosse* Viewport-Hoehe – die App waere damit hoeher
+   als der sichtbare Bereich und ihr unteres Ende (Fusszeile der Schublade,
+   Seitenende) verschwaende dauerhaft hinter der Safari-Leiste. `vh` bleibt als
+   Rueckfall fuer Browser ohne `dvh` stehen. */
+/* `grid-template-rows: minmax(0, 1fr)` bindet die einzige Grid-Zeile an die
+   Container-Hoehe (100dvh) statt an die Inhaltshoehe. Ohne diese Bindung wuerde
+   die Zeile auf die hoechste Spalte wachsen, die Spalten waeren hoeher als der
+   Viewport und ihr unteres Ende laege nach der Dokument-Sperre (`overflow:hidden`
+   auf html/body) unerreichbar abgeschnitten. So bleibt jede Spalte exakt
+   viewporthoch und scrollt ihren Ueberhang selbst (siehe `.sidebar`/`.main`). */
+.app {
+  display: grid; grid-template-columns: 244px 1fr; grid-template-rows: minmax(0, 1fr);
+  height: 100vh; height: 100dvh;
+  /* Platz fuer den Demo-Banner (app.js: reserveDemoBannerSpace). Ausserhalb der
+     Demo ist die Variable 0 -- dann exakt die bisherige Hoehe. */
+  height: calc(100vh - var(--demo-banner-h, 0px));
+  height: calc(100dvh - var(--demo-banner-h, 0px));
+}
+.sidebar {
+  background: var(--bg-elev); border-right: 1px solid var(--line);
+  padding: 18px 14px; display: flex; flex-direction: column; gap: 6px;
+  /* Eigener Scroll-Kontext: ist das Menue hoeher als der Viewport (kurzes
+     Fenster), bleibt die Fusszeile per Sidebar-Scroll erreichbar. `min-height:0`
+     hebt das `auto`-Minimum des Grid-Kindes auf, sonst wuerde die Spalte statt zu
+     scrollen wieder ueber den Viewport hinauswachsen. */
+  min-height: 0; overflow-y: auto;
+}
+.brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 18px; }
+.brand .logo {
+  width: 34px; height: 34px; border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent), #8a5bff);
+  display: grid; place-items: center; font-weight: 800; color: #fff; font-size: 12px;
+}
+.brand-text { flex: 1; min-width: 0; }
+.brand b { font-size: 15px; }
+.brand small { display: block; color: var(--txt-dim); font-weight: 500; font-size: 11px; }
+/* Umschalt-Knopf fuer den schmalen Menue-Modus (oben in der Sidebar). */
+.side-collapse {
+  border: 1px solid var(--line); background: var(--bg-elev2); color: var(--txt-dim);
+  width: 26px; height: 26px; border-radius: 7px; cursor: pointer; font-size: 14px;
+  line-height: 1; display: grid; place-items: center; flex: none; transition: .15s;
+}
+.side-collapse:hover { border-color: var(--accent); color: var(--txt); }
+.nav { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.nav button {
+  text-align: left; border: 0; background: transparent; color: var(--txt-dim);
+  padding: 10px 12px; border-radius: 9px; cursor: pointer; font-size: 14px;
+  display: flex; align-items: center; gap: 10px; transition: .15s;
+}
+.nav button:hover { background: var(--bg-elev2); color: var(--txt); }
+.nav button.active { background: var(--accent-soft); color: var(--txt); }
+.nav .ico { width: 18px; text-align: center; opacity: .9; }
+
+/* ---- Eingeklappter (schmaler) Menue-Modus ----
+   app.js setzt `data-sidebar="collapsed"` aufs <html>. Die Sidebar-Spalte wird
+   schmal, Beschriftungen/Fusszeile werden ausgeblendet; nur Icons bleiben. Der
+   restliche Seiteninhalt gewinnt dadurch Platz. */
+:root[data-sidebar="collapsed"] .app { grid-template-columns: 64px 1fr; }
+:root[data-sidebar="collapsed"] .sidebar { padding: 16px 8px; align-items: center; }
+:root[data-sidebar="collapsed"] .brand { flex-direction: column; gap: 10px; padding: 2px 0 14px; }
+:root[data-sidebar="collapsed"] .brand-text { display: none; }
+:root[data-sidebar="collapsed"] .nav button { justify-content: center; padding: 10px 0; gap: 0; }
+:root[data-sidebar="collapsed"] .nav .lbl { display: none; }
+:root[data-sidebar="collapsed"] .side-foot { display: none; }
+.side-foot { margin-top: auto; color: var(--txt-dim); font-size: 11px; padding: 10px 8px; line-height: 1.5; display: flex; flex-direction: column; gap: 8px; }
+.api-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--txt-dim); }
+.api-field input {
+  background: var(--bg); border: 1px solid var(--line); color: var(--txt);
+  border-radius: 7px; padding: 6px 8px; font-size: 12px;
+}
+.muted { color: var(--txt-dim); }
+
+/* Farbschema-Umschalter (Dunkel/Hell) in der Sidebar-Fusszeile. Der aktive
+   Knopf wird per `.active` (von app.js gesetzt) hervorgehoben. */
+.theme-switch { display: flex; gap: 4px; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
+.theme-btn {
+  flex: 1; text-align: center; border: 0; background: transparent; color: var(--txt-dim);
+  padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600;
+  transition: .15s;
+}
+.theme-btn:hover { color: var(--txt); }
+.theme-btn.active { background: var(--accent-soft); color: var(--txt); }
+
+.pill { display: inline-block; padding: 2px 8px; border-radius: 20px; font-weight: 600; font-size: 11px; }
+.pill-green { background: var(--green-soft); color: var(--green); }
+.pill-amber { background: var(--amber-soft); color: var(--amber); }
+.pill-red { background: var(--red-soft); color: var(--red); }
+.pill-gray { background: var(--gray-soft); color: var(--gray); }
+.pill-blue { background: var(--accent-soft); color: var(--accent-txt); }
+
+/* Der einzige Scroll-Container der App. `overscroll-behavior: contain` haelt die
+   Rollbewegung hier gefangen: am oberen/unteren Rand angekommen kettet sie nicht
+   an das Dokument weiter (kein Hintergrund-Scrollbalken, kein Ruckeln beim
+   Uebergang zwischen erstem und zweitem Scroll). */
+/* `min-height: 0` wie bei `.sidebar`: hebt das `auto`-Minimum des Grid-Kindes
+   auf, damit `.main` an die Zeilenhoehe gebunden bleibt und seinen Ueberhang
+   wirklich scrollt (statt die Zeile aufzublaehen und den unteren Rand hinter dem
+   Viewport abzuschneiden). */
+.main { overflow: auto; overscroll-behavior: contain; min-height: 0; display: flex; flex-direction: column; }
+.topbar {
+  position: sticky; top: 0; z-index: 5; backdrop-filter: blur(8px);
+  background: var(--topbar-bg); border-bottom: 1px solid var(--line);
+  padding: 14px 26px; display: flex; align-items: center; gap: 14px;
+  /* Bei Laptop-Breite (ca. 1050 px) lief die Kopfzeile ueber: der Import-Knopf
+     lag ausserhalb, und .main verrutschte seitlich. Jetzt bricht sie um. */
+  flex-wrap: wrap; row-gap: 8px;
+}
+/* Hamburger-Knopf der Topbar: oeffnet die mobile Menue-Schublade. Auf dem
+   Desktop komplett ausgeblendet (die Sidebar steht dort fest daneben); erst die
+   mobile Media-Query blendet ihn ein. */
+.nav-burger {
+  display: none;
+  border: 1px solid var(--line); background: var(--bg-elev2); color: var(--txt);
+  width: 34px; height: 34px; border-radius: 8px; cursor: pointer; font-size: 17px;
+  line-height: 1; place-items: center; flex: none; transition: .15s;
+}
+.nav-burger:hover { border-color: var(--accent); }
+
+/* Abdunkelnder Hintergrund hinter der offenen Mobil-Schublade. Basis: nicht
+   vorhanden; erst die mobile Media-Query macht ihn zum fixierten Overlay. */
+.nav-scrim { display: none; }
+
+.topbar h1 { font-size: 18px; margin: 0; font-weight: 650; white-space: nowrap; flex: none; }
+/* Untertitel kuerzen statt umbrechen (vorher bis zu sechs Zeilen hoch, die
+   Kopfzeile ueberdeckte den Panelkopf); der volle Text steht im Tooltip. */
+.topbar .sub {
+  color: var(--txt-dim); font-size: 13px;
+  flex: 0 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Gekuerzt wird nur, wo der Platz knapp ist; auf breiten Bildschirmen steht der
+   volle Untertitel da. */
+@media (max-width: 1400px) { .topbar .sub { max-width: 34ch; } }
+.spacer { flex: 1; }
+.content { padding: 22px 26px 60px; flex: 1; }
+
+.picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
+.picker select {
+  background: var(--bg-elev2); border: 1px solid var(--line); color: var(--txt);
+  border-radius: 8px; padding: 7px 10px; font-size: 13px; min-width: 180px;
+}
+
+/* ---- Buttons ---- */
+.btn {
+  border: 1px solid var(--line); background: var(--bg-elev2); color: var(--txt);
+  padding: 8px 14px; border-radius: 9px; cursor: pointer; font-size: 13px; font-weight: 600;
+  display: inline-flex; align-items: center; gap: 8px; transition: .15s;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.green { background: var(--green); border-color: var(--green); color: var(--on-green); }
+.btn.danger { background: var(--red-soft); border-color: var(--red); color: var(--red); }
+.btn.danger:hover { background: var(--red); color: #fff; border-color: var(--red); }
+.btn.ghost { background: transparent; }
+.btn.small { padding: 5px 10px; font-size: 12px; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ---- Panels / cards ---- */
+.panel { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; margin-bottom: 18px; }
+.panel-h { padding: 13px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; row-gap: 8px; }
+/* Die Kopfzeile der Modellieren-Sicht bricht um, statt rechts ueberzulaufen
+   („Pruefinstanz“ abgeschnitten). Lange Bezeichnungen sprengen keinen
+   Dialog mehr, und Links sind auch im dunklen Schema lesbar (vorher Browser-
+   Standardblau auf dunklem Grund). Farben nur ueber :root-Variablen. */
+.modal-h h3, .modal-b .field, .modal-b p { overflow-wrap: anywhere; }
+a { color: var(--accent); }
+a:visited { color: var(--accent); }
+.panel-h h2 { margin: 0; font-size: 15px; }
+.panel-h .sub { color: var(--txt-dim); font-size: 12px; }
+.panel-b { padding: 16px 18px; }
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.row.end { justify-content: flex-end; }
+.grid-2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; }
+/* ``minmax(0, 1fr)`` statt ``1fr`` (= ``minmax(auto, 1fr)``): Sonst setzte der
+   breiteste nicht umbrechende Inhalt (Knopfreihen der Abteilungshierarchie)
+   die Spaltenbreite, und die Ressourcensicht scrollte am Smartphone seitwaerts. */
+@media (max-width: 1100px) { .grid-2 { grid-template-columns: minmax(0, 1fr); } }
+/* Rasterspalten duerfen schmaler werden als ihre breiteste Tabelle (``minmax(0,
+   …)``-Wirkung): sonst wuchs das Raster auf die Tabellenbreite, und die ganze
+   Seite liess sich seitlich verschieben (Ressourcensicht bei ~1050 px). Eine zu
+   breite Tabelle scrollt stattdessen in ihrem Panel. */
+.grid-2 > * { min-width: 0; }
+.grid-2 .panel-b { overflow-x: auto; }
+
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+/* Hinweis, wenn Liste und Kennzahlen verschiedene Mengen zaehlen. */
+.monitor-scope-note { margin: -8px 0 16px; font-size: 12px; }
+@media (max-width: 1100px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+.kpi { background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+.kpi .label { color: var(--txt-dim); font-size: 12px; text-transform: uppercase; letter-spacing: .6px; }
+.kpi .value { font-size: 28px; font-weight: 750; margin-top: 6px; }
+
+/* ---- Forms ---- */
+label.field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--txt-dim); }
+input[type=text], input[type=number], input[type=password], select, textarea {
+  background: var(--bg); border: 1px solid var(--line); color: var(--txt);
+  border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit;
+}
+/* Nur-Lese-Felder (Anzeige in Masken, gesperrte Eingaben) sahen aus wie
+   Eingabefelder. Eigene Flaeche ohne Rahmen, Text bleibt voll lesbar. */
+input:disabled, select:disabled, textarea:disabled {
+  background: var(--gray-soft); border-color: transparent; color: var(--txt);
+  cursor: default; opacity: 1;
+}
+textarea { resize: vertical; min-height: 90px; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; align-items: end; }
+/* Nur Felder teilen sich die Spalten des Rasters. Fliesstext, Hinweise,
+   Ergebnisbereiche und verschachtelte Gruppen belegen die volle Breite --
+   sonst stand ein Bestaetigungstext in zwei schmalen Spalten nebeneinander,
+   und ein Ergebnis landete in einer Mittelspalte. Knoepfe, einzelne
+   Eingaben und Beschriftungen (auch ein Ankreuzfeld wie „Pflichtbindung“
+   neben einem Feld) bleiben in ihrer Spalte.
+   ``min-width: 0`` laesst lange Auswahllisten schrumpfen statt den Dialog
+   seitlich zu sprengen. */
+.form-grid > :not(.field):not(label):not(button):not(.btn):not(input):not(select):not(textarea) { grid-column: 1 / -1; }
+.form-grid > * { min-width: 0; }
+/* Mehrzeilige Eingaben (Begruendung, Beschreibung) brauchen die Breite. */
+.form-grid > .field:has(> textarea) { grid-column: 1 / -1; }
+.field-help { font-size: 11px; color: var(--txt-dim); opacity: .8; }
+/* Fehlerhaftes Feld der Aufgabenmaske: Rahmen und Hinweis am Feld. */
+.field-invalid input, .field-invalid select, .field-invalid textarea { border-color: var(--red); }
+.field-error-msg { font-size: 11px; color: var(--red); }
+/* Einmalig gezeigter Wert (Login, Initialpasswort) mit Kopierknopf. */
+/* Hinweis im Dialogfuss, wenn ein Klick daneben wegen Eingaben nicht schliesst. */
+.modal-keep-hint { flex: 1; font-size: 12px; color: var(--amber); }
+.copy-field { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; font-size: 12px; color: var(--txt-dim); }
+.copy-row { display: flex; gap: 6px; align-items: center; width: 100%; }
+.copy-row input { flex: 1; min-width: 0; font-family: ui-monospace, monospace; }
+/* Live-Aktualisierung wartet wegen ungespeicherter Eingaben: Neuladen anbieten. */
+.live-refresh-hint { display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+  padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); color: var(--txt);
+  position: sticky; top: 0; z-index: 5; }
+/* Benennende Werte unter Aufgabe bzw. Vorgang. */
+.task-context { font-size: 11px; color: var(--txt-dim); }
+/* Vermerk an Aufgaben, die man fuer eine abwesende Person uebernimmt. */
+.task-deputy { font-size: 11px; color: var(--accent); }
+/* Ein Feld ueber die volle Dialogbreite: Tabellennamen und andere lange
+   Eingaben waren im halbierten Raster zu schmal, um sie lesen zu koennen. */
+.form-grid .field.wide { grid-column: 1 / -1; }
+/* Ergebnisbereich des Testlesens -- er liegt IM Dialog (siehe app.js) und darf
+   ihn nicht sprengen: er scrollt fuer sich. */
+.sample-out { grid-column: 1 / -1; max-height: 320px; overflow: auto; }
+.sample-out:empty { display: none; }
+.hr { height: 1px; background: var(--line); margin: 12px 0; }
+.mask-title { font-size: 14px; font-weight: 600; color: var(--txt); grid-column: 1 / -1; }
+
+/* ---- Ad-hoc-Instanzanpassung ---- */
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.adhoc-log { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.adhoc-deltas { margin: 0; padding-left: 18px; font-size: 13px; color: var(--txt-dim); }
+.adhoc-deltas li { margin: 2px 0; }
+
+/* ---- Eingabemasken-Designer ---- */
+.modal:has(.form-designer) { width: min(880px, 94vw); }
+.form-designer { display: flex; flex-direction: column; gap: 14px; }
+.fd-list { display: flex; flex-direction: column; gap: 10px; }
+.fd-field {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px;
+  align-items: end; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+}
+.fd-cell { display: flex; flex-direction: column; gap: 4px; }
+.fd-cell.fd-wide { grid-column: 1 / -1; }
+.fd-cap { font-size: 11px; color: var(--txt-dim); text-transform: uppercase; letter-spacing: .04em; }
+.fd-req { justify-content: center; }
+.fd-del { align-self: end; }
+.fd-preview {
+  border: 1px dashed var(--line); border-radius: 10px; padding: 14px; background: var(--bg);
+}
+.fd-preview-h { font-size: 11px; color: var(--txt-dim); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 10px; }
+
+/* ---- Tables ---- */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+th { color: var(--txt-dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
+tr:last-child td { border-bottom: 0; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--bg-elev2); }
+tr.clickable.selected td { background: var(--accent-soft); color: var(--txt); }
+tr.clickable.selected:hover td { background: var(--accent-soft); }
+
+/* ---- Zeilen-Hervorhebung (Sprung aus dem Kontrollfluss) ---- */
+tr.hl-row td { background: var(--accent-soft); }
+tr.hl-row td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.focus-banner {
+  display: flex; align-items: center; gap: 10px; justify-content: space-between;
+  margin-bottom: 12px; padding: 8px 12px; border: 1px solid var(--accent);
+  border-radius: 10px; background: var(--accent-soft); font-size: 13px;
+}
+/* Rücksprung-Leiste: 1-Klick zurück in den Kontrollfluss, von wo aus in die
+   Daten-/Ressourcensicht gewechselt wurde. Bewusst abgesetzt (bernsteinfarben)
+   von der accent-farbenen Hervorhebungs-Leiste. */
+.return-bar { margin-bottom: 12px; }
+.return-bar .btn {
+  border-color: var(--amber); color: var(--amber); background: var(--amber-soft);
+}
+
+.empty { color: var(--txt-dim); padding: 24px; text-align: center; font-size: 13px; }
+
+/* ---- Graph ---- */
+.canvas-wrap {
+  position: relative;
+  overflow: hidden;
+  height: clamp(320px, 55vh, 640px);
+  background: var(--bg); border-radius: var(--radius); border: 1px solid var(--line);
+  cursor: grab; touch-action: none;
+}
+.canvas-wrap.grabbing { cursor: grabbing; }
+/* Waehrend des Kontrollfluss-Pannings seitenweit keine Textselektion und der
+   Greif-Cursor -- auch wenn der Zeiger das Canvas-Fenster verlaesst. app.js
+   setzt/entfernt die Klasse `graph-dragging` am <html> bei Drag-Beginn/-Ende. */
+:root.graph-dragging, :root.graph-dragging * {
+  user-select: none !important; -webkit-user-select: none !important;
+  cursor: grabbing !important;
+}
+
+/* ---- Kontrollfluss-Vollbild (Diskussionsmodus) ----
+   Der Maximieren-Knopf im Panel-Kopf setzt die Klasse `graph-max`; das Panel
+   wird dann zum bildschirmfuellenden Overlay, die Canvas fuellt den Rest.
+   Verlassen per Knopf oder Escape (siehe app.js). */
+.graph-panel.graph-max {
+  position: fixed; inset: 0; z-index: 60; margin: 0; border-radius: 0;
+  display: flex; flex-direction: column; box-shadow: var(--shadow);
+}
+.graph-panel.graph-max .graph-body { flex: 1; min-height: 0; padding: 12px 14px; }
+.graph-panel.graph-max .canvas-wrap { height: 100%; border-radius: 8px; }
+.graph-max-btn { margin: -2px 0; }
+/* Einpassen-Knopf oben rechts im Canvas: holt ein verschobenes/gezoomtes
+   Modell wieder ganz ins Bild. Dezent (halbtransparent), damit er den
+   Kontrollfluss nicht dominiert, aber beim Ueberfahren klar greifbar. */
+.canvas-fit {
+  position: absolute; right: 10px; top: 8px; z-index: 3;
+  font: inherit; font-size: 11px; line-height: 1.4;
+  color: var(--txt-dim); background: var(--bg-elev2);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 8px; opacity: .85; cursor: pointer;
+}
+.canvas-fit:hover { color: var(--txt); opacity: 1; border-color: var(--accent); }
+.canvas-fit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Randpfeile: das Modell geht links/rechts weiter. Nur Hinweis --
+   Klicks gehen durch, verschoben wird wie immer per Ziehen oder Rad. */
+.canvas-more {
+  position: absolute; bottom: 8px; z-index: 2; pointer-events: none;
+  font-size: 11px; color: var(--txt-dim); background: var(--bg-elev2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; opacity: .9;
+}
+.canvas-more-left { left: 10px; }
+.canvas-more-right { right: 10px; }
+/* Oben links: unten liegen die Randpfeile, oben rechts der Einpassen-Knopf,
+   rechts die Schritt-Karte -- vorher ueberdeckten sich Hinweis, „weiter
+   rechts“ und Karte. */
+.canvas-hint {
+  position: absolute; left: 10px; top: 8px; z-index: 2;
+  /* nie bis unter den Einpassen-Knopf oben rechts */
+  max-width: calc(100% - 130px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--txt-dim);
+  background: var(--bg-elev2); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 8px; opacity: .85;
+  pointer-events: none; user-select: none;
+}
+svg.graph { display: block; min-width: 100%; user-select: none; transform-origin: 0 0; }
+.gnode rect { stroke-width: 1.5px; }
+.gnode text { font-size: 12px; fill: var(--txt); }
+.gnode .glabel { font-weight: 600; }
+.gnode .gstate { font-size: 9px; fill: var(--txt-dim); text-transform: uppercase; letter-spacing: .5px; }
+.gedge { stroke: var(--gray); stroke-width: 1.6px; fill: none; }
+.gedge-true { stroke: var(--green); }
+.gedge-false { stroke: var(--gray); opacity: .5; }
+.gcond { font-size: 10px; fill: var(--amber); }
+.gplus {
+  fill: var(--accent); cursor: pointer; opacity: .85;
+}
+.gplus:hover { opacity: 1; }
+.gplus-txt { fill: var(--on-accent); font-size: 14px; font-weight: 700; pointer-events: none; }
+.ndefault rect { fill: var(--bg-elev2); stroke: var(--line); }
+.nstart rect, .nend rect { fill: var(--accent-soft); stroke: var(--accent); }
+.ngateway rect { fill: var(--amber-soft); stroke: var(--amber); }
+.nsub rect { fill: var(--purple-soft); stroke: var(--purple); }
+.s-COMPLETED rect { fill: var(--green-soft); stroke: var(--green); }
+.s-RUNNING rect, .s-ACTIVATED rect { fill: var(--accent-soft); stroke: var(--accent); }
+/* Noch nicht erreicht: aussehen wie im Modellier-Kontrollfluss. Ohne Regel
+   fiel das SVG auf schwarze Fuellung ohne Rand zurueck (in beiden Schemata).
+   Jede NodeState braucht eine .s-<STATE>-Regel (Waechter im Test). */
+.s-NOT_ACTIVATED rect { fill: var(--bg-elev2); stroke: var(--line); }
+.s-SKIPPED rect { fill: var(--gray-soft); stroke: var(--gray); opacity: .6; }
+.gnode.selected rect { stroke: var(--graph-sel-stroke); stroke-width: 2.5px; }
+
+/* ---- Kontrollfluss-Chips: Daten-/Bearbeiter-Bindung am Knoten ---- */
+.gchip-bg { stroke-width: 1px; }
+.gchip-txt { font-size: 9px; font-weight: 600; pointer-events: none; }
+.gchip-link { cursor: pointer; }
+.gchip-data .gchip-bg { fill: var(--accent-soft); stroke: var(--accent); }
+.gchip-data .gchip-txt { fill: var(--accent-txt); }
+.gchip-staff .gchip-bg { fill: var(--purple-soft); stroke: var(--purple); }
+.gchip-staff .gchip-txt { fill: var(--purple-txt); }
+.gchip-link:hover .gchip-bg { filter: brightness(1.4); }
+
+/* ---- Schnellring am gewaehlten Schritt (Karten-Sicht) ----
+   Bewusst Teil des SVG: so wandert er bei Pan/Zoom automatisch mit seinem
+   Knoten mit, statt Frame fuer Frame nachgefuehrt werden zu muessen. */
+.gring-bg { fill: var(--bg-elev2); stroke: var(--accent); stroke-width: 1.4px; }
+.gring-txt { fill: var(--txt); font-size: 12px; font-weight: 700; pointer-events: none; }
+.gring:hover .gring-bg { fill: var(--accent-soft); }
+.gring-delete .gring-bg { stroke: var(--red); }
+.gring-delete:hover .gring-bg { fill: var(--red-soft); }
+.gring-delete .gring-txt { fill: var(--red); }
+
+/* ---- Befund-Marker am Knoten: zeigt den Kern-Befund dort, wo er entsteht ---- */
+.gfind-bg { fill: var(--red); stroke: var(--bg); stroke-width: 1.5px; }
+.gfind-txt { fill: var(--on-accent); font-size: 10px; font-weight: 700; pointer-events: none; }
+
+/* ---- Findings ---- */
+.finding { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.finding:last-child { border-bottom: 0; }
+.finding .rule { font-weight: 700; color: var(--red); min-width: 34px; }
+/* Modellhinweise (G-Gruppe) sind beratend -- neutral, nicht rot wie Befunde. */
+.finding .rule.rule-hint { color: var(--txt-dim); }
+.ok-banner { color: var(--green); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.warn-banner { color: var(--amber); background: var(--amber-soft); font-size: 13px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; }
+
+.tag { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: var(--gray-soft); color: var(--txt-dim); }
+/* Warnendes Zeichen an einem Arbeitslisten-Eintrag (z. B. "niemand zuständig"):
+   dieselbe Form wie .tag, nur in der Warnfarbe der Oberfläche. */
+.tag.warn { background: var(--amber-soft); color: var(--amber); }
+
+/* Zeitbasierte Arbeitslisten-Priorisierung: Kritikalitäts-Badges (Ampel). */
+.due-cell { display: inline-flex; align-items: center; gap: 8px; }
+.due-label { font-size: 12px; color: var(--txt-dim); white-space: nowrap; }
+.badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.badge.crit-ontrack { background: var(--green-soft); color: var(--green); }
+.badge.crit-warning { background: var(--amber-soft); color: var(--amber); }
+.badge.crit-atrisk  { background: var(--amber-soft); color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+.badge.crit-overdue { background: var(--red-soft); color: var(--red); box-shadow: inset 0 0 0 1px var(--red); }
+
+.worklist-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.worklist-item:last-child { border-bottom: 0; }
+.worklist-item .name { flex: 1; font-size: 13px; font-weight: 600; }
+
+/* ---- Org-Baum (Abteilungen) ---- */
+.tree { display: flex; flex-direction: column; gap: 4px; }
+.tree-children { margin-left: 18px; padding-left: 12px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+/* ``flex-wrap``: Name, Kennzeichen und vier Knoepfe passen schmal nicht in eine
+   Zeile -- sie brechen um statt die Seite zu verbreitern. */
+.tree-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--hairline); }
+.tree-name { font-size: 13px; font-weight: 600; }
+.tree-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-txt); white-space: nowrap; }
+.tree-badge.muted-badge { background: var(--gray-soft); color: var(--muted); }
+.tree-row-hl { background: var(--accent-soft); border-color: var(--accent); }
+.tree-badge-link { cursor: pointer; }
+.tree-badge-link:hover { filter: brightness(1.3); }
+
+/* ---- Organigramm (Abteilungs-Hierarchie als Org-Chart) ---- */
+.orgchart { overflow-x: auto; padding: 6px 2px 2px; }
+.orgchart ul { display: flex; justify-content: center; gap: 0; padding: 18px 0 0; margin: 0; position: relative; list-style: none; }
+.orgchart > ul { padding-top: 2px; }
+.orgchart li { list-style: none; position: relative; padding: 18px 8px 0; text-align: center; }
+/* Verbindungslinien zwischen Eltern und Kindern */
+.orgchart li::before, .orgchart li::after {
+  content: ""; position: absolute; top: 0; right: 50%;
+  width: 50%; height: 18px; border-top: 1px solid var(--line);
+}
+.orgchart li::after { right: auto; left: 50%; border-left: 1px solid var(--line); }
+.orgchart li:only-child::before, .orgchart li:only-child::after { display: none; }
+.orgchart li:only-child { padding-top: 18px; }
+.orgchart li:first-child::before, .orgchart li:last-child::after { border: 0 none; }
+.orgchart li:last-child::before { border-right: 1px solid var(--line); }
+.orgchart ul ul::before {
+  content: ""; position: absolute; top: 0; left: 50%;
+  width: 0; height: 18px; border-left: 1px solid var(--line);
+}
+.orgchart > ul > li:only-child::before { display: none; }
+.oc-node {
+  display: inline-flex; flex-direction: column; gap: 2px; min-width: 120px;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg-elev2); cursor: pointer; transition: filter .12s, border-color .12s;
+}
+.oc-node:hover { filter: brightness(1.18); border-color: var(--accent); }
+.oc-node.selected { background: var(--accent-soft); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.oc-name { font-size: 13px; font-weight: 600; color: var(--txt); }
+.oc-mgr { font-size: 11px; color: var(--accent); }
+.oc-mgr.oc-muted { color: var(--txt-dim); }
+.oc-count { font-size: 11px; color: var(--txt-dim); }
+
+/* ---- Audit-Timeline (Schritt 15) ---- */
+.timeline { display: flex; flex-direction: column; }
+.tl-item {
+  display: grid; grid-template-columns: 150px 150px 140px 1fr; gap: 10px;
+  padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 12px;
+}
+.tl-item:last-child { border-bottom: 0; }
+.tl-head { font-weight: 600; color: var(--txt); }
+.tl-time { color: var(--muted); white-space: nowrap; }
+.tl-type { font-weight: 600; }
+.tl-actor { color: var(--txt-dim); }
+.tl-meta { color: var(--muted); }
+@media (max-width: 700px) { .tl-item { grid-template-columns: 1fr; gap: 2px; } }
+
+/* ---- Modal ---- */
+.modal-backdrop {
+  position: fixed; inset: 0; background: var(--backdrop); backdrop-filter: blur(3px);
+  display: grid; place-items: center; z-index: 50;
+}
+.modal {
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: 14px;
+  width: min(560px, 92vw); box-shadow: var(--shadow); overflow: hidden;
+}
+.modal-h { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; }
+.modal-h h3 { margin: 0; font-size: 16px; }
+.modal-b { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; max-height: 70vh; overflow: auto; }
+.modal-f { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 10px; }
+/* Eingabemaske: Gruppen und Spalten (maskLayout in app.js). */
+.mask-layout { display: flex; flex-direction: column; gap: 10px; }
+/* In der Aufgabenmaske liegt das Raster in einem ``form-grid`` mit automatischen
+   150-px-Spalten; ohne volle Breite landete die ganze Maske in einer schmalen
+   Zelle (Felder gequetscht, Vorschau im Designer breit). */
+.form-grid > .mask-layout { grid-column: 1 / -1; }
+.mask-cols { display: grid; gap: 10px 14px; }
+.mask-group { font-weight: 700; font-size: 13px; color: var(--txt); border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-top: 4px; }
+@media (max-width: 720px) {
+  .mask-cols { grid-template-columns: 1fr !important; }
+}
+/* Vorlagen-Galerie: wer macht was (newFromTemplate in app.js). */
+.tpl-roles { margin: 6px 0 0; padding-left: 16px; font-size: 12px; color: var(--txt-dim); text-align: left; }
+.tpl-roles li { margin: 2px 0; }
+.tpl-roles strong { color: var(--txt); font-weight: 600; }
+.multi-steps summary { cursor: pointer; color: var(--txt-dim); font-size: 13px; }
+/* Prozesskarte Soll/Ist (conformancePanel in app.js). */
+.graph g.obs-none { opacity: .45; }
+.graph g.obs-none rect { stroke-dasharray: 4 3; }
+.conf-picker { margin-left: auto; }
+.conf-facts { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 10px 0; font-size: 13px; color: var(--txt-dim); }
+.conf-facts .conf-warn { color: var(--amber); font-weight: 600; }
+.conf-raw { margin-top: 10px; font-size: 13px; }
+.conf-raw summary { cursor: pointer; color: var(--txt-dim); }
+/* Webhook-Probelauf (renderWebhookPreview in app.js). */
+.wh-preview:empty { display: none; }
+.wh-preview-code {
+  margin: 8px 0 0; padding: 10px 12px; border-radius: 8px; max-height: 220px; overflow: auto;
+  background: var(--bg-elev2); border: 1px solid var(--line); color: var(--txt);
+  font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all;
+}
+/* Migrationsassistent (openMigrationAssistant in app.js). */
+.mig-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.mig-table th, .mig-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.mig-reason { color: var(--txt-dim); font-size: 12px; margin-top: 4px; line-height: 1.35; }
+.mig-values { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; background: var(--bg-elev2); }
+/* Segment-Filter (z. B. Instanzliste im Monitoring). */
+.seg-filter { display: inline-flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+.seg-btn {
+  cursor: pointer; font-size: 12px; font-weight: 600; padding: 4px 10px;
+  border-radius: 8px; border: 1px solid var(--line); background: var(--bg-elev); color: var(--txt-dim);
+}
+.seg-btn.active { color: var(--txt); border-color: var(--accent); background: var(--accent-soft); }
+.tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.tabs button { background: transparent; border: 0; color: var(--txt-dim); padding: 8px 12px; cursor: pointer; font-size: 13px; font-weight: 600; border-bottom: 2px solid transparent; }
+.tabs button.active { color: var(--txt); border-bottom-color: var(--accent); }
+.branch-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
+.branch-row > * { min-width: 0; }
+/* Drei Felder ohne Entfernen-Knopf: gleich breit, bei wenig Platz umbrechen.
+   Mit der ``auto``-Spalte bestimmte die laengste Rollenbezeichnung die Breite
+   und schob „Ziel-Rolle“ ueber den Dialogrand. */
+.branch-row.esc-row { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
+/* Auswahllisten und Eingaben in Feldern nie breiter als ihr Feld. */
+.field select, .field input, .field textarea { max-width: 100%; }
+
+/* ---- Toast ---- */
+.toast-root { position: fixed; right: 18px; bottom: calc(18px + var(--demo-banner-h, 0px)); display: flex; flex-direction: column; gap: 10px; z-index: 60; }
+/* Bei offenem Dialog oben statt unten: Unten rechts lag eine Ablehnung genau
+   ueber „Abbrechen“/„Speichern“ des Dialogs -- wer nach ihrem Ablauf dort
+   klickte, traf den Hintergrund. Der Dialogkopf traegt nur den Titel. */
+body:has(#modal-root .modal-backdrop) .toast-root { top: 18px; bottom: auto; }
+.toast {
+  background: var(--bg-elev2); border: 1px solid var(--line); border-left-width: 4px;
+  border-radius: 10px; padding: 12px 16px; font-size: 13px; box-shadow: var(--shadow);
+  max-width: 380px; animation: slidein .2s ease;
+}
+.toast.ok { border-left-color: var(--green); }
+.toast.err { border-left-color: var(--red); }
+.toast.info { border-left-color: var(--accent); }
+.toast .t-title { font-weight: 700; margin-bottom: 3px; }
+/* Schliessen-Knopf der stehenbleibenden Fehlermeldungen (toast() in app.js). */
+.toast .t-close {
+  float: right; margin: -4px -6px 0 8px; padding: 0 4px;
+  border: 0; background: transparent; color: var(--txt-dim);
+  font-size: 18px; line-height: 1; cursor: pointer;
+}
+.toast .t-close:hover { color: var(--txt); }
+.toast .t-list { margin: 4px 0 0; padding-left: 16px; color: var(--txt-dim); }
+@keyframes slidein { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ---- Login overlay ---- */
+.auth-overlay {
+  position: fixed; inset: 0; background: var(--bg); z-index: 100;
+  display: grid; place-items: center; padding: 24px;
+}
+.auth-card {
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: 16px;
+  /* Breite abzueglich des Overlay-Rands (2 x 24 px): ``94vw`` liess die Karte
+     bei ~390 px Fensterbreite rechts ueberstehen. */
+  width: min(380px, calc(100vw - 48px)); box-shadow: var(--shadow); padding: 28px 26px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.auth-card .auth-brand { display: flex; align-items: center; gap: 12px; }
+.auth-card .auth-brand .logo {
+  width: 40px; height: 40px; border-radius: 10px; background: var(--accent);
+  color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 15px;
+}
+.auth-card h2 { margin: 0; font-size: 18px; }
+.auth-card form { display: flex; flex-direction: column; gap: 12px; }
+.auth-card .auth-hint { font-size: 12px; color: var(--txt-dim); line-height: 1.5; }
+.auth-card .auth-err { font-size: 13px; color: var(--red); min-height: 1em; }
+.auth-card .auth-disclaimer { font-size: 11px; color: var(--txt-dim); line-height: 1.5; margin: 4px 0 0; }
+.side-foot .disclaimer-foot { font-size: 10px; opacity: .85; }
+.side-foot .app-version { font-size: 10px; opacity: .7; letter-spacing: .02em; }
+
+/* ---- Integration view ---- */
+.sub-h { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }
+.sub-h h3 { margin: 0; font-size: 13px; font-weight: 700; color: var(--txt-dim); text-transform: uppercase; letter-spacing: .04em; }
+.row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.check-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.check-row input { width: auto; }
+.adv-block { margin-top: 4px; }
+.adv-block summary { cursor: pointer; font-size: 12px; color: var(--txt-dim); font-weight: 600; }
+.code-block {
+  background: var(--bg-elev2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px; font-size: 12px; line-height: 1.5; max-height: 50vh; overflow: auto;
+  white-space: pre; margin: 0;
+}
+.ok-hint { color: var(--green); }
+.bad-hint { color: var(--red); }
+.check-inline { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--txt-dim); white-space: nowrap; }
+.check-row input[type="text"], .check-row select { flex: 1; min-width: 0; }
+
+/* ---- Prüfinstanz view (4-Quadranten-Cockpit) ---- */
+.quad-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.quad-cell { min-width: 0; max-height: 48vh; overflow: auto; }
+.quad-cell > .panel { margin: 0; }
+@media (max-width: 1100px) {
+  .quad-grid { grid-template-columns: 1fr; }
+  .quad-cell { max-height: none; }
+}
+.kpis.kpis-compact { grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+.kpis.kpis-compact .kpi { padding: 8px 10px; }
+.kpis.kpis-compact .kpi .value { font-size: 20px; }
+.id-card { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.id-row { display: grid; grid-template-columns: 100px 1fr; gap: 8px; font-size: 13px; }
+.id-row .id-label { color: var(--txt-dim); }
+.id-row .id-value { font-weight: 600; }
+
+/* ---- Modellieren: Datenherkunft-Ueberlagerung (gestrichelt) ---- */
+.gprov {
+  stroke: var(--amber); stroke-width: 1.6px; fill: none;
+  stroke-dasharray: 5 4; opacity: .9; pointer-events: none;
+}
+/* Rücksprung-Bogen einer Schleife (K6): gehört zum Kontrollfluss (gleiche
+   Farbfamilie wie .gedge), ist aber als abgeleitete – nie gespeicherte –
+   Kante leicht abgesetzt (feiner + halbtransparent). */
+.gloop {
+  stroke: var(--gray); stroke-width: 1.4px; fill: none;
+  opacity: .75; pointer-events: none;
+}
+/* Beschriftung des Bogens und Iterationszähler unter dem Schleifenende (nur
+   Laufzeit-Sichten) teilen sich dieselbe Darstellung. */
+.gloop-txt, .gloop-iter {
+  font-size: 9px; fill: var(--muted); pointer-events: none;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+}
+/* Kontur-Halo in Hintergrundfarbe, damit die Beschriftung auch ueber
+   Kontrollflusskanten/Knoten und bei dicht gestaffelten Boegen lesbar bleibt. */
+.gprov-txt {
+  font-size: 9px; fill: var(--amber); pointer-events: none;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+}
+
+/* ---- Modellieren: Inspektor-Bindungen (Daten / BZR am Schritt) ---- */
+.insp-h { font-size: 12px; font-weight: 700; color: var(--txt-dim); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
+.insp-binds { display: flex; flex-direction: column; gap: 4px; }
+.insp-bind { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.insp-bind-name { font-weight: 600; }
+.insp-bind-mode { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 6px; letter-spacing: .3px; }
+.insp-bind-mode.mode-READ { background: var(--accent-soft); color: var(--accent-txt); }
+.insp-bind-mode.mode-WRITE { background: var(--amber-soft); color: var(--amber); }
+.insp-bind-mode.mode-READ_WRITE { background: var(--green-soft); color: var(--green); }
+.insp-bind-del {
+  border: 0; background: transparent; color: var(--txt-dim); cursor: pointer;
+  font-size: 12px; padding: 0 2px; line-height: 1;
+}
+.insp-bind-del:hover { color: var(--red); }
+
+/* ---- Modellieren im Kontrollfluss: Schritt-Karte ----
+   Die Karte liegt als Overlay UEBER dem Canvas (nicht als Grid-Nachbar), damit
+   die Canvas-Groesse beim Aus-/Abwaehlen konstant bleibt und das Einpassen
+   nicht bei jeder Auswahl neu rechnen muss. Alle Farben ueber die Variablen --
+   sonst bricht die helle Variante. */
+.model-canvas .canvas-wrap { height: clamp(420px, 66vh, 900px); }
+/* Bezugsrahmen der Karte: ohne `position: relative` haengt sie sich an den
+   naechsten positionierten Vorfahren -- im Zweifel das Fenster -- und liegt
+   dann irgendwo auf der Seite statt ueber dem Kontrollfluss. */
+.model-canvas .graph-body { position: relative; }
+/* Der Einpassen-Knopf sitzt oben rechts IM Canvas, also genau dort, wo die
+   Karte einfaehrt. Er weicht ihr aus, solange sie sichtbar ist. */
+.model-canvas .graph-body:has(.step-card) .canvas-fit { right: 384px; }
+/* Mit offener Schritt-Karte ist der Canvas schmal; der Bedienhinweis laege
+   unter Knopf und Karte -- die Karte erklaert die Bedienung ohnehin. */
+.model-canvas .graph-body:has(.step-card) .canvas-hint { display: none; }
+.step-card {
+  position: absolute; right: 12px; top: 12px; bottom: 12px; width: 360px; z-index: 4;
+  display: flex; flex-direction: column;
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.step-card-h {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border-bottom: 1px solid var(--line); background: var(--bg-elev2);
+}
+.step-card-h input[type=text] { flex: 1; min-width: 0; font-size: 13px; }
+.step-card-name { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-card-x {
+  border: 0; background: transparent; color: var(--txt-dim); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 2px 4px;
+}
+.step-card-x:hover { color: var(--txt); }
+.step-card-b { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+/* Freigabe-Ampel am Schritt: reine Anzeige abgeleiteter Kern-Aussagen. */
+.step-dot { width: 10px; height: 10px; border-radius: 999px; flex: 0 0 auto; }
+.step-dot-green { background: var(--green); }
+.step-dot-amber { background: var(--amber); }
+.step-dot-red { background: var(--red); }
+
+.card-sec { border-bottom: 1px solid var(--line); }
+.card-sec:last-child { border-bottom: 0; }
+.card-sec-h {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 9px 12px; border: 0; background: transparent; color: var(--txt);
+  font: inherit; font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .5px; cursor: pointer; text-align: left;
+}
+.card-sec-h:hover { background: var(--bg-elev2); }
+.card-sec-h.open { color: var(--txt); }
+.card-sec-caret { color: var(--txt-dim); font-size: 10px; }
+.card-sec-sum {
+  font-size: 11px; font-weight: 700; letter-spacing: 0;
+  background: var(--accent-soft); color: var(--accent-txt);
+  border-radius: 999px; padding: 1px 7px;
+}
+.card-sec-b { padding: 0 12px 14px; }
+.card-note { padding: 12px; font-size: 12px; color: var(--txt-dim); }
+.card-hint { font-size: 12px; color: var(--txt-dim); line-height: 1.45; }
+/* Bindungszeile: der Name ist klickbar (Herkunft hervorheben), sieht aber wie
+   Text aus -- ein Knopf-Rahmen wuerde die Liste unruhig machen. */
+.link-like {
+  border: 0; background: transparent; color: inherit; font: inherit;
+  padding: 0; cursor: pointer; text-align: left;
+}
+.link-like:hover { color: var(--amber); }
+
+/* Leerer Prozess: Einstieg mitten auf der Canvas statt nur ein kleines „+“. */
+.canvas-empty {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 3; max-width: 380px; text-align: center;
+  display: flex; flex-direction: column; gap: 8px; align-items: center;
+  padding: 20px 24px; border-radius: var(--radius);
+  background: var(--bg-elev); border: 1px dashed var(--line);
+}
+.canvas-empty-t { font-size: 15px; font-weight: 700; }
+.canvas-empty-b { font-size: 12px; color: var(--txt-dim); line-height: 1.45; }
+
+/* Statusleiste unter dem Kontrollfluss (Ampel + modellweite Befunde + Hinweis). */
+.model-status {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 16px; border-top: 1px solid var(--line); font-size: 12px;
+}
+.model-status-txt { color: var(--txt-dim); flex: 1 1 320px; line-height: 1.45; }
+/* Tastaturwege der Karten-Sicht -- bewusst zurueckhaltend, aber sichtbar. */
+.model-status-key {
+  color: var(--txt-dim); opacity: .75; white-space: nowrap;
+  border: 1px solid var(--line); border-radius: 8px; padding: 3px 8px;
+}
+.model-status-find {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--red-soft); color: var(--red);
+  border-radius: 8px; padding: 3px 8px;
+}
+
+/* Auswahl-/Bindungsliste in den Dialogen „Datenelement binden"/„Bearbeiter". */
+.pick { display: flex; flex-direction: column; gap: 8px; }
+.pick-list {
+  max-height: 40vh; overflow-y: auto; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--bg);
+}
+.pick-group {
+  font-size: 11px; font-weight: 700; color: var(--txt-dim); text-transform: uppercase;
+  letter-spacing: .4px; padding: 8px 10px 4px;
+}
+.pick-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--txt); font: inherit; font-size: 13px; cursor: pointer; text-align: left;
+}
+.pick-row:hover { background: var(--bg-elev2); }
+.pick-row.active { background: var(--accent-soft); color: var(--accent-txt); }
+.pick-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-sub { font-size: 11px; color: var(--txt-dim); margin-left: auto; white-space: nowrap; }
+.pick-row.active .pick-sub { color: inherit; opacity: .8; }
+
+/* ---- Modellieren: rechte Bindungs-Palette (Tabs + klickbare Listenzeilen) ---- */
+.pal-panel { margin-top: 14px; }
+.pal-tabs { display: flex; gap: 6px; padding: 10px 14px 0; }
+.pal-tab {
+  border: 1px solid var(--line); border-bottom: 0;
+  background: var(--bg-elev2); color: var(--txt-dim); cursor: pointer;
+  padding: 6px 12px; border-radius: 8px 8px 0 0; font-size: 13px; font-weight: 600;
+}
+.pal-tab.active { background: var(--bg-elev); color: var(--txt); border-color: var(--accent); }
+.pal-body { display: flex; flex-direction: column; gap: 14px; max-height: 46vh; overflow: auto; }
+.pal-group + .pal-group { margin-top: 4px; }
+.pal-group-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 700; color: var(--txt-dim); margin-bottom: 8px; }
+.pal-chips { display: flex; flex-direction: column; gap: 6px; }
+.pal-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg-elev2); font-size: 13px; cursor: default;
+}
+.pal-chip.active { border-color: var(--amber); background: var(--amber-soft); }
+.pal-chip-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal-chip-sub { font-size: 11px; color: var(--txt-dim); white-space: nowrap; }
+.pal-chip-act {
+  border: 0; background: transparent; color: var(--txt-dim); cursor: pointer;
+  font-size: 13px; padding: 0 4px; line-height: 1;
+}
+.pal-chip-act:hover { color: var(--txt); }
+/* "An Schritt binden" (⊕) */
+.pal-bind {
+  border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent-txt);
+  cursor: pointer; font-size: 14px; line-height: 1; border-radius: 8px;
+  padding: 2px 7px; font-weight: 700;
+}
+.pal-bind:hover { filter: brightness(1.25); }
+.pal-bind.disabled { border-color: var(--line); background: transparent; color: var(--txt-dim); cursor: not-allowed; }
+
+/* Licensing (agent page): quota bar + staged renewal banner. Colours strictly
+   via CSS variables so the light theme keeps working. Hidden by
+   default -- these only render once the backend reports enforced licensing. */
+.lic-bar {
+  height: 10px; border-radius: 999px; background: var(--gray-soft);
+  overflow: hidden; border: 1px solid var(--line);
+}
+.lic-bar-fill {
+  height: 100%; background: var(--accent); border-radius: 999px;
+  transition: width .2s ease;
+}
+.lic-banner {
+  margin-top: 10px; padding: 8px 12px; border-radius: 10px;
+  border: 1px solid var(--amber); background: var(--amber-soft);
+  color: var(--amber); font-size: 13px;
+}
+.lic-banner.urgent { border-color: var(--red); background: var(--red-soft); color: var(--red); }
+
+/* Prozessvorlagen-Galerie (Template-Auswahl beim Anlegen eines Schemas).
+   Rein visuell -- alle Farben über die CSS-Variablen, damit die helle Variante
+   trägt. */
+.tpl-gallery {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px; max-height: 60vh; overflow-y: auto;
+}
+/* Eigene Vorlage: Karte plus Loeschen-Knopf darunter. */
+.tpl-item { display: flex; flex-direction: column; gap: 6px; }
+.tpl-item .tpl-del { align-self: flex-end; }
+.tpl-card {
+  display: flex; flex-direction: column; gap: 6px; text-align: left;
+  padding: 12px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg-elev2); color: var(--txt);
+}
+.tpl-card:hover { border-color: var(--accent); }
+.tpl-card.selected { border-color: var(--accent); background: var(--accent-soft); }
+.tpl-card-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tpl-cat { font-size: 11px; font-weight: 600; color: var(--txt-dim); }
+.tpl-desc { font-size: 12px; color: var(--txt-dim); line-height: 1.35; }
+
+/* ---- Demo-Banner (nur im öffentlichen Demo-Modus, PROCWORKS_DEMO_MODE) ---- */
+.demo-banner {
+  /* Unter Dialogen (50) und Toasts (60): der Banner darf nie eine Rueckfrage
+     verdecken. Die App macht ihm Platz (--demo-banner-h), er liegt also nicht
+     ueber Bedienelementen. */
+  position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 45;
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border-radius: 12px;
+  background: var(--bg-elev2); border: 1px solid var(--line);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
+  font-size: 13px; color: var(--txt);
+}
+.demo-banner-main { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; flex: 1; }
+.demo-badge {
+  font-size: 11px; font-weight: 700; letter-spacing: .06em;
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent-txt);
+}
+.demo-switch-wrap { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.demo-switch-label { color: var(--txt-dim); }
+.demo-switch {
+  cursor: pointer; font-size: 12px; font-weight: 600;
+  padding: 4px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg-elev); color: var(--txt);
+  transition: .15s;
+}
+.demo-switch:hover { border-color: var(--accent); color: var(--accent); }
+.demo-pw { color: var(--txt-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.demo-banner-close {
+  cursor: pointer; border: none; background: transparent; color: var(--txt-dim);
+  font-size: 20px; line-height: 1; padding: 0 4px; flex: none;
+}
+.demo-banner-close:hover { color: var(--txt); }
+/* Eingeklappt: kleiner Knopf unten links statt der vollen Leiste. */
+.demo-banner.demo-banner-collapsed {
+  right: auto; padding: 6px 12px; gap: 8px; cursor: pointer; font: inherit;
+  font-size: 12px; font-weight: 600;
+}
+.demo-banner.demo-banner-collapsed:hover { border-color: var(--accent); }
+.demo-banner-actions { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+.demo-end {
+  cursor: pointer; font-size: 12px; font-weight: 700;
+  padding: 5px 12px; border-radius: 8px;
+  border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent-txt);
+  transition: .15s;
+}
+.demo-end:hover { filter: brightness(1.08); }
+
+/* Post-demo survey (rendered inside the standard modal) */
+.survey { display: flex; flex-direction: column; gap: 16px; }
+.survey-field { display: flex; flex-direction: column; gap: 6px; }
+.survey-q { font-weight: 600; color: var(--txt); font-size: 13px; line-height: 1.35; }
+.survey-scale { display: flex; gap: 6px; }
+.survey-scale-opt {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+  cursor: pointer; padding: 6px 0; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg-elev); color: var(--txt-dim);
+  font-size: 13px; transition: .15s;
+}
+.survey-scale-opt:hover { border-color: var(--accent); color: var(--txt); }
+.survey-scale-opt input { accent-color: var(--accent); margin: 0; }
+
+/* ---------------------------------------------------------------------------
+   Mobile-Layout (Smartphone, <= 720px)
+   ---------------------------------------------------------------------------
+   Die feste Zwei-Spalten-Grundstruktur (Sidebar + Inhalt) wird zu einer
+   Einspaltensicht mit ausfahrbarer Menue-Schublade umgebaut. Leitgedanke:
+   „Meine Aufgaben" laesst sich bequem am Handy abarbeiten (Tabellen als
+   gestapelte Karten, grosse Tap-Ziele). Modellieren ist am Handy bewusst
+   zweitrangig – der Kontrollfluss-Graph bleibt nutzbar, wird aber nicht eigens
+   fuers Handy optimiert. Alle Farben weiterhin ausschliesslich ueber die
+   CSS-Variablen (siehe Dateikopf), damit die helle Variante traegt.
+   --------------------------------------------------------------------------- */
+@media (max-width: 720px) {
+  /* Grundlayout: eine Spalte, der Inhalt fuellt die volle Breite. */
+  .app { grid-template-columns: 1fr; }
+
+  /* Sidebar wird zur ausfahrbaren Schublade (off-canvas). Standard: links
+     ausserhalb des Bildschirms; `data-mobile-nav="open"` am <html> (app.js)
+     schiebt sie ein. */
+  .sidebar {
+    position: fixed; top: 0; left: 0; z-index: 60;
+    /* Hoehe wie die App am sichtbaren Viewport ausrichten (siehe `.app`), statt
+       per `bottom: 0` am *grossen* Viewport – sonst liegt die Fusszeile der
+       Schublade (Theme-Schalter, Abmelden) unerreichbar hinter der Safari-Leiste. */
+    height: 100vh; height: 100dvh;
+    width: min(84vw, 300px); overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+    box-shadow: var(--shadow);
+  }
+  :root[data-mobile-nav="open"] .sidebar { transform: translateX(0); }
+
+  /* Die Schublade zeigt am Handy immer das volle Menue – der schmale
+     Menue-Modus (data-sidebar="collapsed") wird hier neutralisiert. */
+  :root[data-sidebar="collapsed"] .app { grid-template-columns: 1fr; }
+  :root[data-sidebar="collapsed"] .sidebar { padding: 18px 14px; align-items: stretch; }
+  :root[data-sidebar="collapsed"] .brand { flex-direction: row; gap: 10px; padding: 6px 8px 18px; }
+  :root[data-sidebar="collapsed"] .brand-text { display: block; }
+  :root[data-sidebar="collapsed"] .nav button { justify-content: flex-start; padding: 10px 12px; gap: 10px; }
+  :root[data-sidebar="collapsed"] .nav .lbl { display: inline; }
+  :root[data-sidebar="collapsed"] .side-foot { display: flex; }
+
+  /* Der Einklapp-Knopf ist am Handy sinnlos (die Schublade faehrt ganz ein/aus). */
+  .side-collapse { display: none; }
+
+  /* Abdunkelnder Hintergrund hinter der offenen Schublade; schliesst per Tipp. */
+  .nav-scrim {
+    display: block; position: fixed; inset: 0; z-index: 55;
+    background: var(--backdrop); opacity: 0; pointer-events: none;
+    transition: opacity .22s ease;
+  }
+  :root[data-mobile-nav="open"] .nav-scrim { opacity: 1; pointer-events: auto; }
+
+  /* Topbar: Hamburger + Titel in Zeile 1; die Modellauswahl umbricht in Zeile 2
+     und nimmt die volle Breite ein (statt weit rechts abgeschnitten zu sein). */
+  .topbar { flex-wrap: wrap; gap: 10px 12px; padding: 12px 16px; }
+  .topbar .sub { display: none; }          /* Beschreibungstext spart Platz */
+  .nav-burger { display: inline-grid; }    /* nur am Handy sichtbar */
+  #schema-picker { order: 10; flex: 1 0 100%; flex-wrap: wrap; }
+  #schema-picker select { flex: 1 1 100%; min-width: 0; width: 100%; }
+  /* Modellier-Aktionen (+ Neu / Aus Vorlage / BPMN-Import) sind am Handy
+     zweitrangig – ausblenden, damit die Prozessauswahl schlank bleibt. */
+  #schema-picker .btn { display: none; }
+
+  /* Inhalt: schmaleres Aussenmass, mehr Platz fuer die Aufgabenkarten. */
+  .content { padding: 16px 14px 48px; }
+
+  /* Eingabefelder mindestens 16px: mobile Safari zoomt beim Antippen eines
+     Feldes automatisch hinein, sobald dessen Schrift kleiner als 16px ist – und
+     zoomt danach *nicht* wieder heraus. Die Seite bleibt dann vergroessert und
+     seitlich verschoben stehen, was die gesamte Ansicht verzerrt wirken laesst.
+     Gilt fuer alle Felder inkl. der Sidebar-Fusszeile (API/Token) und der
+     Prozessauswahl. Nur mobil – der Desktop behaelt seine kompakte Optik. */
+  input[type=text], input[type=number], input[type=password], input[type=date],
+  input[type=datetime-local], select, textarea,
+  .api-field input, .picker select {
+    font-size: 16px;
+  }
+
+  /* Tabellen als gestapelte Karten. Jede Zeile wird zu einer Karte, die Zellen
+     stapeln sich; die (visuell entfernte) Kopfzeile wird je Zelle ueber
+     `data-label` (in app.js gesetzt) als vorangestellte Feldbeschriftung
+     ersetzt. So ist „Meine Aufgaben" ohne horizontales Scrollen lesbar.
+     ``.mig-table`` steht in einem Dialog (ausserhalb von ``.content``) und
+     bekommt dieselbe Kartenform. */
+  .content table, .content thead, .content tbody, .content tr, .content td,
+  .mig-table, .mig-table thead, .mig-table tbody, .mig-table tr, .mig-table td { display: block; width: 100%; }
+  .content thead, .mig-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .content tr, .mig-table tr {
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg-elev2); margin-bottom: 10px;
+  }
+  /* Zellen block-gestapelt: die Feldbeschriftung (data-label) steht als kleine
+     Zeile ueber dem Wert. Robust gegen lange Werte (z. B. Berechtigten-Listen),
+     die einfach umbrechen statt seitlich zu ueberlaufen. */
+  .content td, .mig-table td {
+    display: block; padding: 8px 12px; border-bottom: 1px solid var(--line);
+    overflow-wrap: anywhere;
+  }
+  .content tr td:last-child, .mig-table tr td:last-child { border-bottom: 0; }
+  .content td::before, .mig-table td::before {
+    content: attr(data-label); display: block; margin-bottom: 2px;
+    color: var(--txt-dim); font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: .4px;
+  }
+  /* Zellen ohne Ueberschrift (z. B. die Aktionsspalte mit „Erledigen") tragen
+     kein Label; ihr Knopf wird breit und gut tippbar. */
+  .content td:not([data-label])::before, .mig-table td:not([data-label])::before { content: none; }
+  .content td:not([data-label]) .btn { width: 100%; justify-content: center; }
+  /* Zeilen-Hervorhebung (Sprung aus dem Kontrollfluss) auf der Karte. */
+  .content tr.hl-row td:first-child { box-shadow: none; }
+  .content tr.hl-row { box-shadow: inset 3px 0 0 var(--accent); }
+
+  /* Schritt-Karte als Bodensheet: seitlich waere sie auf einem Telefon breiter
+     als der Kontrollfluss. Hoehe in `dvh` (nicht `vh`) -- auf iOS meint `vh`
+     die grosse Viewport-Hoehe, das Ende laege sonst hinter der Safari-Leiste.
+     app.js erkennt diese Darstellung an der Breite und setzt dann KEINE
+     seitliche Reserve fuer das Einpassen (siehe reserveCardWidth). */
+  .step-card {
+    left: 8px; right: 8px; top: auto; bottom: 8px; width: auto;
+    height: 55vh; height: 55dvh;
+  }
+  .model-canvas .canvas-wrap { height: clamp(360px, 60vh, 620px); }
+  /* Unten liegend verdeckt die Karte den Einpassen-Knopf nicht mehr. */
+  .model-canvas .graph-body:has(.step-card) .canvas-fit { right: 10px; }
+  /* Groessere Trefferflaeche fuer die Abschnittskoepfe am Telefon. */
+  .card-sec-h { padding: 12px; }
+  /* Ohne Tastatur ist der Tastenhinweis nur Ballast. */
+  .model-status-key { display: none; }
+  /* Am Telefon lag der Bedienhinweis ueber dem „◀“; Wischen erklaert sich. */
+  .canvas-hint { display: none; }
+}
+
+
+/* Z4: ρ-Verbrauchsbalken in Arbeitslisten.
+   Farben ausschließlich über die Themen-Variablen (helle Variante!). */
+.due-wrap { display: inline-flex; flex-direction: column; gap: 3px; }
+.rho-bar { display: block; width: 90px; height: 4px; border-radius: 2px;
+  background: var(--gray-soft); overflow: hidden; }
+.rho-fill { display: block; height: 100%; border-radius: 2px;
+  background: var(--green); }
+.rho-fill.rho-warning, .rho-fill.rho-at_risk { background: var(--amber); }
+.rho-fill.rho-overdue { background: var(--red); }
+.task-filter { margin-left: auto; }
+
+/* K4: Sync-Kanten (Warte-Beziehungen zwischen Parallelzweigen) – gestrichelt,
+   deutlich vom Kontrollfluss (durchgezogen) und der Datenherkunft (gepunktet)
+   unterschieden; Farben über die Themen-Variablen. */
+.gsyncedge { fill: none; stroke: var(--amber); stroke-width: 1.6;
+  stroke-dasharray: 7 4; opacity: 0.9; }
+
+/* Simulation: Abspiel-Animation (E6 Stufe B). Gedimmte Knoten treten zurueck,
+   der gerade abgeschlossene Schritt pulsiert in der Akzentfarbe; nach dem
+   Abspielen traegt kein Knoten mehr eine der beiden Klassen. */
+.gnode.sim-dim { opacity: 0.25; transition: opacity 0.3s ease; }
+.gnode.sim-current rect {
+  stroke: var(--accent);
+  stroke-width: 3;
+  animation: sim-pulse 0.7s ease-in-out infinite alternate;
+}
+@keyframes sim-pulse {
+  from { stroke-opacity: 1; }
+  to { stroke-opacity: 0.35; }
+}
+
+/* E2-Status-Overlay in der Prozesslandkarte: angehaltene Schritte tragen einen
+   gestrichelten Bernstein-Rand, gescheiterte einen kraeftigen roten -- der
+   Detailzustand ist damit im Prozessbild sichtbar, nicht erst in der Liste. */
+.gnode.d-suspended rect { stroke: var(--amber); stroke-width: 2; stroke-dasharray: 6 3; }
+.gnode.d-suspended .gstate { fill: var(--amber); }
+.gnode.d-failed rect { stroke: var(--red); stroke-width: 2.5; }
+.gnode.d-failed .gstate { fill: var(--red); }
+
+/* Passwort der Beispiel-Anmeldungen, einmal nach "Beispieldaten laden":
+   gut lesbar und mit einem Klick markierbar. */
+.example-password {
+  display: inline-block;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elev2);
+  color: var(--txt);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+  user-select: all;
+}
+
+/* Werte, die ein Schritt ohne Maske nur liest: kompakt als „Name: Wert“. */
+.read-values {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elev2);
+}
+.read-values dt { color: var(--txt-dim); }
+.read-values dd { margin: 0; color: var(--txt); font-weight: 600; }
+
+/* Rollenwechsel der Demo-Leiste auf dem Handy: eine Auswahlliste statt vieler
+   Knoepfe, damit die Leiste flach bleibt. */
+.demo-switch-select {
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-elev2);
+  color: var(--txt);
+  font-size: 13px;
+}

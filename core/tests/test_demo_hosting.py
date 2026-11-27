@@ -1,0 +1,632 @@
+# SPDX-License-Identifier: BUSL-1.1
+"""Tests for the Demo-Hosting boot conveniences (D0a boot seed, D0b SPA mount).
+
+Both are additive boundary features that must
+default to *off* and touch no correctness rule. See :func:`procworks.api._lifespan`
+and :func:`procworks.api._maybe_mount_web`.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from web_source import app_js_source
+
+import procworks.api as api
+from procworks.api import _env_truthy, _maybe_mount_web, app
+from procworks.auth import AuthError
+from procworks.auth_password import InMemoryCredentialStore, PasswordAuthBackend
+from procworks.demo import DEMO_AUTOLOGIN, DEMO_PASSWORD, DEMO_USERS, ORG_ID, SCHEMA_URLAUB
+from procworks.demo_o2c import O2C_USERS, SCHEMA_MAIN
+from procworks.demo_o2c import ORG_ID as O2C_ORG_ID
+from procworks.demo_o2c import _build_org as o2c_org
+
+#: Repo-root ``web/`` directory (core/tests -> core -> repo root -> web).
+WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+
+
+def _clear_stores() -> None:
+    """Wipe the module singletons so the boot seed sees an empty system."""
+    api._store.clear()
+    api._instances.clear()
+    api._org_store.clear()
+    api._audit.clear()
+    api._absence_store.clear()
+
+
+# --- D0a: env parsing -------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "on", " on "])
+def test_env_truthy_accepts_yes_spellings(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("PROCWORKS_X", value)
+    assert _env_truthy("PROCWORKS_X") is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "  "])
+def test_env_truthy_rejects_no_spellings(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("PROCWORKS_X", value)
+    assert _env_truthy("PROCWORKS_X") is False
+
+
+def test_env_truthy_unset_is_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PROCWORKS_X", raising=False)
+    assert _env_truthy("PROCWORKS_X") is False
+
+
+# --- D0a: boot seed via lifespan -------------------------------------------
+
+
+def test_boot_seed_populates_empty_stores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the env switch set, entering the lifespan seeds the demo cosmos."""
+    monkeypatch.setenv("PROCWORKS_LOAD_DEMO", "1")
+    _clear_stores()
+    assert _store_empty()
+
+    # Entering the TestClient context manager runs the app lifespan (startup).
+    with TestClient(app):
+        pass
+
+    schema_ids = api._store.list_ids()
+    assert schema_ids, "boot seed should have loaded the demo schemas"
+    # The shared demo org with its five agents must be present.
+    org_ids = api._org_store.list_ids()
+    assert org_ids
+    org = api._org_store.get(org_ids[0])
+    assert len(org.agents) == 5
+    # And the seeded active absence (deputy substitution visible out of the box).
+    assert api._absence_store.list_entries()
+
+    _clear_stores()
+
+
+def test_boot_seed_loads_both_cosmoses_together(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both switches set -> both data sets land. This is the shipped demo config.
+
+    Guards the ``was_empty`` trap in :func:`procworks.api._lifespan`: the empty
+    check must fall *once, before the first seed*, otherwise the second switch
+    would see the store the first one just filled and never run. Since the public
+    demo image now sets both, a regression here would silently ship a demo
+    without its flagship data set.
+    """
+    monkeypatch.setenv("PROCWORKS_LOAD_DEMO", "1")
+    monkeypatch.setenv("PROCWORKS_LOAD_O2C", "1")
+    _clear_stores()
+
+    with TestClient(app):
+        pass
+
+    schema_ids = set(api._store.list_ids())
+    assert SCHEMA_URLAUB in schema_ids, "base demo missing"
+    assert SCHEMA_MAIN in schema_ids, "Order-to-Cash main process missing"
+    # Two independent organisations coexist (own agents, own logins).
+    assert {ORG_ID, O2C_ORG_ID} <= set(api._org_store.list_ids())
+
+    _clear_stores()
+
+
+def test_boot_seed_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second lifespan entry must not re-seed (or raise) on a non-empty store."""
+    monkeypatch.setenv("PROCWORKS_LOAD_DEMO", "1")
+    _clear_stores()
+
+    with TestClient(app):
+        pass
+    count_after_first = len(api._store.list_ids())
+
+    # Re-enter: the guard sees a populated store and skips seeding entirely,
+    # so demo.load_demo (which assumes an empty system) is never called twice.
+    with TestClient(app):
+        pass
+    assert len(api._store.list_ids()) == count_after_first
+
+    _clear_stores()
+
+
+def test_boot_seed_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the env switch the lifespan seeds nothing."""
+    monkeypatch.delenv("PROCWORKS_LOAD_DEMO", raising=False)
+    _clear_stores()
+
+    with TestClient(app):
+        pass
+
+    assert _store_empty()
+
+
+def _store_empty() -> bool:
+    return not (api._store.list_ids() or api._org_store.list_ids() or api._instances.list_ids())
+
+
+# --- D0b: static SPA mount --------------------------------------------------
+
+
+def test_mount_web_serves_index_without_shadowing_api() -> None:
+    """A mounted web dir serves index.html at / but never shadows API routes."""
+    if not (WEB_DIR / "index.html").is_file():  # pragma: no cover - repo layout guard
+        pytest.skip("web/ SPA not present in this checkout")
+
+    probe = FastAPI()
+
+    @probe.get("/ping")
+    def _ping() -> dict[str, str]:
+        return {"pong": "1"}
+
+    assert _maybe_mount_web(probe, str(WEB_DIR)) is True
+
+    with TestClient(probe) as c:
+        # API route registered before the mount still wins (mount is last).
+        assert c.get("/ping").json() == {"pong": "1"}
+        # Root falls through to the static index.html.
+        root = c.get("/")
+        assert root.status_code == 200
+        assert "<" in root.text  # served HTML, not JSON
+
+
+def test_mount_web_noop_when_dir_missing() -> None:
+    """An unset/invalid web dir mounts nothing (off by default)."""
+    probe = FastAPI()
+    assert _maybe_mount_web(probe, "") is False
+    assert _maybe_mount_web(probe, "/definitely/not/a/real/dir/procworks") is False
+
+
+def test_mount_web_installs_api_prefix_shim() -> None:
+    """When the SPA is co-served, /api-prefixed calls reach the root-mounted API.
+
+    The single-container demo SPA computes its API base as origin+"/api"; the API
+    lives at root, so the shim must strip the prefix. Without it the co-served SPA
+    would 404 on every call (the bug that left the demo visitor unable to log in).
+    """
+    if not (WEB_DIR / "index.html").is_file():  # pragma: no cover - repo layout guard
+        pytest.skip("web/ SPA not present in this checkout")
+
+    probe = FastAPI()
+
+    @probe.get("/auth/config")
+    def _cfg() -> dict[str, bool]:
+        return {"ok": True}
+
+    assert _maybe_mount_web(probe, str(WEB_DIR)) is True
+
+    with TestClient(probe) as c:
+        # Root path still works ...
+        assert c.get("/auth/config").json() == {"ok": True}
+        # ... and the SPA's /api-prefixed call reaches the very same route.
+        assert c.get("/api/auth/config").json() == {"ok": True}
+
+
+def test_api_prefix_shim_absent_without_web_mount() -> None:
+    """No SPA co-served -> no shim: /api stays unknown (regular deployment)."""
+    probe = FastAPI()
+
+    @probe.get("/auth/config")
+    def _cfg() -> dict[str, bool]:
+        return {"ok": True}
+
+    with TestClient(probe) as c:
+        assert c.get("/auth/config").json() == {"ok": True}
+        assert c.get("/api/auth/config").status_code == 404
+
+
+# --- Demo login: /auth/config advertises the seeded logins in demo mode -----
+
+
+def _with_password_backend() -> PasswordAuthBackend:
+    """Swap the module auth backend to a fresh password backend; caller restores."""
+    backend = PasswordAuthBackend(InMemoryCredentialStore())
+    api._auth_backend = backend
+    return backend
+
+
+def test_auth_config_exposes_demo_logins_in_demo_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Password mode + PROCWORKS_DEMO_MODE -> /auth/config advertises the demo
+    logins, their shared password and the auto-login target, so the SPA can log
+    a fresh visitor in without guessing credentials."""
+    monkeypatch.setenv("PROCWORKS_DEMO_MODE", "1")
+    original = api._auth_backend
+    _with_password_backend()
+    try:
+        cfg = TestClient(app).get("/auth/config").json()
+    finally:
+        api._auth_backend = original
+
+    assert cfg["mode"] == "password"
+    assert cfg["demo"] is True
+    assert cfg["demo_password"] == DEMO_PASSWORD
+    assert cfg["demo_autologin"] == DEMO_AUTOLOGIN
+    logins = {u["login"] for u in cfg["demo_logins"]}
+    assert {login for login, *_ in DEMO_USERS} == logins
+    # The auto-login target must be one of the advertised logins and a modeler.
+    autol0 = next(u for u in cfg["demo_logins"] if u["login"] == DEMO_AUTOLOGIN)
+    assert autol0["role"] == "modeler"
+
+
+def test_auth_config_exposes_feedback_url_in_demo_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PROCWORKS_DEMO_FEEDBACK_URL surfaces on /auth/config so the SPA can POST
+    the post-demo survey to the broker; absent -> the SPA shows no survey."""
+    monkeypatch.setenv("PROCWORKS_DEMO_MODE", "1")
+    monkeypatch.setenv("PROCWORKS_DEMO_FEEDBACK_URL", "https://broker.example/feedback")
+    original = api._auth_backend
+    _with_password_backend()
+    try:
+        cfg = TestClient(app).get("/auth/config").json()
+    finally:
+        api._auth_backend = original
+
+    assert cfg["demo"] is True
+    assert cfg["demo_feedback_url"] == "https://broker.example/feedback"
+
+
+def test_auth_config_hides_demo_fields_without_demo_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Password mode WITHOUT the demo switch must not leak any demo credentials."""
+    monkeypatch.delenv("PROCWORKS_DEMO_MODE", raising=False)
+    original = api._auth_backend
+    _with_password_backend()
+    try:
+        cfg = TestClient(app).get("/auth/config").json()
+    finally:
+        api._auth_backend = original
+
+    assert cfg["mode"] == "password"
+    assert cfg["demo"] is False
+    assert cfg["demo_password"] is None
+    assert cfg["demo_autologin"] is None
+    assert cfg["demo_logins"] == []
+    assert cfg["demo_feedback_url"] is None
+
+
+def test_auth_config_no_demo_fields_in_open_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with the demo switch on, the *open* backend never advertises logins
+    (there are none to advertise; demo login is a password-mode convenience)."""
+    monkeypatch.setenv("PROCWORKS_DEMO_MODE", "1")
+    # Default module backend is the open one (no swap).
+    cfg = TestClient(app).get("/auth/config").json()
+    assert cfg["mode"] != "password"
+    assert cfg["demo"] is False
+    assert cfg["demo_password"] is None
+
+
+# --- Demo login: the Order-to-Cash cosmos is advertised only when seeded -----
+
+
+def _demo_config(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Fetch /auth/config through a fresh password backend in demo mode."""
+    monkeypatch.setenv("PROCWORKS_DEMO_MODE", "1")
+    original = api._auth_backend
+    _with_password_backend()
+    try:
+        result: dict[str, object] = TestClient(app).get("/auth/config").json()
+        return result
+    finally:
+        api._auth_backend = original
+
+
+def test_auth_config_omits_o2c_logins_without_the_load_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``PROCWORKS_LOAD_O2C`` the Order-to-Cash logins are NOT advertised.
+
+    They would not have been seeded, so offering them would hand a visitor
+    credentials that cannot work. Advertising and seeding hang off one switch.
+    """
+    monkeypatch.delenv("PROCWORKS_LOAD_O2C", raising=False)
+    cfg = _demo_config(monkeypatch)
+
+    logins = {u["login"] for u in cfg["demo_logins"]}  # type: ignore[union-attr]
+    assert {login for login, *_ in DEMO_USERS} == logins
+    assert not logins.intersection({login for login, *_ in O2C_USERS})
+
+
+def test_auth_config_adds_o2c_logins_when_that_cosmos_is_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``PROCWORKS_LOAD_O2C`` both cosmoses' logins are offered together.
+
+    This is what a visitor of the public demo gets: the lean base processes *and*
+    the whole Order-to-Cash value stream, switchable per role.
+    """
+    monkeypatch.setenv("PROCWORKS_LOAD_O2C", "1")
+    cfg = _demo_config(monkeypatch)
+
+    logins = {u["login"] for u in cfg["demo_logins"]}  # type: ignore[union-attr]
+    assert {login for login, *_ in DEMO_USERS} <= logins
+    assert {login for login, *_ in O2C_USERS} <= logins
+    # The auto-login target stays the modeller of the base cosmos.
+    assert cfg["demo_autologin"] == DEMO_AUTOLOGIN
+
+
+def test_auth_config_labels_o2c_logins_with_their_business_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch box shows the role *in the process*, not the RBAC role.
+
+    Every Order-to-Cash login is technically an ``operator``; labelling them that
+    way would read "Bearbeiter" eight times and help nobody. The label therefore
+    comes from the seeded organisation -- and the all-roles persona (Sina
+    Springer, the one-login walkthrough) collapses to a short hint instead of
+    listing six role names.
+    """
+    _clear_stores()
+    api._org_store.put(o2c_org())
+    monkeypatch.setenv("PROCWORKS_LOAD_O2C", "1")
+    try:
+        cfg = _demo_config(monkeypatch)
+    finally:
+        _clear_stores()
+
+    by_login = {u["login"]: u["role"] for u in cfg["demo_logins"]}  # type: ignore[union-attr]
+    assert by_login["bianca.buch"] == "Debitorenbuchhaltung"
+    assert by_login["lars.lange"] == "Lager/Versand"       # exactly two roles -> joined
+    assert by_login["sina.springer"] == "alle Rollen"      # six roles -> collapsed
+    # The base cosmos keeps its RBAC labels (unchanged behaviour).
+    assert by_login[DEMO_AUTOLOGIN] == "modeler"
+
+
+def test_auth_config_falls_back_to_rbac_role_without_the_org(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No seeded organisation -> the label degrades to the RBAC role, never fails.
+
+    The label is a convenience, not a correctness input: an unresolvable
+    organisation must not break the public config endpoint.
+    """
+    _clear_stores()
+    monkeypatch.setenv("PROCWORKS_LOAD_O2C", "1")
+    cfg = _demo_config(monkeypatch)
+
+    by_login = {u["login"]: u["role"] for u in cfg["demo_logins"]}  # type: ignore[union-attr]
+    assert by_login["bianca.buch"] == "operator"
+
+
+# --- The demo image must seed what /auth/config advertises -------------------
+
+
+def test_demo_image_seeds_both_cosmoses() -> None:
+    """Guard: the public demo image sets BOTH load switches.
+
+    ``/auth/config`` advertises the Order-to-Cash logins whenever
+    ``PROCWORKS_LOAD_O2C`` is set, so image and endpoint must agree -- otherwise a
+    visitor is offered a role switch that cannot log in. Exactly this drifted once:
+    the Order-to-Cash cosmos shipped in v1.10.0 while the demo image kept seeding
+    only the base data, leaving the flagship data set unreachable in the very
+    place prospects click (loading it needs the admin role, which the demo has no
+    login for).
+    """
+    path = Path(__file__).resolve().parents[2] / "deploy" / "demo" / "Dockerfile"
+    if not path.exists():
+        # deploy/demo/ is internal demo operations and not mirrored to the
+        # public release repo; there this guard has nothing to check.
+        pytest.skip("deploy/demo/ is not part of this checkout")
+    dockerfile = path.read_text(encoding="utf-8")
+    assert "PROCWORKS_LOAD_DEMO=1" in dockerfile
+    assert "PROCWORKS_LOAD_O2C=1" in dockerfile
+
+
+def test_demo_image_has_the_secret_the_webhook_dialog_suggests() -> None:
+    """Die zugesagte Signatur muss in der Demo auch zu sehen sein.
+
+    Der Probelauf signiert nur, wenn die angegebene Secret-Referenz auf dem
+    Server gesetzt ist. In der Demo war keine gesetzt: Wer die vom Dialog
+    vorgeschlagene Referenz eintippte, las „Nicht signiert" -- und die auf der
+    Website beworbene Signatur war nirgends belegbar. Der Wert selbst ist bedeutungslos, die Demo
+    stellt nichts zu.
+    """
+
+    path = Path(__file__).resolve().parents[2] / "deploy" / "demo" / "Dockerfile"
+    if not path.exists():
+        pytest.skip("deploy/demo/ is not part of this checkout")
+    dockerfile = path.read_text(encoding="utf-8")
+    app_js = app_js_source()
+
+    assert "WEBHOOK_SECRET=" in dockerfile
+    # ... und der Dialog schlaegt genau diesen Namen vor.
+    assert "z. B. WEBHOOK_SECRET (optional)" in app_js
+    # Die Egress-Sperre bleibt: signiert wird ein Beispielrumpf, gesendet nichts.
+    assert "PROCWORKS_EGRESS_DENY=1" in dockerfile
+
+
+def test_full_stack_compose_passes_the_seed_switches_through_defaulting_to_off() -> None:
+    """Guard: the self-hosted stack can seed example data without editing files.
+
+    A fresh ``docker compose ... down -v && up`` leaves an *empty* system: the
+    demo data lives behind the admin view, so a live presentation would begin
+    with a login, a forced password change and a few clicks before there is
+    anything to show. Passing the two boot switches through fixes that with one
+    prefixed command -- but the customer default must stay **off**, hence the
+    empty fallback (``:-``) rather than a hard-coded ``1``: an evaluator who
+    starts the stack plainly still gets a clean system, and the switches only
+    fire while no process is stored.
+    """
+    compose = (
+        Path(__file__).resolve().parents[2] / "deploy" / "docker-compose.full.yml"
+    ).read_text(encoding="utf-8")
+    for var in ("PROCWORKS_LOAD_DEMO", "PROCWORKS_LOAD_O2C"):
+        assert f'{var}: "${{{var}:-}}"' in compose, f"{var} is not passed through"
+        assert f"{var}: 1" not in compose, f"{var} must not default to on"
+
+
+def test_full_stack_compose_passes_mail_and_machine_token_settings_through() -> None:
+    """SMTP and machine tokens are configurable without editing files.
+
+    The admin view told customers to set ``PROCWORKS_SMTP_HOST``/``..._MAIL_FROM``,
+    but the Compose file never handed any of it to the API container. Every
+    variable now comes through with a harmless default (empty = off, port 587,
+    TLS on), so ``deploy/.env`` is enough.
+    """
+    compose = (
+        Path(__file__).resolve().parents[2] / "deploy" / "docker-compose.full.yml"
+    ).read_text(encoding="utf-8")
+    expected = {
+        "PROCWORKS_SMTP_HOST": "", "PROCWORKS_SMTP_PORT": "587", "PROCWORKS_SMTP_USER": "",
+        "PROCWORKS_SMTP_PASSWORD": "", "PROCWORKS_SMTP_TLS": "1", "PROCWORKS_MAIL_FROM": "",
+        "PROCWORKS_TOKENS_JSON": "",
+    }
+    for var, default in expected.items():
+        assert f'{var}: "${{{var}:-{default}}}"' in compose, f"{var} is not passed through"
+
+
+def test_co_served_spa_carries_csp_but_the_api_and_swagger_do_not() -> None:
+    """The SPA gets CSP and X-Frame-Options, also in the demo container.
+
+    Behind Caddy the Caddyfile sets them; the single-container demo serves the
+    SPA itself, so ``_SpaSecurityHeaders`` does. API calls and Swagger (CDN
+    scripts) stay without the CSP, or the API docs would break.
+    """
+    if not (WEB_DIR / "index.html").is_file():  # pragma: no cover - repo layout guard
+        pytest.skip("web/ SPA not present in this checkout")
+    from procworks.api import SPA_SECURITY_HEADERS
+
+    probe = FastAPI()
+
+    @probe.get("/auth/config")
+    def _cfg() -> dict[str, bool]:
+        return {"ok": True}
+
+    assert _maybe_mount_web(probe, str(WEB_DIR)) is True
+
+    with TestClient(probe) as c:
+        page = c.get("/")
+        api = c.get("/api/auth/config")
+        docs = c.get("/docs")
+
+    for name, value in SPA_SECURITY_HEADERS.items():
+        assert page.headers[name] == value
+    assert "content-security-policy" not in api.headers
+    assert "content-security-policy" not in docs.headers
+
+
+def test_spa_headers_match_the_caddyfile() -> None:
+    """One CSP for both ways the SPA is served (Caddy and demo container)."""
+    from procworks.api import SPA_SECURITY_HEADERS
+
+    caddyfile = (Path(__file__).resolve().parents[2] / "deploy" / "Caddyfile").read_text()
+    spa_block = caddyfile.split("handle {", 1)[1]
+    csp = SPA_SECURITY_HEADERS["Content-Security-Policy"]
+    assert f'Content-Security-Policy "{csp}"' in spa_block
+    assert "X-Frame-Options DENY" in spa_block
+    assert "frame-ancestors 'none'" in csp and "script-src 'self'" in csp
+    # Only in the SPA block, never in the global one: /api/docs (Swagger) loads
+    # CDN scripts and would break.
+    assert caddyfile.count("Content-Security-Policy") == 1
+
+
+def test_co_served_spa_scripts_are_revalidated_on_every_load() -> None:
+    """Every SPA file carries ``Cache-Control: no-cache``; API answers do not.
+
+    The client is several scripts that must come from one version. Without a
+    revalidation rule a browser may keep some of them after an update and mix
+    old and new files -- a ``ReferenceError`` at load time. The API itself must
+    stay untouched (its own caching is not the SPA's concern).
+    """
+    if not (WEB_DIR / "index.html").is_file():  # pragma: no cover - repo layout guard
+        pytest.skip("web/ SPA not present in this checkout")
+
+    probe = FastAPI()
+
+    @probe.get("/auth/config")
+    def _cfg() -> dict[str, bool]:
+        return {"ok": True}
+
+    assert _maybe_mount_web(probe, str(WEB_DIR)) is True
+
+    with TestClient(probe) as c:
+        spa = [c.get(p) for p in ("/", "/app.js", "/js/core.js", "/styles.css")]
+        api = c.get("/api/auth/config")
+
+    for response in spa:
+        assert response.status_code == 200, response.url
+        assert response.headers["cache-control"] == "no-cache", response.url
+    assert api.status_code == 200
+    assert "cache-control" not in api.headers
+
+
+def test_caddyfile_revalidates_the_spa_but_not_the_api() -> None:
+    """Behind Caddy the same rule: ``no-cache`` in the SPA block only."""
+    from procworks.api import SPA_SECURITY_HEADERS
+
+    caddyfile = (Path(__file__).resolve().parents[2] / "deploy" / "Caddyfile").read_text()
+    # Only the SPA ``handle { ... }`` block (it closes with a tab-indented
+    # brace); the global ``header`` block after it also reaches /api/*.
+    spa_block = caddyfile.split("\thandle {", 1)[1].split("\n\t}\n", 1)[0]
+    assert "file_server" in spa_block  # really the SPA block
+    assert SPA_SECURITY_HEADERS["Cache-Control"] == "no-cache"
+    assert 'Cache-Control "no-cache"' in spa_block
+    assert caddyfile.count('Cache-Control "') == 1
+
+
+def test_full_stack_uses_the_released_images_of_this_version() -> None:
+    """Compose uses the Trivy-scanned ghcr images instead of building API and
+    web from source, so "update via container image" needs no git pull +
+    rebuild. The stack names the release images, defaulting to the version
+    of this checkout -- which must move with every release, hence this guard.
+    """
+    import tomllib
+
+    root = Path(__file__).resolve().parents[2]
+    compose = (root / "deploy" / "docker-compose.full.yml").read_text(encoding="utf-8")
+    version = tomllib.loads((root / "core" / "pyproject.toml").read_text())["project"]["version"]
+    for image in ("procworks-api", "procworks-web"):
+        expected = f"image: ghcr.io/tobiashaecker/{image}:${{PROCWORKS_VERSION:-{version}}}"
+        assert expected in compose, (
+            f"{image}: Compose-Standardversion passt nicht zu pyproject ({version})"
+        )
+    # The backup index names the release that wrote the dump.
+    assert f'PROCWORKS_VERSION: "${{PROCWORKS_VERSION:-{version}}}"' in compose
+
+
+# --- example logins carry the public password only in the public demo -------
+
+
+def test_boot_seed_in_demo_mode_keeps_the_published_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public demo advertises ``demo-procworks`` -- its logins must accept it."""
+    monkeypatch.setenv("PROCWORKS_LOAD_DEMO", "1")
+    monkeypatch.setenv("PROCWORKS_DEMO_MODE", "1")
+    original = api._auth_backend
+    backend = _with_password_backend()
+    _clear_stores()
+    try:
+        with TestClient(app):
+            pass
+        assert backend.login("mara.modell", DEMO_PASSWORD).principal.roles == {"modeler"}
+    finally:
+        api._auth_backend = original
+        _clear_stores()
+
+
+def test_boot_seed_outside_the_demo_uses_a_random_password_from_the_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A customer install with ``PROCWORKS_LOAD_DEMO`` must not open a modeller
+    login with the password printed on the website.
+    The random password is reported once, in the server log -- like the
+    admin's start password."""
+    monkeypatch.setenv("PROCWORKS_LOAD_DEMO", "1")
+    monkeypatch.delenv("PROCWORKS_DEMO_MODE", raising=False)
+    original = api._auth_backend
+    backend = _with_password_backend()
+    _clear_stores()
+    try:
+        with caplog.at_level("WARNING", logger="procworks.api"), TestClient(app):
+            pass
+        with pytest.raises(AuthError):
+            backend.login("mara.modell", DEMO_PASSWORD)
+        record = next(r for r in caplog.records if "Example accounts created" in r.getMessage())
+        password = record.args[0] if isinstance(record.args, tuple) else None
+        assert isinstance(password, str) and password != DEMO_PASSWORD
+        assert backend.login("mara.modell", password).principal.roles == {"modeler"}
+    finally:
+        api._auth_backend = original
+        _clear_stores()

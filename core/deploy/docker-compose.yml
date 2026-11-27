@@ -1,0 +1,25 @@
+# Local development database for procworks.
+# Start with:  docker compose -f deploy/docker-compose.yml up -d
+# Then set:    DATABASE_URL=postgresql+psycopg://process:process@localhost:5432/procworks
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: procworks-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: process
+      POSTGRES_PASSWORD: process
+      POSTGRES_DB: procworks
+    ports:
+      - "5432:5432"
+    volumes:
+      - procworks_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U process -d procworks"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  procworks_pgdata:

@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: BUSL-1.1 -- see LICENSE
+#
+# Exakte Versionen für die CI (Lint, mypy, pytest, Lizenz-Scan) UND für die
+# Container-Images: core/Dockerfile und das Demo-Image installieren mit
+# `pip install -c requirements-ci.txt` (seit 2026-11-27) -- `-c` legt nur
+# Versionen fest, Test-Werkzeuge landen nicht im Image. Jede Änderung hier
+# ändert damit das ausgelieferte Image: vor dem nächsten Release den
+# Probelauf `gh workflow run release.yml` (Bau + Trivy-Scan). Fehlt hier ein
+# Laufzeitpaket, bricht der Image-Bau mit dessen Namen ab.
+#
+# Warum: pyproject.toml nennt nur Untergrenzen (">="). Ohne diese Datei holte
+# die CI bei jedem Lauf die neueste Version jeder Bibliothek; am 2026-09-24
+# wurde main dadurch rot, ohne dass sich am Code etwas geändert hatte
+# (SQLAlchemy 2.1.0 änderte die Typisierung von func.max). Jetzt ändern sich
+# Versionen nur noch per Commit -- in der Regel über einen Dependabot-PR, dessen
+# CI-Lauf das Update prüft, bevor es main erreicht.
+#
+# Die Datei enthält ALLE Pakete (auch transitive), samt PostgreSQL-Treiber
+# (Extra `postgres`): Ohne ihn liefen Typprüfung und Tests des Treibercodes
+# nicht mit. Die CI installiert sie mit `pip install -r` und procworks danach
+# mit `--no-deps`; `pip check` schlägt fehl, wenn eine Abhängigkeit fehlt. Der
+# Lizenz-Scan nimmt die Datei nur als Constraints für die Laufzeitpakete
+# (ohne Extra) und sieht den Treiber (LGPL-3.0) deshalb nicht -- dessen
+# Einordnung steht in THIRD-PARTY-NOTICES.md. Neu erzeugen, wenn sich die
+# Abhängigkeiten in pyproject.toml ändern (Linux/CPython 3.12 ist maßgeblich;
+# macOS löst derzeit dieselbe Menge auf):
+#
+#   python3.12 -m venv /tmp/lock && /tmp/lock/bin/pip install -U pip
+#   /tmp/lock/bin/pip install -e ".[dev,postgres]" pip-licenses
+#   /tmp/lock/bin/pip freeze --exclude-editable  # Ausgabe unter diesen Kopf
+#
+alembic==1.20.1
+annotated-doc==0.0.7
+annotated-types==0.8.0
+anyio==4.16.0
+ast_serialize==0.13.1
+cffi==2.1.1
+click==8.5.1
+cryptography==50.0.2
+fastapi==0.165.0
+h11==0.16.0
+httpcore2==2.16.2
+httptools==0.9.0
+httpx2==2.16.2
+idna==3.20
+iniconfig==2.3.1
+librt==0.17.0
+Mako==1.4.3
+MarkupSafe==3.0.4
+mypy==2.4.1
+mypy_extensions==1.2.0
+opentelemetry-api==1.45.2
+packaging==26.4
+pathspec==1.1.1
+pip-licenses==5.5.5
+pluggy==1.7.0
+prettytable==3.19.0
+psycopg-binary==3.3.9
+psycopg==3.3.9
+pycparser==3.12
+pydantic==2.14.4
+pydantic_core==2.50.5
+Pygments==2.21.0
+pytest==9.2.0
+python-dotenv==1.2.4
+PyYAML==6.0.4
+ruff==0.17.6
+SQLAlchemy==2.1.9
+starlette==1.10.0
+truststore==0.10.5
+typing-inspection==0.4.5
+typing_extensions==4.16.0
+uvicorn==0.54.0
+uvloop==0.23.0
+watchfiles==1.3.0
+wcwidth==0.9.5
+websockets==17.4
